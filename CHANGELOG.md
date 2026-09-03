@@ -4,6 +4,19 @@ Lịch sử phiên bản Javis OS. Bản mới nhất ở trên cùng. Xem ngay 
 
 Định dạng: mỗi phiên bản là một khối `## [x.y.z] - ngày`, bên dưới nhóm thay đổi theo `### Thêm mới / Sửa lỗi / Cải thiện / Bảo mật`.
 
+## [0.18.3] - 2026-09-03
+Thêm một skill hệ thống: **soi một repo GitHub trước khi tin nó**.
+### Thêm mới
+- **Skill `review-github-repo` (Soi repo GitHub).** Dán một link GitHub, Javis clone repo về thư mục tạm, chạy test, gõ lại đúng từng lệnh trong README, đối chiếu tài liệu với code thật, rồi kết luận theo bốn mức: nên dùng, dùng được có điều kiện, chỉ tham khảo, không nên dùng.
+
+  Skill được chưng ra từ một lần soi thật (repo `CodebyKDvn/glimax`) chứ không viết theo lý thuyết. Bảy bước trong skill đúng là bảy bước đã tìm ra lỗi ở lần đó: lệnh trong Quick Start không chạy được vì thứ tự tham số argparse sai, lệnh nhận đường dẫn thì âm thầm quét nhầm thư mục hiện tại và vẫn trả JSON đẹp, con số "giảm 98,9% token" hoá ra là hằng số cứng trong code chứ không phải đo đạc, chạy ba lần ra ba kết quả khác nhau, và có lỗ chèn lệnh shell qua đường dẫn dự án.
+
+  Sáu phép thử độ bền được ghi thành danh sách chạy được: chạy ba lần so kết quả, thử thư mục có `node_modules`/`.venv`, thử đường dẫn có dấu cách, tìm `os.popen`/`shell=True` ghép chuỗi người dùng, thử thiếu dependency tuỳ chọn, và kiểm badge có `.github/workflows` thật hay chỉ là ảnh tĩnh.
+
+  Rào an toàn nằm trong skill: chỉ clone vào thư mục tạm, cấm chạy `install.sh` hay bất cứ script cài đặt nào của repo lạ, và cấm kết luận "hỏng" khi mới chỉ đọc code chứ chưa chạy ra lỗi.
+### Cải thiện
+- **`CLAUDE.md` liệt kê đúng bộ skill hệ thống.** Danh sách cũ còn thiếu `notes`, nay bổ sung cùng `review-github-repo`.
+
 ## [0.18.2] - 2026-08-04
 Ba lỗi người dùng thật báo: **cài đặt chết trên Windows tiếng Việt**, **model báo sai nguyên nhân khi bị chặn ghi file**, và **chạm trần vòng gọi tool rồi dừng không có lối thoát**.
 ### Sửa lỗi
