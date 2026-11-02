@@ -170,6 +170,7 @@ Không đổi so với trước: hỏi trực tiếp trong chat ("hôm nay bán 
 - POS cứ để Chỉ đọc nếu bạn chỉ cần xem báo cáo - không lo Javis vô tình tạo đơn.
 - Tin nhắn đầu sau khi bật máy có thể hơi chậm với kết nối dạng chạy local (Zalo, Webcake) do phải khởi động công cụ - các lượt sau nhanh vì Javis giữ kết nối sống.
 - Nhật ký gọi tool là chỗ đầu tiên nên xem khi nghi Javis "làm gì đó lạ".
+- Kết nối hỏng thì Javis tự nhắn Telegram: lỗi đăng nhập (key hết hạn, token bị thu hồi) báo ngay, lỗi mạng chập chờn phải hỏng khoảng 20 phút liên tục mới báo. Mỗi đợt hỏng chỉ nhắn một lần, sửa xong thì có thêm một tin "đã hoạt động lại". Chưa đấu Telegram thì chỉ thấy chấm đỏ trên trang Kết nối.
 
 ## Sự cố thường gặp
 

@@ -5917,6 +5917,7 @@ async def _start_scheduler():
         print(f"[kanban start] {e}", file=_sys.stderr)
     try:
         connect_health.on_engine_down = _loop_notify   # đèn báo não → Telegram, chỉ 1 lần mỗi đợt chết
+        connect_health.on_conn_alert = _loop_notify    # kết nối MCP hỏng / sống lại → Telegram
         connect_health.start()   # vòng check sức khoẻ kết nối + probe đèn báo não
     except Exception as e:
         print(f"[connect health start] {e}", file=_sys.stderr)

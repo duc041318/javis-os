@@ -111,14 +111,84 @@ async def check_by_id(conn_id, pool=None) -> dict:
 async def sweep(pool=None) -> int:
     """Quét mọi connection đang bật. Trả số connection đã check."""
     n = 0
+    checked = []
     for conn in mcp_store.resolved(enabled_only=True):
         try:
-            await check_one(conn, pool)
+            rec = await check_one(conn, pool)
+            checked.append((conn, rec))
             n += 1
         except Exception as e:   # lỗi 1 connection không được giết cả vòng
             print(f"[connect health] {conn.get('label')}: {type(e).__name__}: {e}",
                   file=sys.stderr)
+    await _alert_transitions(checked)
     return n
+
+
+# ─────────────── Báo kết nối hỏng / sống lại ───────────────
+# Trang Kết nối có chấm đỏ, nhưng không ai mở trang đó mỗi ngày. Key Postiz hết hạn, token
+# n8n bị thu hồi, phiên Google rớt... thì nhắc hẹn và loop dùng kết nối đó cứ chạy thất bại
+# hằng ngày mà chủ không hay biết. Nên vòng quét nền tự BÁO qua cùng kênh với đèn báo não.
+#
+# Luật chống ồn:
+#   - Lỗi đăng nhập (auth) báo NGAY vòng đầu: nó không tự khỏi, chờ thêm chỉ phí thời gian.
+#   - Lỗi khác (mạng, dịch vụ chập chờn, spawn) phải hỏng ALERT_AFTER vòng LIÊN TIẾP mới báo
+#     (~20 phút), để một lần mạng rớt không thành một tin nhắn hoảng hốt.
+#   - Mỗi đợt hỏng chỉ báo MỘT lần; sống lại thì báo một câu "đã ổn" rồi reset.
+#   - Nhiều kết nối hỏng cùng vòng gom thành MỘT tin.
+# Chỉ vòng quét NỀN mới báo; nút Test trên UI (check_by_id) không gửi gì - người bấm đang
+# nhìn màn hình rồi.
+
+ALERT_AFTER = 2           # số vòng hỏng liên tiếp trước khi báo (trừ lỗi auth)
+on_conn_alert = None      # main.py gắn: async fn(text) gửi Telegram
+_alerts: dict = {}        # conn_id -> {"fails": int, "notified": bool}
+
+
+def _conn_name(conn) -> str:
+    return (conn.get("label") or conn.get("connector_id") or conn.get("id") or "?").strip()
+
+
+def _collect_alerts(checked) -> tuple[list, list]:
+    """Cập nhật bộ đếm, trả (dòng_hỏng_mới, dòng_sống_lại) cần báo ở vòng này."""
+    down, up = [], []
+    for conn, rec in checked:
+        cid = conn.get("id")
+        if not cid:
+            continue
+        st = _alerts.setdefault(cid, {"fails": 0, "notified": False})
+        if rec.get("ok"):
+            if st["notified"]:
+                up.append(_conn_name(conn))
+            st.update(fails=0, notified=False)
+            continue
+        st["fails"] += 1
+        need = 1 if rec.get("kind") == "auth" else ALERT_AFTER
+        if st["fails"] >= need and not st["notified"]:
+            st["notified"] = True
+            down.append(f"- {_conn_name(conn)}: {rec.get('message') or 'không phản hồi'}")
+    return down, up
+
+
+def _alert_text(down, up) -> str:
+    parts = []
+    if down:
+        parts.append("⚠ Kết nối đang hỏng:\n" + "\n".join(down)
+                     + "\nNhắc hẹn, loop và việc nền dùng các kết nối này sẽ lỗi cho tới khi sửa."
+                       " Mở trang Kết nối trên Javis để xử lý.")
+    if up:
+        parts.append("✅ Đã hoạt động lại: " + ", ".join(up) + ".")
+    return "\n\n".join(parts)
+
+
+async def _alert_transitions(checked) -> None:
+    down, up = _collect_alerts(checked)
+    if not (down or up) or not on_conn_alert:
+        return
+    try:
+        coro = on_conn_alert(_alert_text(down, up))
+        if asyncio.iscoroutine(coro):
+            await coro
+    except Exception as e:
+        print(f"[connect health] báo kết nối lỗi: {e}", file=sys.stderr)
 
 
 def snapshot() -> dict:
@@ -130,6 +200,7 @@ def snapshot() -> dict:
 def forget(conn_id) -> None:
     """Xoá trạng thái khi connection bị xoá (khỏi hiện ma)."""
     _state.pop(conn_id, None)
+    _alerts.pop(conn_id, None)
 
 
 # ─────────────── Đèn báo não (engine health) ───────────────

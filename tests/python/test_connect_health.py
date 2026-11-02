@@ -272,6 +272,132 @@ def test_probe_mac_doc_keychain_khong_bao_do_oan(tmp_path, monkeypatch):
     assert ok is False and "hết hạn" in msg
 
 
+# ---- Báo kết nối hỏng / sống lại ----
+
+class _SwitchPool(_FakePool):
+    """Pool giả: id nằm trong `dead` thì ném lỗi `err`, còn lại sống."""
+    def __init__(self):
+        super().__init__()
+        self.dead = {}
+
+    async def list_tools(self, spec):
+        self.calls += 1
+        if spec["key"] in self.dead:
+            raise self.dead[spec["key"]]
+        return self.tools
+
+
+def _setup_alerts(monkeypatch, conns):
+    import mcp_store
+    connect_health._state.clear()
+    connect_health._alerts.clear()
+    sent = []
+    monkeypatch.setattr(mcp_store, "resolved", lambda enabled_only=True: conns)
+
+    async def fake_notify(text):
+        sent.append(text)
+    monkeypatch.setattr(connect_health, "on_conn_alert", fake_notify)
+    return sent
+
+
+def test_loi_mang_phai_hong_hai_vong_moi_bao(monkeypatch):
+    sent = _setup_alerts(monkeypatch, [_conn("p1", label="Postiz")])
+    pool = _SwitchPool()
+    pool.dead["p1"] = RuntimeError("timed out")
+    asyncio.run(connect_health.sweep(pool))
+    assert sent == [], "một lần mạng rớt không được thành tin nhắn"
+    asyncio.run(connect_health.sweep(pool))
+    assert len(sent) == 1 and "Postiz" in sent[0] and "Kết nối đang hỏng" in sent[0]
+    # Hỏng tiếp: không báo lại
+    asyncio.run(connect_health.sweep(pool))
+    asyncio.run(connect_health.sweep(pool))
+    assert len(sent) == 1
+
+
+def test_loi_dang_nhap_bao_ngay_vong_dau(monkeypatch):
+    sent = _setup_alerts(monkeypatch, [_conn("n1", label="n8n")])
+    pool = _SwitchPool()
+    pool.dead["n1"] = RuntimeError("HTTP 401 Unauthorized")
+    asyncio.run(connect_health.sweep(pool))
+    assert len(sent) == 1 and "n8n" in sent[0] and "Kết nối lại" in sent[0]
+
+
+def test_song_lai_bao_mot_cau_roi_reset(monkeypatch):
+    sent = _setup_alerts(monkeypatch, [_conn("p1", label="Postiz")])
+    pool = _SwitchPool()
+    pool.dead["p1"] = RuntimeError("HTTP 401 Unauthorized")
+    asyncio.run(connect_health.sweep(pool))
+    pool.dead.clear()
+    asyncio.run(connect_health.sweep(pool))
+    assert len(sent) == 2 and "Đã hoạt động lại: Postiz" in sent[1]
+    asyncio.run(connect_health.sweep(pool))
+    assert len(sent) == 2, "sống tiếp thì im"
+    # Đợt hỏng MỚI được báo lại
+    pool.dead["p1"] = RuntimeError("HTTP 401 Unauthorized")
+    asyncio.run(connect_health.sweep(pool))
+    assert len(sent) == 3
+
+
+def test_khong_bao_song_lai_khi_chua_tung_bao_hong(monkeypatch):
+    sent = _setup_alerts(monkeypatch, [_conn("p1")])
+    pool = _SwitchPool()
+    pool.dead["p1"] = RuntimeError("timed out")
+    asyncio.run(connect_health.sweep(pool))   # hỏng 1 vòng, chưa đủ ngưỡng
+    pool.dead.clear()
+    asyncio.run(connect_health.sweep(pool))
+    assert sent == []
+
+
+def test_nhieu_ket_noi_hong_gom_mot_tin(monkeypatch):
+    sent = _setup_alerts(monkeypatch, [_conn("a", label="Postiz"), _conn("b", label="Gmail"),
+                                       _conn("c", label="Sheets")])
+    pool = _SwitchPool()
+    pool.dead["a"] = RuntimeError("401 unauthorized")
+    pool.dead["b"] = RuntimeError("invalid_grant")
+    asyncio.run(connect_health.sweep(pool))
+    assert len(sent) == 1
+    assert "Postiz" in sent[0] and "Gmail" in sent[0] and "Sheets" not in sent[0]
+
+
+def test_chua_gan_kenh_bao_thi_im_lang_khong_no(monkeypatch):
+    _setup_alerts(monkeypatch, [_conn("a")])
+    monkeypatch.setattr(connect_health, "on_conn_alert", None)
+    pool = _SwitchPool()
+    pool.dead["a"] = RuntimeError("401 unauthorized")
+    assert asyncio.run(connect_health.sweep(pool)) == 1
+
+
+def test_kenh_bao_loi_khong_giet_vong_quet(monkeypatch):
+    _setup_alerts(monkeypatch, [_conn("a")])
+
+    async def boom(text):
+        raise RuntimeError("telegram down")
+    monkeypatch.setattr(connect_health, "on_conn_alert", boom)
+    pool = _SwitchPool()
+    pool.dead["a"] = RuntimeError("401 unauthorized")
+    assert asyncio.run(connect_health.sweep(pool)) == 1
+
+
+def test_nut_test_tren_ui_khong_gui_tin(monkeypatch):
+    sent = _setup_alerts(monkeypatch, [_conn("a")])
+    import mcp_store
+    monkeypatch.setattr(mcp_store, "resolved", lambda enabled_only=False: [_conn("a")])
+    pool = _SwitchPool()
+    pool.dead["a"] = RuntimeError("401 unauthorized")
+    asyncio.run(connect_health.check_by_id("a", pool))
+    assert sent == []
+
+
+def test_forget_xoa_bo_dem_canh_bao(monkeypatch):
+    _setup_alerts(monkeypatch, [_conn("a")])
+    pool = _SwitchPool()
+    pool.dead["a"] = RuntimeError("401 unauthorized")
+    asyncio.run(connect_health.sweep(pool))
+    assert "a" in connect_health._alerts
+    connect_health.forget("a")
+    assert "a" not in connect_health._alerts
+
+
 if __name__ == "__main__":
     # CI chạy TỪNG FILE như script (`python tests/python/test_x.py`), không gọi pytest.
     # Thiếu block này thì file chỉ định nghĩa hàm rồi thoát 0 - test "xanh" mà chưa từng

@@ -4,6 +4,13 @@ Lịch sử phiên bản Javis OS. Bản mới nhất ở trên cùng. Xem ngay 
 
 Định dạng: mỗi phiên bản là một khối `## [x.y.z] - ngày`, bên dưới nhóm thay đổi theo `### Thêm mới / Sửa lỗi / Cải thiện / Bảo mật`.
 
+## [0.18.4] - 2026-11-02
+Kết nối hỏng thì Javis **tự nhắn Telegram**, không bắt người dùng phải mở trang Kết nối mới biết.
+### Thêm mới
+- **Báo kết nối hỏng và sống lại.** Trước đây vòng quét sức khoẻ chỉ tô chấm đỏ trên trang Kết nối. Không ai mở trang đó mỗi ngày, nên key Postiz hết hạn, token n8n bị thu hồi hay phiên Google rớt thì nhắc hẹn và loop dùng kết nối đó cứ thất bại hằng ngày mà chủ không hay. Nay vòng quét nền gửi tin qua cùng kênh với đèn báo não.
+
+  Luật chống ồn: lỗi đăng nhập báo ngay vòng đầu vì nó không tự khỏi; lỗi mạng hay dịch vụ chập chờn phải hỏng hai vòng liên tiếp (khoảng 20 phút) mới báo. Mỗi đợt hỏng chỉ báo một lần, sống lại thì báo một câu "đã hoạt động lại". Nhiều kết nối hỏng cùng lúc gom thành một tin. Nút Test trên trang Kết nối không gửi gì, vì người bấm đang nhìn màn hình rồi.
+
 ## [0.18.3] - 2026-11-02
 Thêm connector **Postiz**: Javis lên lịch và đăng bài lên Facebook, Instagram, TikTok, YouTube, LinkedIn, Threads, X... bằng lời, qua MCP chính chủ của Postiz.
 ### Thêm mới
