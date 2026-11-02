@@ -4,6 +4,18 @@ Lịch sử phiên bản Javis OS. Bản mới nhất ở trên cùng. Xem ngay 
 
 Định dạng: mỗi phiên bản là một khối `## [x.y.z] - ngày`, bên dưới nhóm thay đổi theo `### Thêm mới / Sửa lỗi / Cải thiện / Bảo mật`.
 
+## [0.18.3] - 2026-11-02
+Thêm connector **Postiz**: Javis lên lịch và đăng bài lên Facebook, Instagram, TikTok, YouTube, LinkedIn, Threads, X... bằng lời, qua MCP chính chủ của Postiz.
+### Thêm mới
+- **Connector Postiz** ở trang Kết nối, nhóm Mạng xã hội. Dán API key (Postiz > Settings > Public API) là xong. Dùng Postiz Cloud thì để trống ô địa chỉ; tự cài Postiz trên VPS thì gõ trang Postiz của mình, Javis tự ghép thành `<địa chỉ>/api/mcp`.
+
+  Đấu MCP chứ không viết plugin, vì Postiz đã có sẵn MCP server với đủ bộ tool (xem kênh, xem lịch bài, tải ảnh, tạo bài, xoá bài). Viết lại bằng plugin chỉ đẻ thêm một bản sao phải tự bảo trì.
+### Bảo mật
+- **Mức Ghi nháp tạo được bài NHÁP trên Postiz nhưng không lên lịch hay đăng thật được.** Postiz gộp ba việc vào MỘT tool (`integrationSchedulePostTool`), phân biệt bằng tham số lồng `socialPost[].type` = draft | schedule | now. Phân loại theo tên tool thì chỉ có hai lựa chọn tệ: xếp nó vào nhóm ghi thường là mức Ghi nháp tự đăng bài lên Fanpage được, còn xếp vào nhóm nguy hiểm thì mức Ghi nháp không soạn nổi một bản nháp để người dùng duyệt.
+
+  Catalog có thêm khối `draft_rules`: toàn bộ bài trong lô là nháp thì tính là ghi thường, chỉ cần MỘT bài lên lịch hoặc đăng ngay là cả lời gọi bị coi là nguy hiểm. Thiếu tham số, sai kiểu, danh sách rỗng đều rơi về nguy hiểm. Nhờ vậy quy trình an toàn chạy được: loop ở chế độ `auto` soạn sẵn bài nháp, người dùng mở Postiz duyệt rồi tự bấm lên lịch.
+- Kết nối mới mặc định **Chỉ đọc**. Xoá bài, sửa cài đặt bài đã lên lịch, lên lịch và đăng ngay chỉ chạy ở mức Toàn quyền.
+
 ## [0.18.2] - 2026-08-04
 Ba lỗi người dùng thật báo: **cài đặt chết trên Windows tiếng Việt**, **model báo sai nguyên nhân khi bị chặn ghi file**, và **chạm trần vòng gọi tool rồi dừng không có lối thoát**.
 ### Sửa lỗi

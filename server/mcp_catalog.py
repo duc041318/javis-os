@@ -55,7 +55,7 @@ def get(cid):
 
 
 def public_catalog():
-    """Bản cho UI - đủ vẽ kho + form đăng nhập, không lộ chi tiết nội bộ (validate/arg_rules)."""
+    """Bản cho UI - đủ vẽ kho + form đăng nhập, không lộ chi tiết nội bộ (validate/arg_rules/draft_rules)."""
     out = []
     for c in load().values():
         auth = c.get("auth") or {}
@@ -209,6 +209,22 @@ def classify(connector, tool, args=None):
 
     if _in(meta.get("read")):
         return "read"
+
+    # Tool tạo bài mà một tham số LỒNG quyết định đăng thật hay chỉ lưu nháp (vd Postiz:
+    # socialPost[].type = draft|schedule|now). Toàn bộ là nháp → "write" (mức Ghi nháp làm được);
+    # còn lại, kể cả thiếu/sai kiểu → "danger" (fail-closed). Lúc LIST (args=None) tạm "write"
+    # để tool còn hiện ở mức Ghi nháp; chặn thật lúc call khi đã có args.
+    dr = c.get("draft_rules") or {}
+    if dr and _in(dr.get("tools")):
+        if args is None:
+            return "write"
+        items = args.get(dr.get("list")) if isinstance(args, dict) else None
+        drafts = {str(x).lower() for x in dr.get("draft_values") or []}
+        if (isinstance(items, list) and items and drafts
+                and all(isinstance(i, dict) and str(i.get(dr.get("field"))).lower() in drafts
+                        for i in items)):
+            return "write"
+        return "danger"
 
     rules = c.get("arg_rules") or {}
     param = rules.get("param")

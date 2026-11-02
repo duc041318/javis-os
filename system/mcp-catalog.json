@@ -1180,6 +1180,57 @@
       },
       "default_perm": "readonly",
       "risk": "Mức Ghi nháp cho phép Javis TẠO và SỬA workflow thật trên n8n của bạn.\n\nMức Toàn quyền thêm quyền CHẠY workflow - đây là chỗ nguy hiểm nhất.\nMột workflow chạy lên có thể gửi mail, đăng bài, gọi API tính tiền, đẩy dữ liệu ra ngoài.\nJavis không nhìn được bên trong workflow làm gì, và chạy rồi thì không hoàn tác được.\n\nChỉ cần xem và soạn workflow thì giữ mức Chỉ đọc hoặc Ghi nháp.\n\nLưu ý: token này thấy MỌI workflow và cả danh sách credential mà tài khoản n8n của bạn thấy."
+    },
+    {
+      "id": "postiz",
+      "name": "Postiz",
+      "icon": "/static/logos/postiz.svg",
+      "category": "Mạng xã hội",
+      "description": "Lên lịch và đăng bài lên Facebook, Instagram, TikTok, YouTube, LinkedIn, Threads, X... qua MCP chính chủ của Postiz. Dùng Postiz Cloud hoặc Postiz tự cài.",
+      "status": "beta",
+      "transport": "http",
+      "url": "https://api.postiz.com/mcp",
+      "url_template": "{postiz_url}/api/mcp",
+      "auth": {
+        "type": "apikey",
+        "fields": [
+          { "key": "api_key", "label": "Postiz API key", "placeholder": "Dán API key từ Postiz > Settings > Public API...", "header": "Authorization: Bearer {api_key}" },
+          { "key": "postiz_url", "label": "Địa chỉ Postiz tự cài (bỏ trống nếu dùng Postiz Cloud)", "placeholder": "Ví dụ: https://postiz.cong-ty.vn", "url_base": true, "optional": true }
+        ],
+        "guide": "Làm 1 lần:\n1. Đăng nhập Postiz, nối sẵn các kênh mạng xã hội trong Postiz (Facebook, TikTok...).\n2. Vào Settings > Public API, copy API key.\n3. Dán API key vào ô đầu tiên.\n4. Dùng Postiz Cloud (postiz.com) thì bỏ trống ô địa chỉ. Tự cài Postiz trên VPS thì dán địa chỉ trang Postiz của bạn - Javis tự ghép thành <địa chỉ>/api/mcp.\n\nJavis chỉ đăng được lên những kênh đã nối trong Postiz. Thêm kênh mới thì vào Postiz nối trước.\n\nPostiz tự cài mà backend để ở tên miền riêng (không phải /api) thì thêm bằng connector tuỳ chỉnh, URL <backend>/mcp, header Authorization: Bearer <API key>.",
+        "guide_url": "https://docs.postiz.com/public-api",
+        "steps": [
+          { "text": "Đăng nhập Postiz (Cloud hoặc bản tự cài trên VPS).", "link": "https://platform.postiz.com", "link_label": "Mở Postiz Cloud" },
+          { "text": "Trong Postiz, nối sẵn các kênh mạng xã hội muốn đăng (Facebook, Instagram, TikTok...). Javis chỉ đăng được lên kênh đã nối ở đây." },
+          { "text": "Vào Settings > Public API, copy API key rồi gõ vào ô API key bên dưới." },
+          { "text": "Dùng Postiz Cloud thì để trống ô thứ hai. Tự cài trên VPS thì gõ vào đó trang Postiz của bạn (vd https://postiz.cong-ty.vn), Javis tự ghép thành /api/mcp. Xong bấm Kết nối.", "link": "https://docs.postiz.com/public-api", "link_label": "Hướng dẫn của Postiz" }
+        ]
+      },
+      "validate": { "tool": "integrationList", "args": {} },
+      "tool_meta": {
+        "read": [
+          "integrationList", "groupList", "integrationSchema", "postsListTool",
+          "mediaListTool", "mediaStatusTool", "videoStatusTool", "clippingStatusTool",
+          "uploadWidgetStatusTool", "generateVideoOptions", "videoFunctionTool"
+        ],
+        "write": [
+          "uploadFromUrlTool", "uploadWidgetTool", "uploadWidgetTicketTool",
+          "generateImageTool", "generateVideoTool", "clippingTool", "clippingWidgetTicketTool",
+          "triggerTool", "integrationTriggerTool"
+        ],
+        "danger": [
+          "integrationSchedulePostTool", "schedulePostTool", "postSettingsTool",
+          "deletePostTool", "*schedule*", "*delete*", "*publish*"
+        ]
+      },
+      "draft_rules": {
+        "tools": ["integrationSchedulePostTool", "schedulePostTool"],
+        "list": "socialPost",
+        "field": "type",
+        "draft_values": ["draft"]
+      },
+      "default_perm": "readonly",
+      "risk": "Mức Chỉ đọc: xem danh sách kênh, xem lịch bài đã lên, xem thư viện ảnh. Không đụng gì.\n\nMức Ghi nháp: thêm quyền tải ảnh/video vào thư viện Postiz, tạo ảnh/video bằng AI của Postiz (tiêu credit Postiz), và tạo bài NHÁP. Bài nháp nằm trong Postiz chờ bạn duyệt, chưa đăng ra ngoài.\n\nMức Toàn quyền: thêm quyền LÊN LỊCH và ĐĂNG NGAY bài thật lên mạng xã hội, sửa và XOÁ bài đã lên lịch. Bài đã đăng thì người theo dõi thấy ngay, không hoàn tác được.\n\nGợi ý: để Ghi nháp cho Javis soạn sẵn bài, bạn mở Postiz duyệt rồi bấm lên lịch. Chỉ nâng Toàn quyền khi đã tin quy trình.\n\nAPI key Postiz thấy MỌI kênh trong tổ chức Postiz của bạn."
     }
   ]
 }
