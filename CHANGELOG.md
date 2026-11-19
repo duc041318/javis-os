@@ -13,6 +13,8 @@ Lịch sử phiên bản Javis OS. Bản mới nhất ở trên cùng. Xem ngay 
 - Họp: Javis đưa đề xuất, mỗi thành viên phản biện độc lập (đồng ý, đồng ý một phần, phản đối, kèm lý do và phương án khác). Javis sửa đề xuất qua từng vòng rồi chốt kết luận chung. Hết số vòng thì phải chốt, ý kiến còn phản đối được ghi lại.
 - Mọi việc ghi thành nhật ký bằng chữ: hỏi "phòng họp đang làm gì" hoặc mở /ext/javis-council/.
 - Muse gọi từ đám mây Meta nên Javis cần tên miền HTTPS (Cài đặt → Tên miền riêng).
+### Sửa lỗi
+- **CI chạy lại được.** Kho bật luật bắt mọi action GitHub ghim theo mã commit đầy đủ, nên mọi job bị chặn ngay bước đầu. Các workflow giờ ghim action theo mã commit, vẫn ghi kèm số bản cho dễ đọc.
 
 ## [0.438.7] - 2026-11-02
 ### Sửa lỗi

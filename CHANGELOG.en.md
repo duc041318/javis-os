@@ -15,6 +15,8 @@ Format: each release is a `## [x.y.z] - date` block, with changes grouped under 
 - Meetings: Javis makes a proposal, each member critiques it independently (agree, partly agree, object, with reasons and an alternative). Javis revises round by round, then records one shared decision. When the rounds run out Javis must decide, and any remaining objection is kept on record.
 - Everything is logged as plain text: ask "what is the meeting room doing" or open /ext/javis-council/.
 - Muse calls from Meta's cloud, so Javis needs an HTTPS domain (Settings → Custom domain).
+### Fixed
+- **CI runs again.** The repository requires every GitHub action pinned to a full commit SHA, so every job was blocked at its first step. The workflows now pin each action by SHA, with the version noted beside it.
 
 ## [0.438.7] - 2026-11-02
 ### Fixed
