@@ -8,6 +8,16 @@ English entries start at 0.66.0. Every earlier release is described in the Vietn
 
 Format: each release is a `## [x.y.z] - date` block, with changes grouped under `### Added / Fixed / Improved / Security`.
 
+## [0.439.0] - 2026-11-19
+### Added
+- **Meeting room: Javis leads, assigns work to Hermes and Muse, and chairs debate meetings with them.** Say "add Hermes to the meeting room" and Javis hands back a key and the connect command. Hermes (home computer) and Muse (Meta's app) connect to the same MCP address on Javis, each with its own key.
+- Assign work in words: "have Hermes summarize the three Soc Son projects". The job waits in Hermes's inbox; when Hermes finishes, the result rings the bell.
+- Meetings: Javis makes a proposal, each member critiques it independently (agree, partly agree, object, with reasons and an alternative). Javis revises round by round, then records one shared decision. When the rounds run out Javis must decide, and any remaining objection is kept on record.
+- Everything is logged as plain text: ask "what is the meeting room doing" or open /ext/javis-council/.
+- Muse calls from Meta's cloud, so Javis needs an HTTPS domain (Settings → Custom domain).
+### Fixed
+- **CI runs again.** The repository requires every GitHub action pinned to a full commit SHA, so every job was blocked at its first step. The workflows now pin each action by SHA, with the version noted beside it.
+
 ## [0.438.7] - 2026-11-02
 ### Fixed
 - **Claude sign-in finishes on its own when the browser says it worked.** On a machine with a browser, Claude opens the sign-in page itself and the page only says "You're all set up", with no code to paste. The Models card used to keep waiting for a code until the page was reloaded. It now switches to Signed in within a few seconds, or as soon as you come back to the Javis tab.

@@ -118,6 +118,8 @@ OWNER_ONLY_TOOLS = frozenset({"javis_reply_policy", "javis_reply_policy_tune", "
                               "javis_notify",
                               # 2026-10-25: writes code that runs in the server (installed OFF, still owner's call).
                               "javis_plugin",
+                              # 0.439.0: giao việc cho agent ngoài của chủ (Hermes, Muse) và cấp khoá cho chúng.
+                              "javis_council",
                               # 0.259.0: tìm và đọc web. Bot nói chuyện với khách lạ không được biến
                               # máy chủ của chủ thành máy đi đọc web hộ bất kỳ ai nhắn tới.
                               "javis_web_search", "javis_web_fetch"})
