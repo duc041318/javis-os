@@ -8,7 +8,11 @@ Lịch sử phiên bản Javis OS. Bản mới nhất ở trên cùng. Xem ngay 
 
 ## [0.439.0] - 2026-11-19
 ### Thêm mới
-- **Phòng họp: Javis giao việc và họp cùng Hermes và Muse.** (đang viết)
+- **Phòng họp: Javis làm đầu não, giao việc và họp phản biện với Hermes và Muse.** Nói với Javis "thêm Hermes vào phòng họp" là có ngay khoá và lệnh gắn. Hermes (máy tính nhà) và Muse (app của Meta) gắn vào cùng một địa chỉ MCP trên Javis, mỗi bên một khoá riêng.
+- Giao việc bằng lời: "giao Hermes tóm tắt 3 dự án Sóc Sơn". Việc nằm trong hộp thư của Hermes, Hermes làm xong báo về chuông.
+- Họp: Javis đưa đề xuất, mỗi thành viên phản biện độc lập (đồng ý, đồng ý một phần, phản đối, kèm lý do và phương án khác). Javis sửa đề xuất qua từng vòng rồi chốt kết luận chung. Hết số vòng thì phải chốt, ý kiến còn phản đối được ghi lại.
+- Mọi việc ghi thành nhật ký bằng chữ: hỏi "phòng họp đang làm gì" hoặc mở /ext/javis-council/.
+- Muse gọi từ đám mây Meta nên Javis cần tên miền HTTPS (Cài đặt → Tên miền riêng).
 
 ## [0.438.7] - 2026-11-02
 ### Sửa lỗi

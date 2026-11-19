@@ -1,0 +1,12 @@
+name: Phòng họp
+name_en: "Meeting room"
+slug: javis-council
+version: 1.0.0
+description: Javis làm đầu não giao việc và chủ trì họp phản biện với các agent ngoài (Hermes, Muse...) qua một cổng MCP có khoá riêng cho từng thành viên. Mọi việc ghi thành nhật ký bằng chữ.
+description_en: "Javis acts as the lead: it assigns work to outside agents (Hermes, Muse...) and chairs debate meetings with them through an MCP endpoint with one key per member. Everything is logged as plain text."
+author: Javis (bundled)
+enabled: true
+min_mode: safe
+tools:
+  - javis_council
+hooks: []
