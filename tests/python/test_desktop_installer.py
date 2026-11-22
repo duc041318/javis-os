@@ -388,7 +388,8 @@ check("CANARY: a signing request is sent only when the publish is going to repla
       "run: bash packaging/publish-desktop.sh --plan" in sign_job
       and sign_job.count("if: steps.plan.outputs.replace == 'true'") == 3)
 check("SignPath signs the artifact of the windows job of the same run",
-      "signpath/github-action-submit-signing-request@v3" in sign_job
+      # a tag or a full commit SHA pin (forks whose Actions policy requires pinned actions)
+      re.search(r"signpath/github-action-submit-signing-request@(v3|[0-9a-f]{40} # v3)\b", sign_job)
       and "github-artifact-id: ${{ needs.windows.outputs.artifact-id }}" in sign_job
       and "artifact-id: ${{ steps.upload.outputs.artifact-id }}" in win_job and "id: upload" in win_job)
 check("the SignPath token is a secret, never a variable or a literal",
@@ -396,7 +397,7 @@ check("the SignPath token is a secret, never a variable or a literal",
 check("the signed file is checked before it is handed on",
       "Get-AuthenticodeSignature" in sign_job and 'if ($sig.Status -ne "Valid")' in sign_job)
 check("CANARY: publish picks artifacts by name (signed and unsigned .exe share one file name)",
-      "merge-multiple" not in publish_job and publish_job.count("actions/download-artifact@v4") == 3
+      "merge-multiple" not in publish_job and len(re.findall(r"actions/download-artifact@(v4|[0-9a-f]{40} # v4)\b", publish_job)) == 3
       and "name: JavisOS-Setup-signed" in publish_job
       and "cp -f out-signed/JavisOS-Setup.exe out/JavisOS-Setup.exe" in publish_job)
 check("CANARY: a failed signing stops the publish, a skipped one does not",
