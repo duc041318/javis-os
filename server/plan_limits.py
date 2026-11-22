@@ -18,6 +18,12 @@ Grok Build and Antigravity report no meter at all (only token counts). For them,
 above, `ghi_het` records the moment the CLI refused a turn for running out of plan quota (the chat
 turn's limit detector calls it), so the ring can at least turn red then. It stays red until the
 reset time the CLI gave, or for an hour when it gave none.
+
+A refusal remembers the model it happened on (owner's report 20/11/2026: Claude Code on a Team plan, the ring red at
+66% and 58% after a refusal on one model, and still red after switching to another). It goes when the owner picks a
+model on purpose (`clear_het`, through main._clear_pin_limit) or when a later turn of the same brain succeeds
+(`lift_het`). A success on ANOTHER model proves the refusal was that model's own limit: the refusal is then `scoped`,
+the ring follows the meters, and only the model that was refused stays marked.
 """
 from __future__ import annotations
 
@@ -38,6 +44,9 @@ CANH_BAO = 50     # % from which the ring turns amber
 SAT = 80          # % from which it turns red: close to the 5-hour or the weekly limit
 
 HET_MAC_DINH_S = 3600   # how long "ran out" stays red when the CLI gave no reset time
+# Claude Code limit windows that bind ONE model family (or its usage credits), not the whole plan: a rejection on one
+# of them leaves every other model usable, so it never paints the plan red.
+MODEL_WINDOWS = ("seven_day_opus", "seven_day_sonnet", "seven_day_overage_included", "overage")
 # Engine names of the chat turn's limit detector (limit_learner) -> brain keys here.
 BRAIN_THEO_ENGINE = {"claude-code": "claude", "codex": "codex", "grok-cli": "grok", "antigravity-cli": "agy"}
 BRAINS = ("claude", "codex", "grok", "agy")
@@ -91,7 +100,7 @@ def _cua_so(pct, resets_at) -> Optional[dict]:
 def tu_claude(info: dict) -> dict:
     """`rate_limit_info` of a Claude Code rate_limit_event (the raw dict) -> {five_hour, seven_day, status}."""
     info = info if isinstance(info, dict) else {}
-    out = {"status": str(info.get("status") or "")}
+    out = {"status": str(info.get("status") or ""), "limit_type": str(info.get("rateLimitType") or "")}
     uw = info.get("unifiedWindows")
     if isinstance(uw, dict):
         for k in (NAM_GIO, TUAN):
@@ -127,8 +136,29 @@ def tu_codex(snap: dict) -> dict:
     return out
 
 
+def _usable_again(snap: dict, merged: dict, now: float) -> bool:
+    """Does this report say the plan takes requests again? Claude Code states it in `status`.
+
+    Codex sends no status, so its numbers decide: every window still running must read below the red mark (SAT).
+    Usage inside a window only grows, so a low number after a refusal means the plan was reset. Merely "below
+    100%" is not enough: the last report before the refusal reads just under it, and a rollout file can carry
+    that report with a later timestamp."""
+    status = str(snap.get("status") or "")
+    if status:
+        return status in ("allowed", "allowed_warning") or (
+            status == "rejected" and str(snap.get("limit_type") or "") in MODEL_WINDOWS)
+    live = [w for w in (merged.get(k) for k in (NAM_GIO, TUAN))
+            if isinstance(w, dict) and not (w.get("resets_at") and w["resets_at"] <= now)]
+    return bool(live) and all(float(w.get("pct") or 0) < SAT for w in live)
+
+
 def ghi(brain: str, snap: dict, now: float = None):
-    """Store one brain's snapshot. A window the report leaves out keeps its last value."""
+    """Store one brain's snapshot. A window the report leaves out keeps its last value.
+
+    A report measured AFTER a refusal that shows the plan usable again lifts that refusal (`het`): the owner
+    reset the plan on the provider's site, or the window reopened early. Otherwise the ring stayed red and
+    Javis's own work stayed paused until the reset time the old refusal named. A report measured before the
+    refusal, or in the same second, never lifts it."""
     if not any(k in snap for k in (NAM_GIO, TUAN)):
         return
     now = time.time() if now is None else now
@@ -137,7 +167,12 @@ def ghi(brain: str, snap: dict, now: float = None):
         cu = d.get(brain) if isinstance(d.get(brain), dict) else {}
         moi = dict(cu)
         moi.update({k: v for k, v in snap.items() if v not in (None, "")})
+        if "status" in snap:
+            moi["limit_type"] = str(snap.get("limit_type") or "")   # a later report naming no window clears the old one
         moi["at"] = int(now)
+        h = moi.get("het")
+        if isinstance(h, dict) and int(now) > int(h.get("at") or 0) and _usable_again(snap, moi, now):
+            moi.pop("het", None)
         d[brain] = moi
         _ghi_file(d)
 
@@ -146,8 +181,9 @@ def la_het_han_muc(loi: str) -> bool:
     return bool(_HET_RE.search(str(loi or "")))
 
 
-def ghi_het(engine: str, reset_epoch: float = 0.0, now: float = None):
-    """The CLI just refused a turn for plan quota: the ring turns red until the reset (or an hour)."""
+def ghi_het(engine: str, reset_epoch: float = 0.0, now: float = None, model: str = ""):
+    """The CLI just refused a turn for plan quota: the ring turns red until the reset (or an hour).
+    `model`: the model the refused turn ran on, "" when unknown."""
     brain = BRAIN_THEO_ENGINE.get(str(engine or ""), "")
     if not brain:
         return
@@ -157,9 +193,82 @@ def ghi_het(engine: str, reset_epoch: float = 0.0, now: float = None):
     with _lock:
         d = _doc_file()
         b = dict(d.get(brain) if isinstance(d.get(brain), dict) else {})
-        b["het"] = {"at": int(now), "reset": int(reset), "until": int(reset or now + HET_MAC_DINH_S)}
+        b["het"] = {"at": int(now), "reset": int(reset), "until": int(reset or now + HET_MAC_DINH_S),
+                    "model": str(model or "").strip()}
         d[brain] = b
         _ghi_file(d)
+
+
+def model_key(model: str) -> str:
+    """A model id reduced to what tells two picks apart: "claude-opus-5-5[1m]" and "opus-5-5" are one model."""
+    m = str(model or "").strip().lower().split("/")[-1]
+    m = re.sub(r"\[[^\]]*\]$", "", m)
+    m = re.sub(r"[-@]\d{8}$", "", m)
+    return m[len("claude-"):] if m.startswith("claude-") else m
+
+
+def same_model(a: str, b: str) -> bool:
+    """Could `a` and `b` be the same model? An alias ("opus", "fable") matches every version of its family, since
+    the CLI resolves it on its own. Unknown ("") matches anything: no proof they differ."""
+    ka, kb = model_key(a), model_key(b)
+    if not ka or not kb or ka == kb:
+        return True
+    short, long_ = (ka, kb) if len(ka) < len(kb) else (kb, ka)
+    return "-" not in short and long_.startswith(short + "-")
+
+
+def _brain_of(name: str) -> str:
+    n = str(name or "")
+    return n if n in BRAINS else (BRAIN_THEO_PROVIDER.get(n) or BRAIN_THEO_ENGINE.get(n) or "")
+
+
+def clear_het(name: str) -> bool:
+    """The owner picked a model of this plan on purpose (main._clear_pin_limit): the refusal mark goes, as the routing
+    mark does. A plan that is really still out refuses the next turn at once and the mark comes back. True when one
+    was lifted. `name`: a brain key, provider id or engine name."""
+    brain = _brain_of(name)
+    if not brain:
+        return False
+    with _lock:
+        d = _doc_file()
+        b = d.get(brain)
+        if not (isinstance(b, dict) and "het" in b):
+            return False
+        b = dict(b)
+        b.pop("het", None)
+        d[brain] = b
+        _ghi_file(d)
+    return True
+
+
+def lift_het(name: str, model: str = "", since: float = 0.0) -> str:
+    """A turn of this brain that STARTED at `since` just answered on `model`: the plan takes requests.
+
+    A refusal on the same model (or one whose model is unknown) goes. A refusal on another model stays, marked
+    `scoped`: that model hit a limit of its own, the plan does not need to look out of quota for it. A refusal
+    recorded after the turn started is left alone (it may be this very turn's first route). Returns "lifted",
+    "scoped" or ""."""
+    brain = _brain_of(name)
+    if not brain:
+        return ""
+    with _lock:
+        d = _doc_file()
+        b = d.get(brain)
+        h = b.get("het") if isinstance(b, dict) else None
+        if not isinstance(h, dict) or (since and int(h.get("at") or 0) >= int(since)):
+            return ""
+        b = dict(b)
+        if same_model(h.get("model") or "", model):
+            b.pop("het", None)
+            out = "lifted"
+        elif h.get("scoped"):
+            return "scoped"
+        else:
+            b["het"] = dict(h, scoped=True)
+            out = "scoped"
+        d[brain] = b
+        _ghi_file(d)
+    return out
 
 
 def ghi_claude(info: dict, now: float = None):
@@ -276,6 +385,30 @@ def muc(pct: float) -> str:
     return "bad" if pct >= SAT else ("warn" if pct >= CANH_BAO else "ok")
 
 
+# Provider ids of the Models page -> brain keys here.
+BRAIN_THEO_PROVIDER = {"anthropic-cli": "claude", "openai-oauth": "codex", "grok-cli": "grok",
+                       "antigravity-cli": "agy"}
+
+
+def side_pause(provider: str, now: float = None, model: str = "") -> dict:
+    """Should the work Javis starts on its own (self-learning, suggestions, judges) wait on this plan?
+
+    {"paused": bool, "pct": int, "resets_at": epoch or 0}. Paused while the 5-hour window is at SAT percent or
+    more, or while the plan has refused a turn; it lifts by itself when the window resets. That work is the
+    first thing to give up when the allowance runs low: the owner's own chat needs what is left (10/11/2026).
+    A provider with no meter (an API key, a plan that reports none) is never paused here. A refusal proven to be one
+    model's own limit (`scoped`) pauses only work on that model.
+    """
+    brain = BRAIN_THEO_PROVIDER.get(str(provider or ""))
+    r = (doc(now).get(brain) if brain else None) or {}
+    w = r.get(NAM_GIO) or {}
+    pct = int(w.get("pct") or 0)
+    h = r.get("het") or {}
+    if h and not (h.get("scoped") and not (model and same_model(h.get("model") or "", model))):
+        return {"paused": True, "pct": 100, "resets_at": int((r["het"] or {}).get("reset") or 0)}
+    return {"paused": pct >= SAT, "pct": pct, "resets_at": int(w.get("resets_at") or 0)}
+
+
 def doc(now: float = None) -> dict:
     """What the ring draws, per brain: each window's % (0 once its reset has passed), the worst level,
     and `het` while a refusal for plan quota is still in force. None when nothing is known yet."""
@@ -296,7 +429,8 @@ def doc(now: float = None) -> dict:
                         "resets_at": 0 if moi else int(w.get("resets_at") or 0), "moi": moi}
         h = b.get("het")
         if isinstance(h, dict) and int(h.get("until") or 0) > now:
-            r["het"] = {"at": int(h.get("at") or 0), "reset": int(h.get("reset") or 0)}
+            r["het"] = {"at": int(h.get("at") or 0), "reset": int(h.get("reset") or 0),
+                        "model": str(h.get("model") or ""), "scoped": bool(h.get("scoped"))}
         ds = [r[k]["pct"] for k in (NAM_GIO, TUAN) if k in r]
         if not ds and "het" not in r:
             out[brain] = None
@@ -304,26 +438,92 @@ def doc(now: float = None) -> dict:
         r["max"] = max(ds) if ds else 0
         r["muc"] = muc(r["max"])
         con_han = not ds or not all(r[k]["moi"] for k in (NAM_GIO, TUAN) if k in r)
-        if "het" in r:
-            r["muc"], r["max"] = "bad", 100   # the plan refused a turn: red and full, whatever the last meter said
-        elif con_han and r["status"] == "rejected":
+        rejected = r["status"] == "rejected"
+        if rejected and str(b.get("limit_type") or "") in MODEL_WINDOWS:
+            rejected = False       # one model's own window (Opus, Sonnet, Fable credits): the plan still runs
+            if con_han and r["muc"] == "ok":
+                r["muc"] = "warn"
+        if con_han and rejected:
             r["muc"] = "bad"       # the plan already refused a request in this window
         elif con_han and r["status"] == "allowed_warning" and r["muc"] == "ok":
             r["muc"] = "warn"
+        # What the meters alone say: the composer falls back to these when the refusal was on another model.
+        r["meter_muc"], r["meter_max"] = r["muc"], r["max"]
+        if "het" in r and not r["het"]["scoped"]:
+            r["muc"], r["max"] = "bad", 100   # the plan refused a turn: red and full, whatever the last meter said
         out[brain] = r
     return out
 
 
-_TEN_GOI = {"pro": "Pro", "max": "Max", "plus": "Plus", "team": "Team", "business": "Business",
-            "enterprise": "Enterprise", "edu": "Edu", "free": "Free", "go": "Go"}
+def ten_goi(raw: str, nha: str = "") -> str:
+    """Name a plan CODE the provider sent ("max" -> "Max", "chatgpt_plus" -> "Plus", "SuperGrok" stays).
 
-
-def ten_goi(raw: str) -> str:
-    """"max" -> "Max", "chatgpt_plus" -> "Plus", "SuperGrok" stays. Empty stays empty: never a guess."""
+    No name table in Javis's code (owner, 2026-11-04): vendors rename plans (Anthropic's Max 20x became
+    Ultra on 2026-10-30 under the same code "max"; OpenAI sells the code "prolite" as Pro), so a table
+    here goes stale the day they do. Order: the vendor's own name (callers try `ten_goi_claude` first),
+    then javis-store's catalog for provider `nha` (`plan_names`, refreshed without a release), then the
+    code itself, tidied. Empty stays empty: never a guess."""
     v = str(raw or "").strip()
     if not v:
         return ""
-    k = v.lower().replace("chatgpt_", "").replace("claude_", "")
-    if k in _TEN_GOI:
-        return _TEN_GOI[k]
-    return v if any(c.isupper() for c in v) else v.replace("_", " ").title()
+    if any(c.isupper() for c in v):
+        return v
+    for tien_to in ("chatgpt_", "claude_"):
+        if v.lower().startswith(tien_to) and len(v) > len(tien_to):
+            v = v[len(tien_to):]
+    if nha:
+        try:
+            import plan_names
+            tu_danh_ba = plan_names.ten(nha, v)
+            if tu_danh_ba:
+                return tu_danh_ba
+        except Exception:  # noqa: BLE001
+            pass
+    return v.replace("_", " ").title()
+
+
+def _ten_hop_le(v) -> bool:
+    """Same rule the Claude CLI applies before it trusts `plan_display_name`: 1-40 characters, letters,
+    digits, spaces and `.+-`, starting and ending on a letter or digit (`+` may end it)."""
+    if not isinstance(v, str) or not 1 <= len(v) <= 40 or not v[0].isalnum():
+        return False
+    if len(v) > 1 and not (v[-1].isalnum() or v[-1] == "+"):
+        return False
+    return all(c.isalnum() or c in " .+-" for c in v)
+
+
+def _file_claude_json(config_dir=None) -> list:
+    """Where the Claude CLI keeps its global config: `$CLAUDE_CONFIG_DIR/.claude.json` when a config folder
+    is set, else `~/.claude.json`. An extra account folder is checked first, then the file next to it."""
+    d = str(config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if d:
+        base = Path(d).expanduser()
+        return [base / ".claude.json", base.parent / ".claude.json"] if config_dir else [base / ".claude.json"]
+    return [Path.home() / ".claude.json"]
+
+
+def ten_goi_claude(config_dir=None, email: str = "") -> str:
+    """The plan's name AS ANTHROPIC NAMES IT NOW ("Ultra", "Max", "Pro"), or "" when unknown.
+
+    Claude Code fetches the account profile itself and stores `organization.plan_display_name` as
+    `oauthAccount.planDisplayName` in its config file `.claude.json`. That file holds no token (the
+    login lives in `.credentials.json` or the OS keyring), so Javis reads only that one field and never
+    touches a credential. `email`: the account `claude auth status` reports; a config written by a
+    different account is ignored instead of naming someone else's plan."""
+    for f in _file_claude_json(config_dir):
+        try:
+            if not f.is_file():
+                continue
+            acc = (json.loads(f.read_text(encoding="utf-8")) or {}).get("oauthAccount") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not isinstance(acc, dict):
+            continue
+        cua = str(acc.get("emailAddress") or "").strip().lower()
+        if email and cua and cua != str(email).strip().lower():
+            continue
+        ten = acc.get("planDisplayName")
+        if _ten_hop_le(ten):
+            return ten.strip()
+        return ""
+    return ""

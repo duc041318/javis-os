@@ -50,6 +50,7 @@ class _Ctx:
 
 ctx = _Ctx()
 plug.register(ctx)
+_real_rupload = plug._rupload   # later sections swap in fakes; the streaming check below needs the real one
 byname = {t["name"]: t for t in ctx.tools}
 check("plugin: đủ 10 tool", set(byname) == {"fb_pages_list", "fb_page_posts", "fb_page_comments",
                                             "fb_page_post", "fb_page_photo", "fb_page_album",
@@ -204,6 +205,60 @@ async def handler_tests():
     r_vd_miss = await plug._publish_video({}, _CtxNoVault())
     check("fb_page_video: thiếu video → ERROR", r_vd_miss.startswith("ERROR"))
 
+    # fb_page_video + thumbnail: the cover rides in the same multipart as field `thumb`
+    mpcalls = {}
+
+    async def _fake_multipart(pathg, files, data, token, base=plug.GRAPH, timeout=900):
+        mpcalls["args"] = (pathg, {k: str(v) for k, v in (files or {}).items()}, dict(data or {}), token, base)
+        return {"id": "V1"}
+
+    plug._post_multipart = _fake_multipart
+    (vroot / "bia.jpg").write_bytes(b"jpg")
+    r_th = await plug._publish_video({"video": "clip.mp4", "thumbnail": "bia.jpg"}, _CtxVault())
+    check("fb_page_video(file+thumbnail): source + thumb in one upload to graph-video",
+          mpcalls["args"][0] == "P1/videos" and set(mpcalls["args"][1]) == {"source", "thumb"}
+          and mpcalls["args"][1]["thumb"].endswith("bia.jpg") and mpcalls["args"][4] == plug.GRAPH_VIDEO
+          and '"thumbnail"' in r_th)
+    await plug._publish_video({"video": "https://ex.com/v.mp4", "thumbnail": "bia.jpg"}, _CtxVault())
+    check("fb_page_video(URL+thumbnail): file_url + thumb file",
+          set(mpcalls["args"][1]) == {"thumb"} and mpcalls["args"][2].get("file_url") == "https://ex.com/v.mp4")
+    r_th_url = await plug._publish_video({"video": "clip.mp4", "thumbnail": "https://ex.com/a.jpg"}, _CtxVault())
+    check("fb_page_video: thumbnail as a link → ERROR", r_th_url.startswith("ERROR"))
+    (vroot / "bia.gif").write_bytes(b"gif")
+    r_th_gif = await plug._publish_video({"video": "clip.mp4", "thumbnail": "bia.gif"}, _CtxVault())
+    check("fb_page_video: thumbnail not jpg/png → ERROR", r_th_gif.startswith("ERROR"))
+
+    # reel=true: start → rupload → thumbnails(is_preferred) → finish PUBLISHED
+    reel_seq = []
+
+    async def _fake_post_reel(path, data, token):
+        reel_seq.append(("post", path, dict(data or {})))
+        return {"video_id": "R1"} if (data or {}).get("upload_phase") == "start" else {"success": True}
+
+    async def _fake_rupload(vid, path, url, token):
+        reel_seq.append(("rupload", vid, str(path)))
+        return {"success": True}
+
+    async def _fake_post_file_reel(pathg, fp, data, token, base=plug.GRAPH, timeout=900):
+        reel_seq.append(("file", pathg, dict(data or {})))
+        return {"success": True}
+
+    plug._post = _fake_post_reel
+    plug._rupload = _fake_rupload
+    plug._post_file = _fake_post_file_reel
+    r_reel = await plug._publish_video({"video": "clip.mp4", "thumbnail": "bia.jpg", "reel": True,
+                                        "message": "mo ta"}, _CtxVault())
+    steps = [(s[0], s[1]) for s in reel_seq]
+    check("fb_page_video(reel): start → rupload → thumbnails → finish",
+          steps == [("post", "P1/video_reels"), ("rupload", "R1"), ("file", "R1/thumbnails"),
+                    ("post", "P1/video_reels")])
+    check("fb_page_video(reel): thumbnail is_preferred + finish PUBLISHED with description",
+          reel_seq[2][2].get("is_preferred") == "true"
+          and reel_seq[3][2].get("video_state") == "PUBLISHED" and reel_seq[3][2].get("description") == "mo ta")
+    check("fb_page_video(reel): reports the cover as attached", "đã gắn" in r_reel and '"reel"' in r_reel)
+    plug._post = _fake_post
+    plug._post_file = _fake_post_file
+
     # fb_page_album: up từng ảnh published=false rồi gom vào MỘT bài /feed
     seq = []
 
@@ -335,7 +390,7 @@ async def messenger_tests():
     check("one connection: a missing posting permission says how to fix it",
           "pages_manage_posts" in plug2._fmt({"error": {"code": 200, "message": "(#200) not allowed"}}))
     # A facebook-pages connection still wins when present.
-    plug2._connected_id = lambda: "cfbp"
+    plug2._connected_ids = lambda: ["cfbp"]
     import oauth_mcp
 
     async def _hdr(cid):
@@ -348,6 +403,126 @@ async def messenger_tests():
         oauth_mcp.auth_headers = orig
 
 asyncio.run(messenger_tests())
+
+
+# ---- 5. Several facebook-pages connections (issue #1691): every enabled sign-in is used, a disabled one never ----
+spec3 = importlib.util.spec_from_file_location(
+    "meta_pages_graph_multi", str(ROOT / "system" / "plugins" / "meta-pages-graph" / "plugin.py"))
+plug3 = importlib.util.module_from_spec(spec3)
+spec3.loader.exec_module(plug3)
+
+
+async def multi_connection_tests():
+    import mcp_store
+    import oauth_mcp
+    conns = [{"id": "A", "connector_id": "facebook-pages", "enabled": True},
+             {"id": "B", "connector_id": "facebook-pages", "enabled": True},
+             {"id": "C", "connector_id": "facebook-pages", "enabled": True},      # never signed in
+             {"id": "X", "connector_id": "google-sheets", "enabled": True}]
+    signed_in = {"A", "B", "X"}
+    asked = []
+
+    async def _hdr(cid):
+        return {"Authorization": "Bearer TOK" + cid}
+
+    async def _fake_get(path, params, token):
+        asked.append((path, token))
+        if path == "me/accounts":
+            if token == "TOKA":
+                return {"data": [{"id": "PA", "name": "Shop A", "access_token": "PTOKA"},
+                                 {"id": "PS", "name": "Shared", "access_token": "PTOKS_A"}]}
+            if token == "TOKB":
+                return {"data": [{"id": "PB", "name": "Shop B", "access_token": "PTOKB"},
+                                 {"id": "PS", "name": "Shared", "access_token": "PTOKS_B"}]}
+            return {"error": {"message": "bad token"}}
+        return {"data": [{"id": path, "message": "post"}]}
+
+    orig = (mcp_store.list_connections, oauth_mcp.status, oauth_mcp.auth_headers)
+    mcp_store.list_connections = lambda: [dict(c) for c in conns]
+    oauth_mcp.status = lambda cid: {"connected": cid in signed_in}
+    oauth_mcp.auth_headers = _hdr
+    plug3._get = _fake_get
+    plug3._messenger_pages = lambda: []
+    try:
+        check("several connections: every enabled, signed-in one is used, in order",
+              plug3._connected_ids() == ["A", "B"] and plug3._connected_id() == "A")
+        tok = await plug3._token()
+        check("several connections: one token per connection", tok == ("TOKA", "TOKB"))
+        pages, err = await plug3._pages(tok)
+        check("several connections: the Pages of both sign-ins, a shared Page once",
+              err is None and [p["id"] for p in pages] == ["PA", "PS", "PB"])
+        r = await plug3._list({}, None)
+        check("several connections: fb_pages_list shows both and no token",
+              "Shop A" in r and "Shop B" in r and "PTOK" not in r and "TOKA" not in r)
+        asked.clear()
+        r = await plug3._posts({"page_id": "PB"}, None)
+        check("several connections: a Page of the SECOND connection is read with its own Page token",
+              ("PB/feed", "PTOKB") in asked and not r.startswith("ERROR"))
+        # A turned OFF: its token is never used, and its Pages are gone.
+        conns[0]["enabled"] = False
+        asked.clear()
+        check("a disabled connection is skipped", plug3._connected_ids() == ["B"])
+        check("a disabled connection: the remaining one gives a plain token", await plug3._token() == "TOKB")
+        r = await plug3._list({}, None)
+        check("a disabled connection: its token is never sent and its Pages are not listed",
+              "Shop B" in r and "Shop A" not in r and all(t != "TOKA" for _p, t in asked))
+        # All off: nothing connected (no Messenger card either).
+        conns[1]["enabled"] = False
+        check("every connection disabled: not connected", plug3._connected_id() is None and await plug3._token() is None
+              and "Chưa nối Fanpage" in (plug3._check() or ""))
+        # One sign-in broken: the other still answers; both broken: the error comes out.
+        conns[0]["enabled"] = conns[1]["enabled"] = True
+        pages, err = await plug3._pages(("TOKBAD", "TOKB"))
+        check("one failing sign-in does not hide the other's Pages",
+              err is None and [p["id"] for p in pages] == ["PB", "PS"])
+        pages, err = await plug3._pages(("TOKBAD", "TOKBAD2"))
+        check("every sign-in failing: the error is reported", pages is None and "bad token" in str(err))
+    finally:
+        mcp_store.list_connections, oauth_mcp.status, oauth_mcp.auth_headers = orig
+
+asyncio.run(multi_connection_tests())
+
+# Reels upload streams the file in pieces (a 1GB video must not sit in memory whole) and declares its size.
+def _check_rupload_streams():
+    import asyncio as _aio
+    import tempfile as _tf
+    import httpx as _httpx
+    seen = {}
+
+    def _handler(request):
+        seen["body"] = request.read()
+        seen["headers"] = dict(request.headers)
+        seen["url"] = str(request.url)
+        return _httpx.Response(200, json={"success": True})
+
+    real_client = _httpx.AsyncClient
+
+    class _Client(real_client):
+        def __init__(self, *a, **k):
+            k["transport"] = _httpx.MockTransport(_handler)
+            super().__init__(*a, **k)
+
+    data = bytes(range(256)) * 9000   # ~2.3MB: more than two pieces
+    with _tf.TemporaryDirectory() as d:
+        fp = Path(d) / "clip.mp4"
+        fp.write_bytes(data)
+        pieces = _aio.run(_collect(plug._file_chunks(fp)))
+        _httpx.AsyncClient = _Client
+        try:
+            out = _aio.run(_real_rupload("R9", fp, "", "tok"))
+        finally:
+            _httpx.AsyncClient = real_client
+    check("rupload: the file is read in pieces, not whole", len(pieces) == 3 and b"".join(pieces) == data)
+    check("rupload: the whole file arrives with its size", out.get("success") and seen.get("body") == data
+          and seen["headers"].get("file_size") == str(len(data)))
+    check("rupload: same API version as GRAPH", seen.get("url", "").endswith(plug.GRAPH.rsplit("/", 1)[-1] + "/R9"))
+
+
+async def _collect(agen):
+    return [x async for x in agen]
+
+
+_check_rupload_streams()
 
 if _fails:
     print(f"\nFAIL - {len(_fails)} test: {_fails}")

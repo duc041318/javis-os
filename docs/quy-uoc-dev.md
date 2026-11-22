@@ -13,42 +13,65 @@ thuế lên lượt chat nào cả.
   cần hỏi lại mỗi lần. Khác biệt duy nhất so với thường lệ là merge không chờ ai duyệt tay.
 - **CI đỏ thì KHÔNG merge.** Sửa cho xanh đã.
 - Chủ repo nhắc lại ngày 2026-09-26: **mỗi lần merge vào `main` phải phát hành số phiên bản
-  mới**, tăng `VERSION` và cập nhật `CHANGELOG.md` trong cùng PR để các máy khác nhận biết
-  có bản cập nhật. Trước khi merge, kiểm tra số này lớn hơn phiên bản hiện tại trên
-  `origin/main`; sau khi merge, xác nhận luồng build/phát hành bản cập nhật thành công.
+  mới** để các máy khác nhận biết có bản cập nhật. Từ 2026-11-04 việc tăng số do máy làm, xem mục
+  dưới. Sau khi merge, xác nhận workflow **Release** chạy xanh và `VERSION` trên `main` đã tăng.
   Không coi việc merge code là đã phát hành xong nếu bản mới chưa được xuất bản.
 
-## Đặt xí chỗ số phiên bản TRƯỚC khi code
+## Số phiên bản: PR KHÔNG tự chọn số (từ 2026-11-04)
 
-Chủ repo yêu cầu 2026-09-22, sau ba lần trùng số liên tiếp: 0.63.3, 0.63.8 và 0.63.10 đều bị
-một PR khác merge trước lấy mất. Lần cuối xảy ra khi PR đã xanh hết CI, phải rebase và đánh số
-lại từ đầu.
+Trước đây mỗi PR tự đặt số, tự sửa `VERSION` và đầu `CHANGELOG.md`. Vài phiên chạy song song là
+vài PR cùng sửa đúng mấy dòng đó, nên số liên tục bị giành (0.63.3, 0.63.8, 0.63.10, rồi các số
+bỏ trống như 0.442, 0.451, 0.456-0.458), dù đã có quy trình xí chỗ số trước khi code. Chủ repo
+chốt 2026-11-04: bỏ hẳn việc PR chọn số.
 
-Nguyên nhân gốc: repo này thường có vài phiên Claude Code chạy song song. Số chọn ở cuối việc
-là số chọn bằng thông tin đã cũ.
+**Mỗi PR làm đúng một việc:** thêm một file `changelog.d/<slug>.md`, tên không trùng ai. Mẫu ở
+`changelog.d/README.md`: dòng `bump: patch` (chỉ sửa lỗi) hoặc `bump: minor` (có gì mới), một
+`title` tiếng Anh, khối `## vi` và khối `## en` cùng số nhóm `###`. Kiểm trên máy bằng
+`python tools/release.py check`.
 
-Quy trình:
+- **KHÔNG sửa `VERSION`, `CHANGELOG.md`, `CHANGELOG.en.md`** trong PR.
+- **Tiêu đề PR không mang số phiên bản.** Viết thẳng nội dung, ví dụ
+  `Fix large Zalo images`. Số nằm trong tiêu đề PR bây giờ có nghĩa là "đang giữ chỗ kiểu cũ", bot
+  sẽ né số đó.
+- Không cần `git fetch` để dò số, không cần mở PR nháp sớm để xí chỗ.
+- Job **Changelog fragment** trong CI đỏ khi PR đổi code mà thiếu file, hoặc file sai mẫu. Thay
+  đổi chỉ có tài liệu (`docs/`, file `.md` ở gốc) thì không cần file và không ra bản mới.
 
-1. `git fetch origin main`, đọc `VERSION` trên `origin/main`.
-2. Liệt kê các PR **đang mở**, đọc số phiên bản trong tiêu đề. Mọi số ở đó coi như **đã có
-   người lấy**, dù `main` chưa mang số đó.
-3. Lấy số trống kế tiếp sau tất cả.
-4. Đẩy commit bump `VERSION` + `CHANGELOG.md` **ngay đầu nhánh**, kèm PR nháp mang số đó trong
-   tiêu đề. Đây mới là hành động đặt xí chỗ: phiên sau đọc được ở bước 2. Phần thân changelog
-   viết sau cũng được.
-5. Xong mới viết code.
+**Sau khi merge,** workflow **Release** (`.github/workflows/release.yml`) chạy trên `main`:
 
-Hai tình huống hay gặp:
+1. Đọc `main` mới nhất, mỗi file trong `changelog.d/` thành một số phiên bản riêng, theo thứ tự
+   merge. Chép nội dung vào hai file nhật ký, xoá file mảnh, mỗi bản một commit `x.y.z: title (#PR)`.
+2. Đưa các commit đó lên `main` qua một PR phát hành `release-bot/...`, merge ngay bằng token của
+   chủ repo (`RELEASE_TOKEN`), vì luật bảo vệ `main` không cho đẩy thẳng.
+3. Lần merge đó kích hoạt lại workflow, lần này không còn mảnh nào nên nó build và đẩy image Docker
+   mang số mới.
 
-- **`main` vẫn vượt qua số đã đặt.** Rebase và đánh số lại. Chỉ `VERSION` và `CHANGELOG.md`
-  xung đột nên mất đúng một nhịp, không phải làm lại thay đổi.
-- **Một PR mở mang số đã cũ** (ví dụ 2026-09-22: PR #417 còn giữ 0.64.1 trong khi #416 đã phát
-  hành chính số đó). Số như vậy nói rằng "có người nhắm", không phải "còn hợp lệ". Chính phiên
-  của PR đó phải đánh số lại trước khi merge.
+Workflow chạy lần lượt từng lượt một, nên hai PR merge cách nhau vài giây vẫn ra hai số khác nhau.
+Code đè lên nhau (hai PR sửa cùng chỗ) thì vẫn phải rebase như thường, nhưng `VERSION` và nhật ký
+không bao giờ là chỗ xung đột nữa.
 
-Quy ước này giảm va chạm chứ không diệt hết: hai phiên khởi động cách nhau vài giây vẫn có thể
-cùng đọc `main` rồi cùng chọn một số. Cái nó tránh là va chạm ở phút cuối, lúc PR đã xanh và
-mọi thứ đã xong.
+**Cài một lần (chủ repo):** tạo fine-grained token trên GitHub cho repo `javis-os`, quyền
+**Contents** và **Pull requests** là Read and write, lưu thành secret `RELEASE_TOKEN` của repo
+(Settings, Secrets and variables, Actions). Thiếu secret thì lượt Release đỏ kèm đúng câu hướng dẫn
+này, image vẫn được build như cũ, và các mảnh nằm chờ trên `main`: thêm secret xong bấm **Run
+workflow** ở workflow Release là chúng được phát hành hết.
+
+**Chuyển tiếp:** PR mở từ trước, tự sửa `VERSION` theo kiểu cũ, vẫn merge được (CI chỉ cảnh báo).
+Nếu bot đã lấy mất số của nó thì phiên đó đánh số lại như trước, lần cuối cùng.
+
+**PR từ người ngoài:** thiếu mảnh thì CI chỉ cảnh báo. Người merge thêm file `changelog.d/` vào
+nhánh trước khi merge, hoặc merge xong mở một PR nhỏ chỉ chứa mảnh đó.
+
+## Thiết kế giao diện: đọc `docs/dev/design-style.md` trước (từ 2026-11-15)
+
+Chủ repo 15/11/2026: "rà soát lại những lần anh sửa thiết kế để lưu lại phong cách thiết kế. Lần sau làm theo cho anh
+đỡ phải nhắc". `docs/dev/design-style.md` gom mọi lần chủ đã sửa giao diện (chữ, điện thoại, màu, bố cục, nút, câu chữ,
+trang của gói Store, cách làm việc), có danh sách kiểm trước khi gửi và bảng những lần đổi ý.
+
+- Việc nào có giao diện (dashboard, trang HTML của gói trong `javis-store`, trang HTML làm cho chủ) thì đọc file đó
+  trước khi vẽ, và chạy mục 0 "Kiểm trước khi gửi" trước khi báo xong.
+- Màn mới hoặc thiết kế lại: làm bản HTML cho chủ duyệt trước khi code, trừ khi chủ bảo làm thẳng.
+- Chủ chốt thêm một luật thiết kế mới thì ghi vào file đó (đúng mục, kèm ngày và lời chủ), cùng PR với thay đổi.
 
 ## Chữ hiện lên màn hình (từ 0.67.0)
 
@@ -60,8 +83,34 @@ không được là tiếng Việt trần:
   chạy mà không nằm trong danh sách ngoại lệ dữ liệu.
 - **Server:** chữ trả về cho màn hình (lỗi, thông báo, nhãn) viết `localefmt.chu("tiếng Việt",
   "English")`. Không có request (Telegram, việc nền) thì nó theo `ui_lang` của máy.
-- **KHÔNG dịch:** prompt và mô tả tool gửi cho model, regex nhận câu người dùng gõ hay nói, log,
-  nội dung ghi vào brain của người dùng. Lý do ở `docs/dev/them-mot-ngon-ngu.md`.
+- **Prompt gửi cho model viết tiếng Anh, MỘT bản cho mọi ngôn ngữ** (chủ repo chốt 15/11/2026: "dịch nốt
+  lõi Javis sang tiếng Anh"). Không đi qua i18n, không dịch ra từng thứ tiếng: model trả lời theo ngôn
+  ngữ người dùng nhờ khối `# === NGÔN NGỮ ===`. Luật mới, mô tả tool mới viết tiếng Anh; phần cũ còn
+  tiếng Việt thì dịch khi PR đụng tới. Giữ nguyên tiêu đề `# === ... ===` (mốc đo token) và tên mà
+  chương trình tự viết hay tự đọc (`[Phiên chat: ...]`, `[NGỮ CẢNH GIAO DIỆN: ...]`...).
+  `tests/python/test_core_prompt_english.py` canh các khối lõi.
+- **KHÔNG dịch:** regex nhận câu người dùng gõ hay nói, log, nội dung ghi vào brain của người dùng.
+  Lý do ở `docs/dev/them-mot-ngon-ngu.md`.
+
+## Tên trong mã viết bằng tiếng Anh (từ 2026-11-06)
+
+Chủ repo chốt 06/11/2026: "đừng dùng các biến tiếng Việt, dự án quốc tế mà". Javis có người dùng và người đóng góp
+ngoài Việt Nam, họ phải đọc được mã mà không cần biết tiếng Việt.
+
+- **Mọi tên MỚI viết bằng tiếng Anh:** biến, hàm, lớp, hằng số, tham số, tên file và module, tên test. Ví dụ
+  `vocabulary`, `fix_vocabulary`, `transcript_fix.py`, không phải `tu_vung`, `tu_vung_sua`, `chinh_nghe.py`.
+- **Tên tiếng Việt có sẵn:** không mở PR chỉ để đổi tên hàng loạt. Khi PR sửa một cụm mã, đổi tên cụm đó sang tiếng
+  Anh luôn, kèm mọi chỗ gọi và mọi test, trong cùng PR (06/11/2026: cụm `tu_vung` của `nghe_sua.py` thành
+  `vocabulary`, `split_vocabulary`, `BASE_VOCABULARY`, `MAX_VOCABULARY`).
+- **Không đổi tên những thứ đã thành hợp đồng** khi chưa có đường chuyển đổi: khoá trong file settings, khoá JSON
+  mà dashboard hay máy khác đọc (ví dụ `hotwords_goc` của `/voice/options`), tên route, tên tool gửi cho model.
+- **Luật cứng từ 2026-11-22** (chủ repo: "lưu cái luật này cứng vào bên trong hệ thống, tất cả các hàm, các biến phải
+  sử dụng bằng tiếng Anh"): `tests/python/test_english_identifiers.py` đỏ khi có tên tiếng Việt MỚI (hàm, lớp, biến,
+  tham số, tên file) trong `server/`, `tools/`, `cli/`, `dashboard/`. Tên cũ nằm trong
+  `tests/python/english_identifiers_baseline.json`, được ở yên tới khi PR đụng cụm đó. **Không bao giờ thêm tên mới vào
+  file mốc để cho xanh**, viết bằng tiếng Anh. Đổi tên xong không cần sửa file mốc.
+- **Không phải là tên nên không theo mục này:** chữ hiện lên màn hình (đi qua i18n, xem mục trên), prompt gửi cho
+  model (tiếng Anh, xem mục trên), regex nhận câu tiếng Việt người dùng nói, nội dung ghi vào brain.
 
 ## Chữ giải thích gập vào nút (i) (từ 0.214.0)
 
@@ -97,6 +146,41 @@ biết tiết kiệm không gian". Đầu mỗi trang đã có thanh tiêu đề
 - Tiết kiệm chỗ nói chung: phần tổng quan đầu trang giữ một hàng thấp, cái gì bấm mới cần thì mở trong popup thay vì
   xổ xuống đẩy cả trang.
 
+## Khung chat: sửa một chỗ là rà và đồng bộ mọi màn (từ 2026-11-05)
+
+Chủ repo chốt 05/11/2026: "từ lần sau các thay đổi về giao diện khung chat là phải rà soát lại toàn bộ các màn khác để
+đồng bộ cùng". Lý do: lần đổi mic thành kiểu máy ghi âm chỉ làm ở ô chat chính, chủ phải nhắc thêm một lượt cho trang
+Nhóm và trang Hội thoại.
+
+- Đổi cách khung chat trông hoặc chạy (ô nhập, nút mic, nút gửi, đính kèm, Enter, trích dẫn, thẻ tin nhắn...) thì
+  **trong cùng PR** phải áp cho mọi màn có khung chat tương tự, không đợi chủ nhắc.
+- Các màn hiện có: chat chính (`app.js`, `composer-dictate.js`), Nhóm (`teams.js`), Hội thoại/Chatbot
+  (`conversations.js`). Mic đọc chữ dùng chung `dictate.js`: tìm mọi chỗ gọi bằng `grep -n "JavisDictate" dashboard/*.js`.
+  Có màn chat mới thì thêm tên vào danh sách này.
+- Tự nhảy số thứ tự khi xuống dòng (`chat-list.js`, từ 11/11/2026) chạy bằng MỘT bộ nghe chung, nhận ô chat qua danh
+  sách `BOXES` trong file đó. Có ô chat mới thì thêm selector của nó vào `BOXES`, kèm một dòng kiểm trong
+  `tests/js/test_chat_list_continue.js`.
+- Màn nào cố ý để khác thì ghi lý do trong mô tả PR, và nói rõ với chủ.
+- Thêm test cho từng màn đã đổi, để lần sau lệch là CI đỏ.
+
+## Tính năng Zalo mới vào plugin `zalo-extras`, không tạo plugin mới (từ 2026-11-08)
+
+Chủ repo chốt 08/11/2026: "nếu mà update tính năng mới thì cho vào trong plugin của Zalo luôn chứ đừng tạo một plugin
+mới". Lý do: mỗi tính năng Zalo từng đẻ thêm một plugin (gửi ảnh, nhóm, đọc ảnh, kết bạn), trang Plugin bị phân mảnh
+thành bốn mục cho một thứ chủ coi là một. Gói `javis.zalo` 2.0.0 (kho `javis-store`) đã gộp cả bốn thành MỘT plugin.
+
+- Tool Zalo mới mà MCP của javis-zalo chưa có thì viết trong gói `javis.zalo` của `javis-store`, vào plugin
+  `packs/javis.zalo/plugins/zalo-extras/`: thêm hàm vào module đúng mảng (`send_media.py`, `group.py`,
+  `read_images.py`, `friend.py`), hoặc một module mới cạnh đó rồi thêm tên vào `_PARTS` trong `plugin.py`. Thêm tên
+  tool vào `tools` của `plugin.yaml`, nâng số bản của plugin và của gói cùng nhau.
+- **Không tạo thư mục plugin Zalo thứ hai**, trong gói đó hay trong `system/plugins/` của lõi.
+  `tests/javis.zalo/test_zalo_extras.py` của kho đỏ khi gói có thêm thư mục plugin, mất một tool hay một tool bị đổi
+  mức quyền.
+- Mỗi tool tự khai mức quyền khi đăng ký (`min_mode`): đọc là `readonly`, ghi vào brain là `safe`, gửi hay đổi gì trên
+  Zalo là `full`.
+- Không thuộc luật này: phần lõi của kênh Zalo (đăng nhập QR, vòng đọc Hộp thư, bot trả lời) vẫn nằm trong
+  `server/zalo_*.py` như trước. Luật chỉ nói về tool mới cho model gọi.
+
 ## Viết CHANGELOG.md
 
 Chủ repo đọc nhật ký cập nhật trên màn hình dọc (2026-08-12), nên viết CHO NGƯỜI ĐỌC TRÊN ĐIỆN
@@ -107,10 +191,10 @@ THOẠI, không phải cho lập trình viên đọc diff:
   thân commit và phần mô tả PR.
 - Dùng `**` và dấu nháy ngược vừa phải. Trang có render markdown, nhưng một dòng dày đặc ký
   hiệu thì đọc trên màn hẹp rất mệt.
-- **Từ 0.68.0 viết HAI bản:** khối tiếng Việt trong `CHANGELOG.md` (bản gốc) và khối tiếng Anh
-  cùng số phiên bản trong `CHANGELOG.en.md`, cùng số nhóm `###`. Trang Cập nhật hiện bản tiếng Anh
-  cho thiết bị đọc tiếng Anh. `tests/python/test_nhat_ky_song_ngu.py` đỏ khi một phiên bản từ
-  0.66.0 trở đi thiếu bản tiếng Anh, nên khối xí chỗ số phiên bản cũng phải có ở cả hai file.
+- **Từ 0.68.0 viết HAI bản:** khối tiếng Việt (bản gốc) và khối tiếng Anh, cùng số nhóm `###`.
+  Trang Cập nhật hiện bản tiếng Anh cho thiết bị đọc tiếng Anh. Từ 2026-11-04 cả hai viết trong
+  cùng file `changelog.d/<slug>.md` (khối `## vi` và `## en`); bot chép sang `CHANGELOG.md` và
+  `CHANGELOG.en.md`. `tests/python/test_nhat_ky_song_ngu.py` vẫn canh hai file nhật ký.
 
 ## Ngôn ngữ của commit, PR và code (từ 0.68.0)
 
@@ -123,8 +207,8 @@ Repo mở cho người đóng góp quốc tế, nên phần NGƯỜI NGOÀI Đ�
   i18n (`vi.json` có dấu, `en.json`). Bảng từ điển định danh tiếng Việt cũ cho người nước ngoài ở
   `docs/dev/GLOSSARY.md`, kiến trúc ở `ARCHITECTURE.md`.
 - **Giữ tiếng Việt:** `CHANGELOG.md` (bản gốc, chủ repo đọc), file quy ước này, spec trong
-  `docs/dev/`, và prompt gửi cho model (lý do ở `docs/dev/them-mot-ngon-ngu.md`).
-- PR từ người ngoài không cần đụng `VERSION`/CHANGELOG: người merge tăng số và viết nhật ký.
+  `docs/dev/`. Prompt gửi cho model thì viết tiếng Anh từ 15/11/2026 (xem mục "Chữ hiện lên màn hình").
+- PR từ người ngoài không cần đụng `VERSION`/CHANGELOG: người merge thêm file `changelog.d/`.
 
 ## Bản dịch README và hướng dẫn cài nhanh (từ 0.69.0)
 
@@ -140,6 +224,9 @@ Repo mở cho người đóng góp quốc tế, nên phần NGƯỜI NGOÀI Đ�
   bản dịch dùng chung. Chú thích (alt) của hình thì dịch theo từng bản.
 - `tests/python/test_machine_translations.py` canh link chết, anchor lệch và dấu gạch dài trong
   các bản dịch, nên dịch lại xong phải chạy test này.
+- **Giao diện chỉ có tiếng Anh và tiếng Việt** (chủ repo chốt 08/11/2026: "gỡ tiếng Đức, chỉ để tiếng Anh và tiếng
+  Việt"). File `dashboard/i18n/de.json` đã bị gỡ; đừng nhận thêm từ điển giao diện thứ tiếng khác. Cơ chế đọc từ điển
+  chỉ-giao-diện (`dashboard_only_languages`) vẫn để đó, nhưng không có file nào để nó nhận. Mục dưới là lịch sử.
 - Server, giọng đọc và tài liệu hướng dẫn đầy đủ chỉ giữ tiếng Anh và tiếng Việt. Chủ repo chốt
   ngày 2026-10-03: thêm thứ tiếng ĐẦY ĐỦ (lang_registry) khi có người dùng thật cần. Từ 0.99.0
   (chủ chốt 2026-10-12, nhận tiếng Đức của @sirschnake) bản dịch CHỈ DASHBOARD (`dashboard/i18n/xx.json`)

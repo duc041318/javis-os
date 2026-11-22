@@ -26,11 +26,13 @@
   // its rules kept quiet are `filtered` and live under "Filtered"; every card takes the owner's feedback in the
   // two buttons, "Needed" / "Not needed" (owner, 2026-10-29: emoji go on the notice once it is opened in Javis Core's
   // chat, where every answer already takes the six reactions); the "Filter" view sets each group's mode, undoes changes.
-  var GROUPS = ["reminder", "question", "chatbot", "connection", "incident", "job", "agent", "team", "cost", "update", "other"];
+  var GROUPS = ["reminder", "suggest", "question", "chatbot", "connection", "incident", "job", "agent", "team", "cost", "update",
+    "other"];
   var MODES = ["all", "important", "urgent", "off"];
   // Full keys spelled out, so the i18n check finds every one of them.
   var GROUP_KEY = { reminder: "noti.grp_reminder", question: "noti.grp_question", chatbot: "noti.grp_chatbot",
     connection: "noti.grp_connection", incident: "noti.grp_incident", job: "noti.grp_job", agent: "noti.grp_agent",
+    suggest: "noti.grp_suggest",
     team: "noti.grp_team", cost: "noti.grp_cost", update: "noti.grp_update", other: "noti.grp_other" };
   var MODE_KEY = { all: "noti.mode_all", important: "noti.mode_important", urgent: "noti.mode_urgent", off: "noti.mode_off" };
   function icon(n) { return typeof window.ic === "function" ? window.ic(n) : ""; }
@@ -195,6 +197,15 @@
     if (kind === "system") return window.t("noti.card_system");
     return window.t("noti.card_answer");
   }
+  // Could this chat have an unread inbox item? Only a sure "no" returns false: the inbox has loaded, and either nothing
+  // is unread at all, or every unread item is in the list we hold and none of them is this chat's.
+  function coThuChuaDocCua(sid) {
+    if (!state.thuTai) return true;
+    if (!state.thuChuaDoc) return false;
+    var chua = (state.thu || []).filter(function (x) { return x && !x.read; });
+    if (chua.length < state.thuChuaDoc) return true;
+    return chua.some(function (x) { return x.session_id === sid; });
+  }
   async function docThu(body) {
     try {
       var r = await fetch("/inbox/read", { method: "POST",
@@ -322,6 +333,27 @@
       render();
     } catch (e) { state.note[item.id] = window.t("noti.react_err"); render(); }
   }
+  // The line under the title (owner, 2026-11-19: "the notices are hard to read"). The server's one-line `summary` when
+  // there is one; else the text without the title it starts with. A card used to print the title twice when the text
+  // was a single sentence.
+  function dongPhu(item) {
+    // Owner, 19/11/2026: "headline and content the same: one line, not two". Compared without punctuation, marks,
+    // spaces or case, so "- **Em kiểm tra ...**" under "Em kiểm tra ..." also counts as the same line.
+    function gon(s) { return String(s || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""); }
+    var tieuDe = gon(item.title);
+    function trung(dong) {
+      var d = gon(dong);
+      return !!d && !!tieuDe && (d.indexOf(tieuDe) === 0 || tieuDe.indexOf(d) === 0);
+    }
+    if (item.summary) return trung(item.summary) ? "" : item.summary;
+    var than = String(item.body || "").trim();
+    // The title is the text's first line, cut at 120 characters: drop that whole line, never leave its cut-off tail
+    // ("...is not signed in on this machine.)") as a line of its own.
+    var xuong = than.indexOf("\n");
+    var dau = xuong < 0 ? than : than.slice(0, xuong);
+    if (trung(dau)) than = xuong < 0 ? "" : than.slice(xuong + 1).trim();
+    return than.replace(/\*\*|__|`/g, "");
+  }
   function theThu(item) {
     var chua = !item.read ? " unread" : "";
     var why = item.filtered ? (item.why === "repeat" ? "noti.why_repeat" : item.why === "muted" ? "noti.why_muted" : "noti.why_mode") : "";
@@ -333,7 +365,7 @@
       esc(nhanLoai(item.kind)) + '</span><span class="noti-top-r"><span class="noti-time">' + esc(thoiGian(item.ts)) +
       "</span>" + nutX() + "</span></div>" +
       "<h4>" + esc(item.title || window.t("noti.msg_title")) + "</h4>" +
-      '<p class="noti-card-body">' + esc(item.body || "") + "</p>" +
+      (dongPhu(item) ? '<p class="noti-card-body">' + esc(dongPhu(item)) + "</p>" : "") +
       (why ? '<span class="noti-why">' + esc(window.t(why)) + "</span>" : "") +
       (phu ? '<span class="noti-cta">' + phu + "</span>" : "") + phanHoiHtml(item) + "</article>";
   }
@@ -432,7 +464,7 @@
     var p = state.policy;
     var head = dauMuc("noti.filter_title");
     var info = window.JavisInfo ? window.JavisInfo.pair(esc(window.t("noti.filter_info")), window.t("noti.filter_info_l")) : "";
-    if (!p) { list.innerHTML = head + '<div class="noti-loading">' + esc(window.t("noti.loading")) + "</div>"; taiBoLoc(); noiDanhSach(list); return; }
+    if (!p) { list.innerHTML = head + '<div class="noti-loading pg-loading">' + esc(window.t("noti.loading")) + "</div>"; taiBoLoc(); noiDanhSach(list); return; }
     if (!p.ok) { list.innerHTML = head + '<div class="noti-empty">' + esc(window.t("noti.load_fail")) + "</div>"; noiDanhSach(list); return; }
     var byG = {};
     (p.groups || []).forEach(function (g) { byG[g.group] = g; });
@@ -581,6 +613,7 @@
       var d = await (await fetch("/inbox?limit=40", { cache: "no-store" })).json();
       state.thu = Array.isArray(d.items) ? d.items : [];
       state.thuChuaDoc = Number(d.unread) || 0;
+      state.thuTai = true;
       render();
     } catch (e) {}
   }
@@ -590,7 +623,7 @@
     if (state.loading || (!force && Date.now() - state.loadedAt < 300000)) return;
     state.loading = true;
     var list = byId("notificationList");
-    if (!state.items.length && list && state.tab === "news") list.innerHTML = '<div class="noti-loading">' + esc(window.t("noti.loading")) + "</div>";
+    if (!state.items.length && list && state.tab === "news") list.innerHTML = '<div class="noti-loading pg-loading">' + esc(window.t("noti.loading")) + "</div>";
     try {
       var response = await fetch("/notifications", { cache: "no-store" });
       if (!response.ok) throw new Error("HTTP " + response.status);
@@ -645,9 +678,22 @@
       anRow.hidden = !on;
       if (!an.dataset.wired) {
         an.dataset.wired = "1";
-        try { var st = await (await fetch("/settings", { cache: "no-store" })).json(); an.checked = !!(st.push && st.push.preview === "hidden"); } catch (e) {}
+        try { var st = await (await fetch("/settings")).json();   /* shares the start-up read (fetch-gop.js); a save clears it */ an.checked = !!(st.push && st.push.preview === "hidden"); } catch (e) {}
         an.addEventListener("change", function () {
           var f = new FormData(); f.append("section", "push"); f.append("data", JSON.stringify({ preview: an.checked ? "hidden" : "full" }));
+          fetch("/settings", { method: "POST", body: f }).catch(function () {});
+        });
+      }
+    }
+    // 2026-11-17: "notify every answer" - every dashboard answer rings when the owner is not looking at that chat.
+    var moiRow = byId("notificationPushEveryRow"), moi = byId("notificationPushEvery");
+    if (moiRow && moi) {
+      moiRow.hidden = !on;
+      if (!moi.dataset.wired) {
+        moi.dataset.wired = "1";
+        try { var st2 = await (await fetch("/settings")).json(); moi.checked = !!(st2.push && st2.push.turn_done === "all"); } catch (e) {}
+        moi.addEventListener("change", function () {
+          var f = new FormData(); f.append("section", "push"); f.append("data", JSON.stringify({ turn_done: moi.checked ? "all" : "long" }));
           fetch("/settings", { method: "POST", body: f }).catch(function () {});
         });
       }
@@ -727,12 +773,29 @@
 
     // Deep-link từ thông báo đẩy: /?mo_thu=<id>. Mở panel rồi nhảy thẳng vào mẩu thư đó.
     try {
+      var phienTu = new URLSearchParams(location.search).get("mo_phien");
+      if (phienTu) {
+        history.replaceState(null, "", location.pathname);
+        setTimeout(function () { moPhien(phienTu); }, 1200);
+      }
       var idTu = new URLSearchParams(location.search).get("mo_thu");
       if (idTu) {
         history.replaceState(null, "", location.pathname);   // đừng để tham số dính lại khi F5
         setTimeout(function () { moTheoId(idTu); }, 1200);
       }
     } catch (e) {}
+  }
+
+  // A "Javis has answered" push opens its chat (/?mo_phien=<id>). The chat code may still be loading on a cold start.
+  function moPhien(sid) {
+    var lan = 0;
+    (function thu() {
+      if (window.JavisSessions && window.JavisSessions.open) {
+        try { window.JavisSessions.open(sid); } catch (e) {}
+        return;
+      }
+      if (++lan < 40) setTimeout(thu, 250);
+    })();
   }
 
   async function moTheoId(id) {
@@ -748,11 +811,16 @@
     // Hội thoại đang mở thì thư của nó coi như đã đọc - không thì một kết quả bị đếm hai lần.
     docPhien: function (sid) {
       if (!sid) return;
+      // Performance (2026-11-05): every chat switch posted a "read" and reloaded the inbox, two round trips, even
+      // when nothing was unread. Skip them when the inbox we hold says this chat has nothing unread.
+      if (!coThuChuaDocCua(sid)) return;
       docThu({ session_id: sid }).then(function () { taiThu(); });
     },
     moTu: function (url) {
-      var id = "";
+      var id = "", phien = "";
       try { id = new URL(url, location.origin).searchParams.get("mo_thu") || ""; } catch (e) {}
+      try { phien = new URL(url, location.origin).searchParams.get("mo_phien") || ""; } catch (e) {}
+      if (phien) { moPhien(phien); return; }
       if (id && id !== "test") moTheoId(id); else openPanel();
     },
   };

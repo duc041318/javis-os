@@ -250,15 +250,32 @@
     var head = x.instruction ? tt("ib.dr_cmd", { lenh: x.instruction }) : tt("ib.dr_ready");
     return '<div class="ib-draft"><div class="ib-draft-h">' + I("sparkles") + ' <span>' + esc(head) + '</span></div>' +
       '<textarea class="ib-draft-t" rows="3">' + esc(x.text || "") + '</textarea>' +
-      '<div class="ib-draft-a"><button type="button" class="s-btn-ghost ib-dr-drop"' + (busy ? " disabled" : "") + '>' + I("x") + ' ' + esc(tt("ib.dr_drop")) + '</button>' +
+      // "Bot học câu này" (owner 2026-11-19): ticked by default; shown when the draft carries the owner's order, and
+      // revealed by conversations.js once the owner rewrites the draft. Unticked for something about one customer only.
+      '<div class="ib-draft-a"><label class="ib-dr-learn"' + (x.instruction ? "" : " hidden") + ' title="' + esc(tt("ib.dr_learn_t")) + '">' +
+        '<input type="checkbox" class="ib-dr-learn-c" checked> <span>' + esc(tt("ib.dr_learn")) + '</span></label>' +
+      '<button type="button" class="s-btn-ghost ib-dr-drop"' + (busy ? " disabled" : "") + '>' + I("x") + ' ' + esc(tt("ib.dr_drop")) + '</button>' +
       '<button type="button" class="s-btn-ghost ib-dr-redo"' + (busy ? " disabled" : "") + '>' + I(busy === "redo" ? "loader" : "rotate-cw") + ' ' +
         esc(tt(busy === "redo" ? "ib.ai_busy" : "ib.dr_redo")) + '</button>' +
-      '<button type="button" class="s-btn ib-dr-send"' + (busy ? " disabled" : "") + '>' + I(busy === "send" ? "loader" : "send") + ' ' + esc(tt("ib.dr_send")) + '</button></div></div>';
+      '<button type="button" class="s-btn ib-dr-send"' + (busy ? " disabled" : "") + '>' + (busy === "send" ? I("loader", { cls: "ic-spin" }) : I("send")) + ' ' + esc(tt("ib.dr_send")) + '</button></div></div>';
+  }
+
+  // ---- the "A.I. is writing" box, in the draft's place while the A.I. drafts (owner 2026-11-18) ----------------------
+  // `w`: {stage, secs, slow, order} already in words (conversations.js `aiWorkView`). The stage and the seconds are
+  // repainted in place every second; only the stage line is announced to a screen reader.
+  function workingHtml(w, icon) {
+    var I = icon || noIcon, x = w || {};
+    return '<div class="ib-draft ib-aiw"><div class="ib-draft-h"><span class="ib-aiw-ic">' + I("sparkles") + '</span>' +
+      '<span class="ib-aiw-st" role="status" aria-live="polite">' + esc(x.stage || "") + '</span>' +
+      '<span class="ib-aiw-s">' + esc(x.secs || "") + '</span></div>' +
+      (x.order ? '<div class="ib-aiw-o">' + esc(tt("ib.aiw_order", { lenh: x.order })) + '</div>' : "") +
+      '<div class="ib-aiw-lines" aria-hidden="true"><span></span><span></span><span></span></div>' +
+      '<div class="ib-aiw-slow"' + (x.slow ? "" : " hidden") + '>' + esc(tt("ib.aiw_slow")) + '</div></div>';
   }
 
   window.JavisInboxV5 = {
     WHO: WHO, whoLabel: whoLabel, whoSentence: whoSentence, whoButtonHtml: whoButtonHtml, whoMenuHtml: whoMenuHtml,
     pickerSummary: pickerSummary, pickerHtml: pickerHtml, filterCats: filterCats, filterMenuHtml: filterMenuHtml, activeChips: activeChips,
-    modeBarHtml: modeBarHtml, modeChipHtml: modeChipHtml, modeSheetHtml: modeSheetHtml, draftHtml: draftHtml,
+    modeBarHtml: modeBarHtml, modeChipHtml: modeChipHtml, modeSheetHtml: modeSheetHtml, draftHtml: draftHtml, workingHtml: workingHtml,
   };
 })();

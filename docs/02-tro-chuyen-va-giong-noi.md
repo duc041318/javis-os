@@ -214,7 +214,8 @@ Khi dừng vì những lý do trên, mục tiêu tự tắt và câu báo luôn 
 
 **Thanh mục tiêu (từ 0.290.0).** Khi có mục tiêu, một thanh hiện ngay trên khung nhập, ở mọi khung chat: biểu tượng, chữ mục tiêu, đồng hồ đếm thời gian đã chạy, rồi ba nút **xoá**, **tạm dừng / chạy tiếp** và **mũi tên** mở chi tiết (đủ chữ mục tiêu, vòng mấy trên năm, phần còn thiếu). Có nhiều mục tiêu (mỗi hội thoại một cái) thì **ô số** ở đầu thanh cho biết có bao nhiêu; bấm vào đó xổ ra danh sách, bấm một dòng để mở đúng hội thoại của nó.
 
-- **Tạm dừng thay vì tắt:** bấm Dừng của khung chat hay gõ một tin mới giữa chừng thì mục tiêu chỉ tạm dừng (đồng hồ đứng), lời của bạn vẫn lên trước. Bấm chạy tiếp trên thanh là Javis đi vòng sau.
+- **Gõ thêm giữa chừng không làm mục tiêu dừng:** tin bạn gõ lúc mục tiêu đang chạy được gộp vào mục tiêu. Vòng đang chạy đọc nó ở bước kế tiếp, và mọi vòng sau đều mang theo nó, nên bạn có thể chỉnh hay mở rộng mục tiêu ngay khi Javis đang làm. Mỗi tin như vậy cho mục tiêu thêm một vòng (tối đa 10 vòng). Nếu vòng đang chạy chưa kịp đọc tin của bạn mà đã báo đạt, Javis vẫn chạy thêm một vòng để làm theo tin đó.
+- **Tạm dừng thay vì tắt:** bấm Dừng của khung chat thì mục tiêu chỉ tạm dừng (đồng hồ đứng). Bấm chạy tiếp trên thanh là Javis đi vòng sau.
 - **Sang hội thoại khác:** mục tiêu không mất mà chờ. Nó chỉ chạy tiếp khi hội thoại của nó đang mở, vì vòng tự động là trình duyệt gửi tin vào khung chat bạn đang xem. Mở lại hội thoại đó là nó đi tiếp.
 - **Tải lại trang:** mục tiêu còn nguyên trên thanh ở trạng thái tạm dừng; bấm chạy tiếp là đi vòng sau. Trần 5 vòng vẫn giữ.
 
@@ -379,7 +380,7 @@ Hàng nút dưới ô gõ có ba thứ đứng cạnh nhau:
 
 Badge cạnh chữ **HỘI THOẠI** (và ở góc phải trang Trò chuyện) hiện engine + model **thật** của lượt vừa chạy, lấy từ server chứ không phải model tự khai. Nếu badge khác cái bạn tưởng, tin badge.
 
-Trên điện thoại, chip model dời lên header và bảng chọn mở ra giữa màn hình.
+Trên điện thoại, chip model nằm trong khung nhập cạnh chip Effort giống hệt máy tính, bảng chọn mở ngay phía trên khung nhập.
 
 ### Ghim thư mục làm việc
 
@@ -478,7 +479,13 @@ Không có cái nào thì lượt nói đi thẳng bộ não chính. Câu cần 
 
 Ở đường Cơ bản, trình duyệt chỉ nghe được một ngôn ngữ, nên câu như "Mở dashboard Facebook ads" hay bị chép thành "Mở double Facebook add". **Tai nghe lại** là một model đa ngôn ngữ nghe lại chính âm thanh câu bạn vừa nói rồi mới chốt chữ vào bong bóng. Chữ tạm của trình duyệt vẫn hiện tức thì trong lúc bạn nói.
 
-- Javis luôn tự chọn tai: có key Groq ở trang **Models** thì dùng **Groq Whisper**, không có thì dùng chữ của trình duyệt như trước.
+- Javis luôn tự chọn tai, bạn không phải cài gì. Tai của **đúng hãng bộ não chính** đi trước: bộ não là ChatGPT thì **gói ChatGPT** nghe (chỉ cần đã nối ChatGPT ở trang **Models**, không cần key), là Groq thì **Groq Whisper**, là OpenAI API thì **gpt-4o-transcribe**.
+- Claude, Antigravity và Grok không mở cổng nghe giọng cho gói của họ, nên khi bộ não là một trong ba hãng này Javis dùng tai tốt nhất đang có, theo thứ tự: Groq, gói ChatGPT, rồi key OpenAI. Không có tai nào thì dùng chữ của trình duyệt như trước.
+- **Agent nghe bằng tai của chính nó**: agent chọn model hãng nào thì lời đọc trong khung chat của agent đó và tin thoại gửi bot chuyên trách của nó được hãng ấy nghe. Agent để Mặc định thì theo bộ não chính. Trang Nhóm (nhiều agent cùng lúc) và trang Hội thoại dùng tai của bộ não chính.
+- Một tai hỏng (mạng, hết hạn mức, gói từ chối) thì tai kế tiếp nghe thay câu đó. Tin thoại Telegram, Zalo đi cùng thứ tự này.
+- **Model của mỗi tai tự lên đời**: mỗi ngày Javis hỏi Groq, OpenAI và Google danh sách model, rồi dùng bản nghe giọng mới nhất (bản đầy đủ, ổn định, nghe được tiếng Việt; không dùng bản thử nghiệm, bản rút gọn hay bản chỉ nghe tiếng Anh). Gói ChatGPT thì tự chọn model ở phía ChatGPT. Bản mới bị hãng từ chối thì câu đó được bản cũ nghe lại, và Javis để bản mới sang một bên một ngày. Muốn giữ cố định một model Groq thì ghi tên vào `voice.stt_model`.
+- **Chấm điểm trước khi đổi model**: gặp bản mới, Javis cho bản mới và bản đang dùng cùng nghe 13 câu mẫu (tiếng Việt, tiếng Anh, câu Việt xen thuật ngữ Anh như "Mở dashboard Facebook ads") đọc bằng giọng Edge, rồi đếm tỉ lệ sai từ và số thuật ngữ nghe đúng. Bản mới **không tệ hơn** mới được dùng; tệ hơn thì giữ bản cũ và một tháng sau mới chấm lại bản đó. Mỗi lần chấm tốn chừng một phút âm thanh cho mỗi model, chỉ chạy khi hãng ra model mới. Kết quả ghi ở `stt_models.json` trong thư mục dữ liệu của Javis, log máy chủ có dòng `[stt gate]`.
+- Muốn chấm bằng giọng thật của bạn: thu vài câu, bỏ vào thư mục `stt_bench/real/` trong thư mục dữ liệu, và ghi vào `stt_bench/real/refs.tsv` mỗi dòng `tên file<TAB>câu đúng<TAB>thuật ngữ|thuật ngữ`. Lần chấm sau sẽ dùng cả những câu này.
 - Đo trên 20 câu lệnh Việt xen Anh: trình duyệt sai 41% số từ, qua tai Groq còn 14%. Mỗi câu mất thêm chừng 1 giây.
 - Tai lỗi, chậm quá 8 giây, hay ra câu lệch hẳn bản nháp (Whisper đôi khi bịa câu khi gặp tiếng ồn) thì Javis giữ chữ của trình duyệt, không mất lượt nói.
 - Câu gửi đi là chữ của tai nếu có tai, không thì là chữ của trình duyệt lúc bạn kết thúc câu. Đã gửi rồi thì AI không sửa lại tin trong lịch sử.
@@ -543,7 +550,7 @@ Gói Pro/Max giữ bộ nhớ đệm của Claude Code 1 giờ. Nghỉ quá 1 gi
 Dưới 860px chiều ngang, giao diện đổi hẳn cho vừa màn hình:
 
 - Điều hướng thu thành ngăn kéo: bấm nút **☰** để mở, bấm nền mờ, chọn một mục hoặc nhấn Esc để đóng.
-- **Chip model** và nút **+** (hội thoại mới) dời lên header.
+- Nút **+** (hội thoại mới) dời lên header. Chip model vẫn ở trong khung nhập, cạnh chip Effort, như trên máy tính.
 - Nhóm **Hệ thống** (chọn brain, nút đổi tông sáng/tối, dải HỆ THỐNG và MCP) dời xuống đáy ngăn kéo điều hướng.
 - Ô nhập rút gọn lời nhắc thành "Nói hoặc gõ cho Javis…".
 - Nút **🕘 Lịch sử** ở header bị ẩn (trang **Trò chuyện** có sẵn lịch sử).

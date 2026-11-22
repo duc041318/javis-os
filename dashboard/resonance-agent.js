@@ -98,7 +98,43 @@
       '<span class="ws-rs-text">' + esc(o.saving ? label : tw("resonance.auto_label")) + "</span>" +
       '<span class="toggle toggle-sm"><input type="checkbox" class="ws-rs-toggle" data-rs="' + esc(row.slug) + '"' +
       ' role="switch" aria-checked="' + (on ? "true" : "false") + '" aria-label="' + esc(aria) + '"' + (on ? " checked" : "") +
-      (o.saving ? " disabled" : "") + "><span></span></span></label>";
+      (o.saving || o.locked ? " disabled" : "") + "><span></span></span></label>";
+  }
+
+  /* 2026-11-11 (owner report: 17 assistants of one Store pack, one card at a time): the assistants waiting for
+     "same assistant?" grouped by the Store pack that placed their file. Only packs with two or more waiting get a
+     group: a single one is answered on its own card. `rows`: the agents of GET /resonance/agents. */
+  function missingByPack(rows) {
+    var by = {}, order = [];
+    (rows || []).forEach(function (r) {
+      if (!r || r.status !== "missing" || !r.pack) return;
+      if (!by[r.pack]) { by[r.pack] = { pack: r.pack, name: r.pack_name || r.pack, n: 0 }; order.push(r.pack); }
+      by[r.pack].n += 1;
+    });
+    return order.map(function (k) { return by[k]; }).filter(function (g) { return g.n >= 2; });
+  }
+
+  /* One line per pack under the filter bar of the Partners page: how many wait, and ONE button that answers "same
+     assistant" for all of them. What the answer means sits behind the (i). `saving`: { packId: true } while a
+     request is out (the button is locked and says so). */
+  function packConfirmHtml(groups, saving) {
+    var sv = saving || {};
+    return (groups || []).map(function (g) {
+      var busy = !!sv[g.pack];
+      return '<div class="ws-tag-note ws-pack-confirm" role="status">' +
+        '<span class="ws-pack-confirm-text">' + esc(tw("resonance.pack_confirm_text", { n: g.n, pack: g.name })) +
+        infoBtn() + "</span>" + infoBody(sub(tw("resonance.pack_confirm_info"))) +
+        '<button type="button" class="ws-btn primary ws-pack-confirm-btn" data-pack-confirm="' + esc(g.pack) + '"' +
+        (busy ? " disabled" : "") + ">" + esc(tw(busy ? "resonance.t0_saving" : "resonance.pack_confirm_btn")) +
+        "</button></div>";
+    }).join("");
+  }
+
+  /* 2026-11-14 (owner: "bật auto là chấp nhận cho full quyền, kể cả quyền hành động"): turning Auto ON is the consent,
+     so it asks once, in plain words, what full access means. Not asked for an assistant that is already on. */
+  function onConfirmText(row) {
+    if (!row || (row.enabled && row.status === "active")) return "";
+    return tw("resonance.t0_on_confirm", { name: row.name || row.slug });
   }
 
   /* Hỏi lại trước khi TẮT khi trợ lý còn mục tiêu mở (hợp đồng A1: dừng ở bước kế tiếp). Không có thì không hỏi. */
@@ -118,7 +154,7 @@
     var on = !!r.enabled && r.status === "active";
     // T0: công tắc nằm trên dòng trợ lý ở cột trái (một nơi duy nhất). Ở đây chỉ còn trạng thái bằng chữ.
     // 0.175.0 (chủ repo 16/10/2026: "bên cài đặt quá rồi... có một nút nhỏ kiểu nút i"): đầu mục chỉ còn tên và trạng thái.
-    // Mọi câu giải thích (Auto làm gì, bật ở đâu, Auto không phải Toàn quyền, ghi chú công tắc, kiểm chứng) nằm sau nút i.
+    // Mọi câu giải thích (Auto làm gì, bật ở đâu, Auto là toàn quyền, ghi chú công tắc, kiểm chứng) nằm sau nút i.
     // Thứ cần chủ làm (mở phiên mới, xác nhận trợ lý, cảnh báo engine) vẫn đứng ngoài, không bị giấu.
     var html = '<div class="rsa-head"><span class="rsa-title">' + esc(tw("resonance.a1_title")) + infoBtn() + "</span>" +
       '<span class="rsa-state">' + esc(tw(stateKey(r))) + "</span></div>";
@@ -127,7 +163,7 @@
     var noChat = !supWarn && (r.support || {}).chat_output === false;
     var nk = toggleNoteKey(r.status === "unregistered" ? { status: "active", enabled: false } : r, session);
     html += infoBody(sub(tw("resonance.auto_desc"), "rsa-desc") + sub(tw("resonance.t0_where")) +
-      sub(tw("resonance.auto_not_full"), "rsa-note") + sub(tw(nk), "rsa-note") +
+      sub(tw("resonance.auto_full"), "rsa-note") + sub(tw(nk), "rsa-note") +
       (noChat ? sub(tw("resonance.a1_engine_no_chat_output")) : supWarn ? "" : sup) +
       (on ? sub(tw("resonance.verify_note"), "rsa-note rsa-verify") : ""));
     if (on && session === "needs_new_session") {
@@ -278,6 +314,20 @@
       }, function () { return done({ ok: false, error: tw("resonance.failed") }); });
   }
 
+  /* "Same assistant" for every waiting assistant of one Store pack. The server works out the set itself; like
+     toggleAgent this always fires the reload event, so every place shows the REAL state afterwards. */
+  function confirmPack(packId) {
+    function done(out) {
+      try { window.dispatchEvent(new CustomEvent("javis:resonance-agents-changed")); } catch (e) {}
+      return out;
+    }
+    return postJson("/resonance/agents/confirm?brain=" + q(brain()), { pack: packId, same: true })
+      .then(function (res) {
+        if (res.code === 200 && res.j && res.j.ok) return done({ ok: true, error: "", confirmed: Number(res.j.confirmed) || 0 });
+        return done({ ok: false, error: String((res.j && res.j.error) || tw("resonance.failed")) });
+      }, function () { return done({ ok: false, error: tw("resonance.failed") }); });
+  }
+
   function wire(host, row) {
     var nb = host.querySelector(".rsa-new-session");
     if (nb) nb.addEventListener("click", function () {
@@ -362,7 +412,9 @@
   }
 
   var api = { mount: mount, refresh: refresh, panelHtml: panelHtml,
-    rowToggleHtml: rowToggleHtml, stateKey: stateKey, offConfirmText: offConfirmText, toggleAgent: toggleAgent,
+    rowToggleHtml: rowToggleHtml, stateKey: stateKey, offConfirmText: offConfirmText, onConfirmText: onConfirmText,
+    toggleAgent: toggleAgent,
+    missingByPack: missingByPack, packConfirmHtml: packConfirmHtml, confirmPack: confirmPack,
     settingsHtml: settingsHtml, toggleNoteKey: toggleNoteKey, supportHtml: supportHtml };
   if (typeof window !== "undefined") window.JavisResonanceAgent = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

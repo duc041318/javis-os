@@ -4,9 +4,40 @@
 
 Chạy Javis OS trong vài phút. Chi tiết từng phần: [docs/](docs/README.md).
 
+## Máy tính cá nhân (Windows, macOS) - tải bộ cài
+
+Cài Javis như một ứng dụng bình thường: tải một file, bấm mở, xong thì có biểu tượng JAVIS OS để bấm vào mỗi ngày. Bộ cài tự kiểm tra máy còn thiếu gì (Git, Python, Node, các bộ não AI) và tự cài phần thiếu.
+
+- **Windows 10/11:** tải [JavisOS-Setup.exe](https://github.com/blogminhquy/javis-os/releases/download/desktop/JavisOS-Setup.exe), bấm đúp, bấm Next tới hết. Tiến trình cài hiện ngay trong cửa sổ Setup, từng bước một (vài phút), không còn cửa sổ đen riêng. Xong thì có biểu tượng JAVIS OS trên Desktop và Start menu.
+- **macOS 11 trở lên:** mở **Terminal** (Launchpad, gõ Terminal), dán dòng này rồi Enter. Cài cách này macOS không hiện cảnh báo:
+  ```
+  curl -fsSL https://raw.githubusercontent.com/blogminhquy/javis-os/main/packaging/macos/get-javis.sh | bash
+  ```
+  Lệnh này tải Javis về, chép **JAVIS OS** vào **Applications** rồi cài luôn trong cửa sổ Terminal đó (có thể hỏi đặt tài khoản quản trị Javis và mật khẩu máy Mac một lần). Xong thì mở JAVIS OS từ Launchpad.
+
+  Thích tải file hơn? Tải [JavisOS-macOS.dmg](https://github.com/blogminhquy/javis-os/releases/download/desktop/JavisOS-macOS.dmg), mở ra, kéo **JAVIS OS** vào **Applications**, rồi mở từ Launchpad. File chưa ký bằng Apple Developer ID, nên lần mở đầu macOS sẽ chặn: cách mở nằm ở mục "bị chặn" bên dưới.
+
+Bấm vào biểu tượng là Javis mở thành cửa sổ riêng (không thanh địa chỉ), Javis tự chạy cùng máy, nút **Cập nhật** trong app dùng được như thường. Dữ liệu nằm ở thư mục `JavisOS` trong thư mục người dùng; gỡ app không xoá thư mục này.
+
+**Windows: cách cài không bị màn hình cảnh báo (khuyên dùng).** Bộ cài Windows chưa ký số, nên tải bằng trình duyệt thì lần đầu máy sẽ chặn lại. Dán một dòng lệnh thì không bị chặn, vẫn ra đúng bộ cài có logo Javis: bấm Start, gõ `PowerShell`, mở lên, dán dòng này rồi Enter:
+```
+irm https://raw.githubusercontent.com/blogminhquy/javis-os/main/packaging/windows/get-javis.ps1 | iex
+```
+
+Bộ cài thay đổi gì trên máy, ai ký số, Javis gửi gì đi đâu: [Code signing policy](docs/code-signing-policy.md) · [Privacy policy](PRIVACY.md) (tiếng Anh).
+
+Nếu đã tải file bằng trình duyệt và bị chặn:
+- Edge hoặc Chrome báo "JavisOS-Setup.exe isn't commonly downloaded" và không lưu file: trong ô Downloads, rê chuột vào dòng đó, bấm dấu ba chấm, chọn **Keep**, rồi **Show more** và **Keep anyway**.
+- Windows hiện "Windows protected your PC": bấm **More info** rồi **Run anyway**.
+- Trình diệt virus xoá mất file, hoặc Windows chặn mà không có nút **Run anyway** (máy bật Smart App Control): cài không qua file exe. Cài [Git](https://git-scm.com/download/win), mở PowerShell, dán dòng này rồi Enter. Xong thì Javis tự mở ở http://localhost:7777 và tự chạy cùng máy:
+  ```
+  git clone https://github.com/blogminhquy/javis-os.git "$env:USERPROFILE\JavisOS"; cd "$env:USERPROFILE\JavisOS"; powershell -ExecutionPolicy Bypass -File install.ps1
+  ```
+- macOS báo không mở được: vào **System Settings → Privacy & Security**, kéo xuống bấm **Open Anyway**, rồi mở lại JAVIS OS.
+
 ## Cách 1 - Hostinger VPS (Docker Manager, 1-click)
 
-> 🛒 **Chưa có VPS?** [Đăng ký VPS Hostinger tại đây](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). VPS có sẵn Docker Manager nên cài Javis đúng một cú bấm. Thuê xong quay lại làm các bước dưới.
+> 🛒 **Chưa có VPS?** [Đăng ký VPS Hostinger tại đây](https://www.hostinger.com?REFERRALCODE=JAVISOS). VPS có sẵn Docker Manager nên cài Javis đúng một cú bấm. Thuê xong quay lại làm các bước dưới.
 
 1. hPanel → VPS → **Docker Manager** → **Compose** → **Compose from URL**.
 2. Dán URL:
@@ -27,7 +58,7 @@ Cập nhật bản mới: bấm **⬆ Cập nhật ngay** trong app (trang Cập
 
 ## Cách 2 - Docker ở máy/VPS bất kỳ
 
-> 🛒 **Cần thuê VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) chạy được cả cách này.
+> 🛒 **Cần thuê VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) chạy được cả cách này.
 
 ```
 docker compose -f docker-compose.yml up -d

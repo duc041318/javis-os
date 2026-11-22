@@ -13,7 +13,7 @@ Javis OS là một AI agent cá nhân + Second Brain. "Bộ não" của nó là 
 
 ## Cách 1 - Hostinger Docker Manager (1-click, nhanh nhất) ⚡
 
-> 🛒 **Chưa có VPS?** [Đăng ký VPS Hostinger tại đây](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). VPS có sẵn Docker Manager nên cài Javis đúng một cú bấm. Thuê xong quay lại làm các bước dưới.
+> 🛒 **Chưa có VPS?** [Đăng ký VPS Hostinger tại đây](https://www.hostinger.com?REFERRALCODE=JAVISOS). VPS có sẵn Docker Manager nên cài Javis đúng một cú bấm. Thuê xong quay lại làm các bước dưới.
 
 VPS Hostinger → **Docker Manager → Compose → URL** → dán link rồi **Deploy**:
 ```
@@ -45,7 +45,7 @@ màn **tạo tài khoản admin**.
 
 ## Cách 2 - Docker trên VPS bất kỳ (pull image, không cần clone source)
 
-> 🛒 **Cần thuê VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) chạy được cả cách này.
+> 🛒 **Cần thuê VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) chạy được cả cách này.
 
 Cần Docker. Chưa có? `curl -fsSL https://get.docker.com | sh`
 ```bash
@@ -280,6 +280,15 @@ boot (systemd) và in ra địa chỉ. Nếu nó báo Claude chưa đăng nhập
 claude auth login --claudeai
 ```
 Quản lý dịch vụ: `journalctl -u javis -f` · `sudo systemctl restart javis`
+
+**Cài bằng root trên Linux:** bản cài mới không chạy Javis bằng root nữa. Script tự tạo tài khoản
+thường `javis` và cho dịch vụ chạy dưới tài khoản đó, vì Claude Code từ chối mức Toàn quyền dưới
+root. Bản clone nằm trong `/root` (tài khoản khác không vào được) sẽ được chuyển sang `/opt/<tên thư mục>`.
+Đăng nhập Claude ở trang Models, hoặc `su - javis -c 'claude auth login --claudeai'`. Cập nhật vẫn là
+`./update.sh` chạy bằng root. Máy đã cài từ trước giữ nguyên tài khoản cũ. Tuỳ chọn:
+`JAVIS_USER=<tên>` đổi tên tài khoản, `JAVIS_INSTALL_DIR=<thư mục>` đổi nơi chuyển tới,
+`JAVIS_RUN_AS_ROOT=1` giữ cách cũ (khi đó cần `IS_SANDBOX=1` trong `.env`, chỉ nên dùng trên máy
+dành riêng cho Javis vì AI sẽ có quyền trên cả máy).
 
 ---
 

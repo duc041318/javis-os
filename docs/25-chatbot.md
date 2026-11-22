@@ -51,7 +51,7 @@ Bot **đọc Agent lúc chạy**, không chép lại. Sau này sửa Agent ở t
 
 ### 3. Một tài khoản kênh: token riêng, lấy đúng chỗ theo kênh
 
-Từ 0.61.0 token là một **kênh** (tài khoản bot), bot chỉ **trỏ tới** nó. Bạn thêm kênh bằng nút **Thêm kênh** ở mục **Kênh chưa có bot** ngay dưới danh sách bot rồi tích chọn khi tạo bot, hoặc bấm **Kết nối kênh mới** ngay trong form Bot mới (kênh vừa nối được tick sẵn); hai đường cho cùng một kết quả. Một bot trực được **nhiều** tài khoản (một vai trả lời ở cả Telegram lẫn Zalo Bot), còn mỗi tài khoản chỉ **một** bot trực.
+Từ 0.61.0 token là một **kênh** (tài khoản bot), bot chỉ **trỏ tới** nó. Bạn thêm kênh bằng nút **Thêm kênh** ở mục **Kênh chưa có bot** ngay dưới danh sách bot rồi tích chọn khi tạo bot, hoặc bấm **Kết nối kênh mới** ngay trong form Bot mới (kênh vừa nối được tick sẵn); hai đường cho cùng một kết quả. Một bot trực được **nhiều** tài khoản (một vai trả lời ở cả Telegram lẫn Zalo Bot), còn mỗi tài khoản chỉ **một** bot trực. Mỗi bot trực tối đa **100 Fanpage** (Messenger và Instagram) và 20 tài khoản cho mỗi kênh còn lại; chọn quá thì Javis báo rõ, không âm thầm bỏ bớt.
 
 Nếu bot chạy trên **Telegram**: vào **@BotFather** gõ `/newbot`, đặt tên và username, lấy chuỗi token dạng `123456789:ABCdef...`.
 
@@ -72,7 +72,7 @@ Dán nhầm token của kênh này vào kênh kia thì Javis nói thẳng ra ch�
 | Bot gửi ảnh cho khách | Có | Đang thử nghiệm |
 | Bot gửi file tài liệu (PDF, bảng tính) | Có | **Chưa được** (Zalo chưa mở API) |
 | Khách gửi ảnh cho bot đọc | Có | Có |
-| Khách gửi file tài liệu cho bot đọc | Có | Chưa |
+| Khách gửi file tài liệu cho bot đọc | Có | Khi Zalo chuyển file thì bot đọc, không thì bot báo lại ([chi tiết](26-kenh-zalo-bot.md#gửi-file-cho-bot-pdf-word-excel-video)) |
 | Trần một tin nhắn | 4096 ký tự | 2000 ký tự |
 | Bot hiện menu lệnh `/` | Có | Không, phải gõ tay |
 
@@ -95,14 +95,15 @@ Cái đầu để **người khác nói chuyện với Javis**. Cái sau để *
 
 ### Bước 1: Tạo bot
 
-Bấm **Bot mới**. Từ 0.64.85 form có **bốn phần**, mỗi phần một quyết định, và những ô ít khi đụng tới nằm trong mục **Nâng cao** đã gập sẵn:
+Bấm **Bot mới**. Từ 0.64.85 form chia thành từng phần, mỗi phần một quyết định:
 
 | Phần | Điền gì |
 |---|---|
 | **Bot là ai** | Tích một hay nhiều tài khoản kênh (chỉ hiện tài khoản của brain này mà chưa bot nào trực), đặt tên bot, chọn Agent làm bộ não hoặc bấm **Tạo Agent**. Kênh đang do bot khác trực hiện **mờ kèm ổ khoá**, ghi rõ bot nào (và brain nào nếu khác brain đang mở) đang giữ. Chưa có kênh thì bấm **Kết nối kênh mới**: chọn loại kênh, dán token, Kiểm tra. Xem [Chọn Telegram hay Zalo](#chọn-telegram-hay-zalo) |
 | **Bot trả lời ai** | Bốn thẻ chọn một, xem mục [Bot trả lời ai](#bot-trả-lời-ai) ngay dưới. Chọn nhóm hay người thì tick trong danh sách, không phải gõ id. Kèm nút chọn **khi nào bot lên tiếng trong nhóm**: Được gọi tên (mặc định), Tự đánh giá, hoặc Mọi tin (thẻ Tự động hóa tất cả đã quyết sẵn nên ẩn nút này) |
 | **Bot được làm gì** | Mức quyền. Cứ để **Chỉ đọc** cho lần đầu; xem mục [Bốn mức quyền](#bốn-mức-quyền---bot-được-làm-gì) trước khi nâng |
-| Nâng cao | Ngôn ngữ trả lời |
+
+Bot luôn trả lời khách bằng đúng thứ tiếng khách nhắn, giống Claude hay ChatGPT. Từ 15/11/2026 form không còn ô ghim ngôn ngữ; muốn bot luôn nói một thứ tiếng thì ghi câu đó vào file Agent của bot.
 
 Chỉ có tài khoản Zalo Bot thì phần chọn nhóm **biến mất** thay vì hiện ra rồi vô tác dụng: gói bot cơ bản của Zalo không cho bot vào nhóm, nên chọn nhóm ở đó chỉ là một lời hứa suông nằm lại trong dữ liệu.
 
@@ -145,7 +146,9 @@ Bot đã đặt người trực từ trước 0.64.83 thì **giữ nguyên** (th
 
 1. Mời bot vào nhóm như mời một thành viên.
 2. Trong nhóm, gõ **`/id`**. Bot trả về id nhóm **và nói luôn tình trạng**: nhóm này đã được bật chưa, chế độ riêng tư của Telegram đang bật hay tắt, và phải làm gì tiếp.
-3. Nhóm đó **hiện lên thẻ bot** ở trang Chatbot. Bấm **Cho phép nhóm này**. Xong.
+3. Nhóm đó **hiện lên thẻ bot** ở trang Chatbot, trong dòng "chờ cho phép". Bấm vào dòng đó, tích nhóm rồi bấm **Cho phép**. Xong.
+
+Nhiều nhóm cùng chờ thì tích từng nhóm, hoặc **Chọn tất cả**, rồi bấm **Cho phép** một lần cho cả loạt. Nút ghi sẵn con số, ví dụ "Cho phép (9)", để bạn biết một cú bấm mở bot cho bao nhiêu nơi. Mở ra chưa dòng nào được tích sẵn: cho bot lên tiếng ở đâu là việc bạn chọn. Nhóm không muốn thì tích rồi bấm **Bỏ qua**; khi có người gọi bot ở đó lần nữa nó sẽ hiện lại.
 
 Dùng `/id` chứ không phải gọi tên bot, và đó là chủ ý: **lệnh `/...` luôn tới được bot** dù Telegram đang bật chế độ riêng tư, còn tin nhắc tên thì chưa chắc (xem mục dưới). Nếu bước 2 mà bot **không trả lời gì cả** thì vấn đề không nằm ở nhóm - hoặc bot đang tắt, hoặc token hỏng; xem chấm trạng thái trên thẻ.
 
@@ -163,7 +166,7 @@ Muốn nó trả lời **mọi câu trong nhóm** thì đổi nút "Trong nhóm,
 
 Từ 0.64.82 bot gắn vào **tài khoản Zalo cá nhân** (nối ở trang Kết nối, xem [Zalo Agent MCP](12-zalo.md)) đứng được trong nhóm Zalo, không chỉ chat riêng. Nick đó là người thật nên mọi thứ dưới đây nghiêng về phía im lặng.
 
-**Nhóm phải được bạn cho phép.** Có tin từ một nhóm lạ thì nhóm hiện lên hàng chờ ngay trên thẻ bot, kèm tên nhóm và nút **Cho phép nhóm này**. Khác Telegram, ở Zalo bot **không nói một câu nào** vào nhóm chưa cho phép: một câu như "em chưa được bật" trước cả nhóm là tự khai mình là máy.
+**Nhóm phải được bạn cho phép.** Có tin từ một nhóm lạ thì nhóm hiện lên hàng chờ ngay trên thẻ bot, kèm tên nhóm và ô tích để **Cho phép**. Khác Telegram, ở Zalo bot **không nói một câu nào** vào nhóm chưa cho phép: một câu như "em chưa được bật" trước cả nhóm là tự khai mình là máy.
 
 **Được tag, reply hoặc gọi tên thì trả lời luôn.** Từ 0.65.0 gọi tên trơn ("nhi mai ơi") cũng được coi là gọi, xem [Bộ phán xử](#bộ-phán-xử-bot-tự-quyết-nói-hay-im-và-học-từ-nhóm). Bot nhận ra tag bằng "@tên" trong chữ (tên là nhãn kết nối hoặc tên hiển thị của nick), bằng `mentions` nếu Zalo trả về, và nhận ra reply vào tin của nó. Tag người khác thì bot không nhận vơ. Nếu tag mà bot im, xem mục sự cố bên dưới.
 
@@ -191,6 +194,8 @@ Chế độ này cũng chạy với nhóm Telegram nếu bạn đã tắt chế 
 
 **Số phút nhường chỉnh được, hoặc tắt hẳn** (từ 0.172.0). Ô **Nhường khi bạn nhắn tay (phút)** trong mục Giờ trực của form bot. **Để trống** (mặc định, cũng là mọi bot tạo trước 0.172.0) thì giữ nguyên như cũ: nhường 10 phút, chat riêng được trả lời thay khi hết 10 phút, còn nhóm im suốt quãng đó, kể cả khi bị tag. **Ghi một số** (kể cả 10) là bạn chọn luật mới cho nhóm: tin **tag thẳng nick** hoặc trả lời tin của nick được trả lời ngay, kể cả trong quãng nhường; tin không gọi ai được giữ lại và trả lời khi hết quãng (xem đoạn dưới). Số khác 10 (vd 5) thì bot nhường đúng chừng ấy phút, và ở chat riêng cũng chờ đúng chừng ấy rồi trả lời thay tin khách bạn chưa đáp. **Đặt 0** thì bạn nhắn tay vào cuộc chat nào bot cũng không im ở cuộc chat đó, kể cả trong nhóm; nghĩa là lúc bạn đang nói chuyện bot vẫn có thể chen vào trả lời. Dù vậy, tin khách ở chat riêng mà bạn đã trả lời tay thì bot không trả lời lại lần nữa.
 
+**Zalo OA và Messenger cũng nhường** (từ 22/11/2026). Mặc định bot KHÔNG nhường (ô để trống hoặc 0). Ghi một số vào ô trên thì khi nhân viên trả lời khách từ app Zalo OA hoặc hộp thư của Trang, bot im ở cuộc chat đó chừng ấy phút, tính từ tin cuối của nhân viên, rồi tự trả lời lại. Cuộc chat vẫn ở chế độ Tự động nên không phải bấm trả lại cho bot. Tin khách gửi trong lúc bot nhường nằm ở Hộp thư chờ người trả lời; khác Zalo cá nhân, bot không tự trả lời lại các tin đó khi hết thời gian, nó trả lời từ tin kế tiếp của khách. Tin chào mừng và tin tự trả lời của kênh (đến trong vòng 10 giây sau tin khách) không tính là nhân viên.
+
 **Tóm lại luật nhắn tay** (từ 0.172.0): bạn không nhắn tay thì bot trả lời liên tục như thường. Bạn vừa nhắn tay vào một cuộc chat thì tính từ **tin nhắn tay đó**: hết số phút nhường mà bạn không nhắn thêm, bot chủ động trả lời tiếp các tin khách đang chờ. Chat riêng gộp thành một lượt; nhóm (chỉ khi bot đã ghi số phút nhường) thì mỗi người một lượt (tối đa 5 người nhắn sau cùng) và vẫn theo luật nhóm của bot, nên nhóm đặt "luôn trả lời" có thể nhận tới 5 câu trả lời liền nhau lúc hết quãng. Bạn nhắn tay thêm thì mốc tính lại từ tin mới nhất.
 
 **Tự nhận lời mời kết bạn và đọc lời giới thiệu** (từ 0.172.0, chỉ Zalo cá nhân, mặc định tắt). Bật ô **Tự nhận lời mời kết bạn và đọc lời giới thiệu** trong mục Giờ trực của form bot. Cứ 1 giờ Javis hỏi Zalo một lần các lời mời kết bạn đang chờ của nick (mỗi nick tối đa 24 lần gọi Zalo một ngày, nên người gửi lời mời có thể chờ tới khoảng 1 giờ mới được nhận), nhận từng lời mời (tối đa 10 lời mời một lượt, cách nhau vài giây), lưu lời nhắn kèm lời mời vào Hộp thư như tin đầu tiên của người đó và đưa cho bot như tin họ vừa nhắn. Lời giới thiệu đủ (tên phụ huynh, tên con, lớp) thì bot không hỏi lại; thiếu hoặc không có lời nhắn thì bot hỏi phần còn thiếu. Lý do cần bật: lời nhắn kèm lời mời chỉ còn lúc lời mời đang chờ, nhận xong (kể cả nhận trên điện thoại) là Zalo bỏ đi. Ngoài giờ trực, hoặc khi bot chỉ trả lời người được chọn, Javis không nhận lời mời nào: lời mời cứ chờ đó, vào giờ trực thì nhận. Lời mời Zalo từ chối nhận thì lượt đó dừng, người đó được để yên một lúc (lâu dần), hỏng 3 lần thì bỏ qua tới lần Javis khởi động lại, nên không chặn những lời mời mới hơn. Việc này chạy riêng, Zalo chậm cũng không làm chậm việc đọc tin. Cần javis-zalo 1.0.0 trở lên (Javis đang ghim 1.4.0).
@@ -214,7 +219,7 @@ Chế độ Tự đánh giá cũ dùng một cửa từ khoá: tin nào không g
 **Khác luật cũ ở đâu.**
 - **Gọi tên trơn cũng là gọi bot**, không cần @: "nhi mai ơi", "alo nhi mai", hoặc tên đứng đầu câu. Riêng điều này áp dụng cho MỌI bot, kể cả khi chưa ở chế độ Tự đánh giá. Tên tự nhận là nhãn kết nối Zalo và tên hiển thị của nick. Muốn bot nhận thêm một tên (ví dụ "Thu") thì gọi bot rồi dạy, ví dụ "Nhi Mai ơi, từ giờ gọi em là Thu nhé", bằng tài khoản của người được dạy (xem dưới). Tên nằm giữa câu ("hỏi nhi mai xem") chưa đủ để coi là gọi: bộ phán xử sẽ cân nhắc.
 - **Đọc vài tin gần nhất** thay vì đúng một tin, nên người vừa được bot trả lời hỏi tiếp ("vậy còn cái kia?") được hiểu là hỏi tiếp cho bot.
-- **Mọi quyết định đều có dấu vết, kể cả lúc bot im.** Menu "..." của thẻ bot, mục **Bộ phán xử**, liệt kê từng tin kèm lý do (ví dụ "Tài liệu không có phần khớp", "Điểm thấp hơn ngưỡng") và điểm so với ngưỡng.
+- **Mọi quyết định đều có dấu vết, kể cả lúc bot im.** Menu "..." của thẻ bot, mục **Bộ phán xử**, liệt kê từng tin kèm lý do (ví dụ "Tài liệu không có phần khớp", "Điểm thấp hơn ngưỡng") và điểm so với ngưỡng. Mục này có ở thẻ của mọi bot; bot chưa ở chế độ Tự đánh giá thì bảng mở ra báo bộ phán xử đang nghỉ, kèm nút **Sửa** để bật.
 
 **Mỗi bot một vai.** Bộ phán xử **không viết câu trả lời**: giọng và cách trả lời vẫn là của Agent, nên Nhi Mai nói kiểu Nhi Mai và Javis Vũ nói kiểu Javis Vũ. Ba bot khác ngành không đọc được ca đã học, bài học hay hồ sơ của nhau, và ngưỡng của nhóm này không đổi nhóm kia. Bot mới có sẵn khoảng 12 tin mẫu đúng ngành của nó, do model viết từ Agent, và các mẫu này nhạt dần khi bot học được ca thật. Bản 0.65.0 có ô "Luật lên tiếng" viết tay: chữ đã viết được gộp một lần vào **bài học** của bot (thấy trong menu Bộ phán xử), form không còn ô đó.
 
@@ -590,6 +595,90 @@ Từ 0.85.5 cũng **không còn hạn mức lúc bot tự lên tiếng** trong n
 
 Không còn giới hạn nghĩa là một người nhắn liên tục, hay một nhóm đông hỏi nhiều, sẽ tốn lượt dùng model của bạn liên tục. Thấy bất thường thì bấm **Tiếp quản** cuộc chat đó ở trang Hội thoại, thu hẹp mục **Bot trả lời ai**, hoặc đổi nhóm đó về **Được gọi tên**.
 
+## Kênh API nội bộ
+
+Từ 0.459.0, **thử nghiệm**: cách gọi và khuôn câu trả lời có thể còn đổi trong vài bản tới, mỗi lần đổi sẽ ghi rõ trong nhật ký cập nhật. Kênh này cho **một máy chủ của bạn** (ví dụ web quản lý nội bộ của studio) hỏi **một** Chatbot qua HTTP, để nhân viên hỏi đáp công việc ngay trong web đó. Máy chủ của bạn nhận câu hỏi của nhân viên, gửi sang Javis, rồi hiện câu trả lời.
+
+Khác hẳn token API "chỉ chat" ở trang Cài đặt: token đó gọi `/chat` **dưới danh nghĩa chủ**, toàn quyền. Kênh API nội bộ chạy một **Chatbot**, nên giữ nguyên mọi rào của Chatbot: chỉ thấy brain của nó, không chạy lệnh máy, không gọi nguồn dữ liệu ở mức thấp. Khoá của kênh chỉ mở đúng một đường `POST /chatbot-api/v1/turn`, và token API không mở được đường đó.
+
+### Cách nối
+
+1. Trang **Chatbot** → tab **Kênh** → **Thêm kênh** → chọn **API nội bộ**, đặt tên, bấm **Lưu**. Không có ô dán token: Javis tự sinh khoá (`jvc_...`, 32 byte ngẫu nhiên) và **hiện đúng một lần**. Chép khoá sang máy chủ của bạn ngay. Javis chỉ giữ bản băm, nên mất khoá thì không xem lại được, chỉ có thể xoay khoá mới.
+2. Gắn tài khoản đó cho một bot ở mức **Chỉ đọc** hoặc **Đọc tài liệu**, rồi bật bot.
+3. Máy chủ của bạn gọi `POST http://<máy Javis>:<cổng>/chatbot-api/v1/turn` **trực tiếp**, không đi qua tên miền công khai. Mặc định chỉ chính máy chạy Javis gọi được. Máy chủ gọi nằm ở container khác hay máy khác trong mạng nội bộ thì thêm địa chỉ của nó vào `JAVIS_CHATBOT_API_ALLOW` (xem **Giới hạn và nguồn gọi**).
+
+Bấm **Sửa** tài khoản để **Xoay khoá** (khoá cũ ngừng chạy ngay, không cần khởi động lại bot) và chỉnh giới hạn tần suất.
+
+### Khế ước HTTP
+
+```
+POST /chatbot-api/v1/turn
+Authorization: Bearer <khoá của tài khoản kênh API>
+Content-Type: application/json
+
+{
+  "message_id": "mgr-8f2c...",          // chống gửi trùng, bắt buộc
+  "conversation_id": "mgr-user-123",    // khoá hội thoại: mỗi người dùng một mạch
+  "user": {"id": "123", "name": "Nguyễn Văn A"},
+  "scopes": ["vai:nhan-vien", "cs-hn"], // phạm vi tài liệu riêng, do máy chủ của bạn quyết
+  "text": "Concept Khu vườn trên mây cần chuẩn bị gì?",
+  "context": "## Lịch của bạn hôm nay\n- 15:00-17:00 ..."  // tuỳ chọn
+}
+```
+
+| Mã | Khi nào |
+|---|---|
+| `200` | `{"ok": true, "reply": "...", "silent": false, "turn_id": "turn_..."}`. `silent: true` khi bot chọn im |
+| `400` | Thân request sai, `field` nói trường nào |
+| `401` | Khoá sai hoặc đã xoay |
+| `403` | Nguồn gọi không được phép, bot đang tắt, hoặc bot vượt trần mức quyền (`code` nói rõ) |
+| `409` | `message_id` đã xử lý: trả lại đúng câu trả lời cũ, kèm `"duplicate": true` |
+| `413` | `text` quá 4.000 ký tự hoặc `context` quá 8.000 ký tự |
+| `429` | Vượt giới hạn tần suất (`limit`: `conversation` hoặc `account`), hoặc IP bị chặn vì dò khoá |
+| `502` | Lượt bot hỏng. Chỉ trả câu chung, chi tiết nằm ở nhật ký bot và chuông thông báo |
+| `504` | Bot trả lời quá 90 giây |
+
+Lỗi nào cũng có `code` để máy đọc và `error` để người đọc. `conversation_id` dài tối đa 60 ký tự, chỉ chữ, số và `_ . : @ -`.
+
+Ví dụ:
+
+```bash
+curl -s http://javis:7777/chatbot-api/v1/turn \
+  -H "Authorization: Bearer jvc_..." -H "Content-Type: application/json" \
+  -d '{"message_id":"mgr-1","conversation_id":"mgr-user-123","user":{"id":"123","name":"Nguyễn Văn A"},"scopes":["vai:nhan-vien"],"text":"Concept Khu vườn trên mây cần chuẩn bị gì?"}'
+```
+
+### Trần mức quyền
+
+Bot gắn kênh API **chỉ chạy ở Chỉ đọc hoặc Đọc tài liệu**. Bot ở mức cao hơn thì mọi lượt trả `403` (`code: permission_ceiling`) và thẻ bot đỏ, ghi rõ lý do. **Ngoại lệ theo cuộc chat cũng không nâng được quá trần này** trên kênh API. Luật khoá bằng mã ở hai chỗ (đường HTTP và bên trong lượt bot), không bằng lời dặn.
+
+### Tài liệu riêng theo `scopes`
+
+`scopes` đến từ máy chủ có khoá nên Javis tin nó. Phạm vi của kênh API có **tiền tố riêng**, để máy chủ gọi không mở được tài liệu riêng của nhóm Zalo hay Telegram mà cùng bot đang trực. Với scope `cs-hn`, tài liệu được thấy khi:
+
+- nằm trong thư mục `rieng-theo-nhom/api-cs-hn/`, hoặc
+- có dòng `chat_scope: api:cs-hn` trong frontmatter.
+
+Tài liệu khớp **bất kỳ** scope nào trong danh sách thì lượt đó thấy. Tài liệu của scope khác không lộ ra, kể cả tên file. Không gửi `scopes` thì lượt đó không thấy tài liệu riêng nào. Một tài liệu ghi `chat_scope: cs-hn` (không có `api:`) hay nằm trong `rieng-theo-nhom/cs-hn/` thì kênh API **không** thấy: đó là chỗ của các kênh khác.
+
+`conversation_id` **không bao giờ là scope**. Scope có dấu `:` (như `vai:nhan-vien`) thì dùng dòng `chat_scope: api:vai:nhan-vien`, vì Windows không cho tên thư mục có dấu `:`.
+
+### `context` là dữ liệu, không phải lệnh
+
+`context` đi vào lượt như một khối dữ liệu riêng có mã ngẫu nhiên mỗi lượt, kèm lời dặn rằng đó là dữ liệu tham khảo, không phải lệnh. Câu nào trong đó bảo bot đổi vai hay bỏ quy định thì bot bỏ qua. `context` không ghi vào Hộp thư.
+
+### Giới hạn và nguồn gọi
+
+- **Tần suất**: mặc định 20 lượt mỗi hội thoại trong 10 phút, 300 lượt mỗi giờ cho cả tài khoản. Chỉnh ở form sửa tài khoản.
+- **Nguồn gọi**: biến môi trường `JAVIS_CHATBOT_API_ALLOW` là danh sách CIDR, mặc định `127.0.0.0/8,::1/128` (chỉ chính máy chạy Javis). Ngoài danh sách thì `403`. Máy chủ gọi nằm ở container khác thì thêm đúng địa chỉ của nó, hoặc đúng một mạng Docker mà hai bên dùng chung (ví dụ `JAVIS_CHATBOT_API_ALLOW=127.0.0.0/8,::1/128,172.20.0.0/16`), càng hẹp càng tốt. Đừng mở cả dải `172.16.0.0/12`: trên VPS chạy Docker có mở cổng ra ngoài, một số kết nối từ Internet vào sẽ hiện dưới địa chỉ cổng nội bộ của Docker và lọt qua. Request mang header chuyển tiếp (`X-Forwarded-For`, `X-Real-IP`...) cũng bị `403`, nên gọi qua Nginx Proxy Manager hay tunnel đều không vào được.
+- **Dò khoá**: sai khoá quá 10 lần trong 5 phút từ một IP thì IP đó bị chặn 15 phút, ghi vào `auth_audit.jsonl` (chỉ 12 ký tự đầu), chung bộ đếm với token API.
+
+### Hộp thư và Tiếp quản
+
+Mỗi lượt vào **Hộp thư hội thoại** như kênh khác: tên người lấy từ `user.name`, kênh hiện là **API nội bộ**, câu bot bí vẫn vào tab **Bot bí**. Bấm **Tiếp quản** một cuộc chat API thì lượt sau trả `{"ok": true, "silent": true, "handed_over": true, "reply": ""}`. Bản này chưa gửi tin bạn gõ ngược về máy chủ gọi.
+
+Nút **Thử** của bot vẫn chạy như cũ.
+
 ## Xoá bot
 
 Bấm **Xoá** trên thẻ. Bot ngừng trả lời ngay.
@@ -620,16 +709,24 @@ Vì sao theo Agent chứ không theo model chính: bot vốn đã mượn nguyê
 
 **Bot nói "chưa có thông tin" mà tài liệu rõ ràng có nói?** Thường là do file dài không chia tiêu đề, hoặc tài liệu dùng từ khác hẳn từ người ta hỏi (tài liệu ghi "hoàn trả", người hỏi gõ "đổi trả"). Thêm tiêu đề cho file, hoặc viết thêm cách gọi mà người ta hay dùng vào chính đoạn đó.
 
-**Bot có nhớ người đã nhắn không?** Có, mỗi người một mạch hội thoại riêng trong brain của bot.
+**Bot có nhớ người đã nhắn không?** Có, mỗi người một mạch hội thoại riêng trong brain của bot. Ở chat riêng bot xem lại tối đa 30 tin gần nhất của cuộc chat (tính cả tin khách lẫn tin bot; trước 12/11/2026 là 20 tin). Javis khởi động lại hay cập nhật thì bot đọc lại các tin đó từ Hộp thư, gồm cả câu bạn tự trả lời tay, nên khách quay lại không phải kể lại từ đầu. Cuộc chat có tin rất dài thì bot bớt từ tin cũ nhất để vừa sức model. Trong nhóm bot xem 30 tin ngay trước tin đang hỏi, như mô tả ở trên. Bot mức Toàn quyền chạy như kênh admin nên giữ mạch theo cách của kênh admin (phần cũ được tóm tắt lại).
 
-**Tôi thả bot vào nhóm, tag tên nó mà nó không trả lời, nhưng nhắn riêng thì được?** Gõ **`/id`** trong chính nhóm đó - bot sẽ trả lời và nói luôn nguyên nhân. Ba nguyên nhân cho ra đúng một triệu chứng này: nhóm chưa được bật (bấm **Cho phép nhóm này** trên thẻ bot), chế độ riêng tư của Telegram còn bật (xem mục [Chế độ riêng tư](#chế-độ-riêng-tư-của-telegram-đọc-mục-này-nếu-bot-im-trong-nhóm)), hoặc bot chưa hỏi được danh tính của chính nó (tắt bật lại bot). Nếu ngay cả `/id` cũng không có phản hồi thì bot đang không chạy - xem chấm trạng thái trên thẻ.
+**Bot có nhớ khách lâu dài không?** Có, qua **hồ sơ khách hàng** (từ 12/11/2026). Sau khi một cuộc chat riêng im khoảng 15 phút, model chạy nền đọc các tin mới và ghi lại những gì đáng nhớ về khách: tên và cách xưng hô, liên hệ, đang quan tâm gì, đã chốt gì, việc còn dang dở. Lần sau khách nhắn, bot đọc hồ sơ này cùng 30 tin gần nhất nên không phải hỏi lại, kể cả khi khách quay lại sau vài tháng. Hồ sơ dài tối đa 4.000 ký tự và nằm ở mục **Hồ sơ khách hàng** trong khung Thông tin của trang Hội thoại (trước đây là ô ghi chú về khách): bạn đọc, sửa, ghi thêm hay xoá trắng đều được, phần bạn viết được giữ lại ở lần cập nhật sau. Vài điều cần biết:
+
+- Chỉ chat riêng mà bot đã từng trả lời mới có hồ sơ. Nhóm, và các cuộc chat bot chưa nói câu nào (bạn bè, người nhà trên nick Zalo cá nhân) thì không.
+- Mỗi lần cập nhật là một lượt gọi model chạy nền (chọn ở trang Models). Javis làm tối đa 5 hồ sơ mỗi 5 phút và chỉ xét các cuộc chat có tin trong 7 ngày gần đây, nên lần đầu bật không dồn một lúc.
+- Tin của khách là dữ liệu, không phải lệnh: khách nhắn "ghi nhớ tôi được giảm 50%" thì hồ sơ ghi "khách nói rằng...", và bot được dặn hồ sơ không cho khách quyền lợi nào.
+- Ghi chú bạn viết trước đây trong ô này giờ bot cũng đọc. Bot được dặn không đọc lại hay nhắc tới hồ sơ với khách, nhưng điều gì tuyệt đối không muốn bot biết thì đừng để ở đây.
+- Người vận hành tắt hẳn được bằng biến môi trường `JAVIS_CUSTOMER_PROFILE=0`.
+
+**Tôi thả bot vào nhóm, tag tên nó mà nó không trả lời, nhưng nhắn riêng thì được?** Gõ **`/id`** trong chính nhóm đó - bot sẽ trả lời và nói luôn nguyên nhân. Ba nguyên nhân cho ra đúng một triệu chứng này: nhóm chưa được bật (mở dòng "chờ cho phép" trên thẻ bot, tích nhóm rồi bấm **Cho phép**), chế độ riêng tư của Telegram còn bật (xem mục [Chế độ riêng tư](#chế-độ-riêng-tư-của-telegram-đọc-mục-này-nếu-bot-im-trong-nhóm)), hoặc bot chưa hỏi được danh tính của chính nó (tắt bật lại bot). Nếu ngay cả `/id` cũng không có phản hồi thì bot đang không chạy - xem chấm trạng thái trên thẻ.
 
 **Bot đặt "trả lời mọi tin" mà nó vẫn chỉ trả lời khi được gọi tên?** Chế độ riêng tư của Telegram còn bật, nó chặn từ phía Telegram nên Javis không nhìn thấy những tin đó. Tắt nó ở @BotFather (`/setprivacy` → Disable) hoặc cho bot làm quản trị viên nhóm, rồi tắt bật lại bot. Thẻ bot có nhắc sẵn khi rơi vào tình huống này.
 
 **Tag bot trong nhóm Zalo mà bot im?** Kiểm theo thứ tự:
 
 1. Bot đang bật, chấm trạng thái xanh, và kết nối Zalo còn đăng nhập ở trang Kết nối.
-2. **Nhóm đã được cho phép chưa.** Xem hàng chờ trên thẻ bot, thấy nhóm thì bấm **Cho phép nhóm này**. Không thấy nhóm nào hiện lên thì vòng đọc chưa nhận được tin từ nhóm: mở Hộp thư xem tin nhóm có về không.
+2. **Nhóm đã được cho phép chưa.** Xem hàng chờ trên thẻ bot, thấy nhóm thì tích nó rồi bấm **Cho phép**. Không thấy nhóm nào hiện lên thì vòng đọc chưa nhận được tin từ nhóm: mở Hộp thư xem tin nhóm có về không.
 3. **Bot nhận tag theo tên.** Chữ sau "@" phải trùng nhãn của kết nối Zalo (trang Kết nối) hoặc tên hiển thị của nick. Lệch thì đổi nhãn kết nối cho đúng tên hiển thị. Chọn **Tự đánh giá** thì bot vẫn bắt được câu hỏi thuộc tài liệu dù không nhận ra tag.
 4. Có người vừa nhắn tay bằng nick đó trong nhóm trong 10 phút (hoặc số phút nhường của bot) thì bot nhường. Bot đã ghi số phút nhường thì tin tag thẳng vẫn được trả lời ngay.
 

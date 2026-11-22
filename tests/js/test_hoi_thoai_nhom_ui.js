@@ -81,18 +81,16 @@ check("CANARY: hộp xác nhận xoá project nói rõ hội thoại KHÔNG bị
   && /KHÔNG bị xoá/.test(VI["sess.proj_del_n"] || ""));
 
 // ============================================================
-// 3. Nút mới: có handler riêng + chặn nổi bọt
+// 3. Ghim và xếp vào nhóm nằm trong menu "..." của hàng (2026-11-09)
 // ============================================================
-// stopPropagation phải là việc ĐẦU TIÊN trong handler, không phải đâu đó ở giữa: chỉ cần
-// một nhánh return sớm nằm trước nó là cú bấm rơi xuống hàng cha và mở nhầm hội thoại.
-// `.mov` (xếp vào nhóm) VẮNG MẶT ở chế độ lọc theo kênh của trang Cộng sự - hội thoại của một
-// trợ lý không xếp vào project được - nên handler của nó gắn có điều kiện.
-check("nút .pin có handler riêng và chặn nổi bọt ngay đầu",
-  /item\.querySelector\("\.pin"\)\.onclick = function \(ev\) \{\s*ev\.stopPropagation\(\);/.test(SESS));
-check("nút .mov có handler riêng và chặn nổi bọt ngay đầu",
-  /if \(nutXep\) nutXep\.onclick = function \(ev\) \{\s*ev\.stopPropagation\(\);/.test(SESS));
-check("CANARY: .mov chỉ vắng ở chế độ lọc kênh, chứ không bị gỡ hẳn",
-  /kenhLoc \? "" : '<span class="mov"/.test(SESS));
+// "Chuyển vào project" VẮNG MẶT ở chế độ lọc theo kênh của trang Cộng sự - hội thoại của một
+// trợ lý không xếp vào project được.
+check("menu của hàng có ghim / bỏ ghim",
+  SESS.indexOf('smItem("pin", s.pinned ? "pin-off" : "pin", s.pinned ? "proj.pin_off" : "sess.pin_top")') !== -1);
+check("CANARY: Chuyển vào project chỉ vắng ở chế độ lọc kênh, chứ không bị gỡ hẳn",
+  SESS.indexOf('if (!kenhLoc) h2 += smItem("proj", "folder", "sess.move_to", { more: true });') !== -1);
+check("chọn project trong menu đi đúng đường moveTo",
+  SESS.indexOf('if (act.indexOf("move:") === 0) { dongMenuDong(false); return moveTo(s, act.slice(5)); }') !== -1);
 
 // ============================================================
 // 4. KHÔNG được nhét nhánh mới vào item.onclick
@@ -106,7 +104,7 @@ if (m) {
     check(`item.onclick KHÔNG gọi ${ten} (test_chat_side_actions bóc khối này ra chạy riêng)`,
       than.indexOf(ten) === -1);
   });
-  check("item.onclick vẫn chỉ dò .ren/.del", than.indexOf('closest(".ren, .del")') !== -1);
+  check("item.onclick chỉ dò nút ...", than.indexOf('closest(".ci-more")') !== -1);
 }
 
 // ============================================================
@@ -166,7 +164,13 @@ check("không claim khi đang xem 'Tất cả' hay 'Chưa xếp nhóm'",
 check("CANARY: app.js gọi claim ngay khi mint id hội thoại mới",
   /savedSessionId = newSid\(\);[\s\S]{0,400}JavisProjects\.claim\(savedSessionId\)/.test(APP));
 check("claim bọc try/catch (thiếu module không được làm hỏng đường gửi tin)",
-  /try \{ if \(window\.JavisProjects\) window\.JavisProjects\.claim/.test(APP));
+  /try \{ if \(window\.JavisProjects\) (_projClaim = )?window\.JavisProjects\.claim/.test(APP));
+// 2026-11-15: the first message waits for the claim, so the project's GitHub repos (and instructions) reach the very
+// first turn: the server reads the chat's project when the turn starts (main._seed_chat_repos).
+check("claim trả về lời gọi để tin đầu tiên chờ nó",
+  /claim: function \(sid\)[\s\S]{0,200}return post\(/.test(SESS));
+check("tin đầu tiên chờ claim cùng lúc với ghim thư mục và repo",
+  /_pinWait = Promise\.all\(\[_before\.catch\(\(\) => \{\}\), _projClaim\.catch\(\(\) => \{\}\)\]\)/.test(APP));
 
 // ============================================================
 // 7. Đổi brain thì project đi theo

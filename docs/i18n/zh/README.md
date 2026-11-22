@@ -1,13 +1,15 @@
 <!-- translated-from: README.md sha256:2e10ad3d2a86 -->
 <div align="center">
 
-<img src="../../../dashboard/logo.svg" width="88" alt="Javis OS 标志">
+<a href="https://javisos.com"><img src="../../assets/social-preview.png" width="100%" alt="Javis OS: Your AI Workforce. Never miss the best AI."></a>
 
 # Javis OS
 
-### 自托管的 AI Agent：大脑可以随时更换，Second Brain 每天都在变得更聪明。
+### 你的 AI 团队。永远不错过最好的 AI。
 
-在你的笔记本或一台小型 VPS 上运行。用语音和它对话。接入 Claude、ChatGPT、Grok、Gemini 或 12 家提供商中的任意一家，切换模型时所有工具都保留，还能在你睡觉时于后台继续工作。
+Javis OS 把 **Claude、ChatGPT、Gemini、Grok** 以及你选择的模型，变成在你自己的电脑或服务器上 24/7 工作的团队。每位同事都有自己的角色，共享同一份记忆和工具，并在后台持续工作。更好的模型一出，切换过去，团队学到的一切都会保留。
+
+**🌐 官网: [javisos.com](https://javisos.com)** · 开源 · 自托管 · 14 家 AI 提供商
 
 [![GitHub stars](https://img.shields.io/github/stars/blogminhquy/javis-os?style=flat&logo=github&label=stars)](https://github.com/blogminhquy/javis-os/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](../../../LICENSE)
@@ -117,7 +119,7 @@ Javis OS **不是**聊天机器人。它是一个运行在你自己的机器或 
 | **工作** | 回答完就等着 | **后台 Loop、提醒和由 AI 运行的任务队列**，并把结果汇报给你 |
 | **界面** | 一个聊天框 | 仪表盘 + 知识图谱 + **免手动语音** + Telegram、Slack、WhatsApp、Zalo + CLI |
 | **你的成果** | 留在厂商的服务器上，用的是厂商的格式 | **你机器上的普通文件**：历史、记忆、Skill、Agent 和 Workflow 都能带到任何新模型 |
-| **部署** | 别人的云 | **自托管**：[Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) 一键部署、Docker，或任意 VPS |
+| **部署** | 别人的云 | **自托管**：[Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) 一键部署、Docker，或任意 VPS |
 
 > 💡 **设计理念：能力在 Javis 身上，而不在模型身上。** 每个大脑都通过同一个共享连接中心（MCP Hub）获得同一套工具箱。从 Claude 切换到 Gemini 不会让你失去任何东西，唯一的例外是 shell 访问，只有 CLI 引擎才有。
 
@@ -247,7 +249,7 @@ flowchart LR
 <details open>
 <summary><b>方式一：Hostinger Docker Manager（域名 + HTTPS，一键部署）</b></summary>
 
-> 🛒 **还没有 VPS？** [在这里购买 Hostinger VPS](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN)。它自带 Docker Manager，一键即可安装 Javis。开通后回到下面的步骤。
+> 🛒 **还没有 VPS？** [在这里购买 Hostinger VPS](https://www.hostinger.com?REFERRALCODE=JAVISOS)。它自带 Docker Manager，一键即可安装 Javis。开通后回到下面的步骤。
 
 Hostinger VPS → **Docker Manager → Compose → URL** → 粘贴 Hostinger 专用文件，然后点击 **Deploy**：
 
@@ -275,7 +277,7 @@ https://raw.githubusercontent.com/blogminhquy/javis-os/main/docker-compose.hosti
 <details>
 <summary><b>方式二：在任意 VPS 上使用 Docker（无需克隆仓库）</b></summary>
 
-> 🛒 **需要 VPS？** [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) 同样适用这种方式。
+> 🛒 **需要 VPS？** [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=JAVISOS) 同样适用这种方式。
 
 ```bash
 # Docker required (don't have it?  curl -fsSL https://get.docker.com | sh)
@@ -507,5 +509,6 @@ Javis OS 免费且开源，目前仍是一个人在写代码、支付测试服�
 
 <div align="center">
 <br>
+<b><a href="https://javisos.com">javisos.com</a></b><br>
 由 <b><a href="https://minhquy.vn">Minh Quý</a></b> 在越南用 ☕ 制作
 </div>

@@ -54,7 +54,7 @@ Nút **Hướng dẫn trên GitHub** trong thẻ Zalo luôn mở trang tài li�
 Mới đăng nhập Zalo vào Javis thì Hộp thư chỉ có tin từ lúc bật **Ghi hội thoại** trở đi. Muốn có cả tin cũ, bấm **Nhập tin cũ** trên thẻ tài khoản Zalo ở trang Chatbot, thẻ Bot, mục Kênh chưa có bot. Zalo đã gắn bot thì bấm vào ô Zalo trên thẻ bot đó.
 
 - Javis lấy các tin javis-zalo tự kéo về mỗi lần kết nối: khoảng **2 tuần** gần nhất, vì Zalo không cho lấy xa hơn. Tối đa 5.000 tin mỗi lần.
-- Chỉ nhập vào cuộc chat **chưa có tin nào** trong Hộp thư. Cuộc chat đã có tin thì bỏ qua, vì tin cũ chen vào sau sẽ hiện sai thứ tự.
+- Cuộc chat **chưa có tin** thì nhập hết. Cuộc chat **đã có tin** thì chỉ thêm các tin **cũ hơn tin đầu tiên** của nó, xếp lên trên cùng đúng thứ tự thời gian (trước bản này cuộc chat đã có tin bị bỏ qua hẳn).
 - Bot **không trả lời** các tin này, chúng **không tính là chưa đọc**, và nhóm vẫn chỉ giữ 1.000 tin gần nhất như thường lệ.
 - Vừa quét QR xong thì đợi vài phút cho Zalo tải xong tin cũ rồi hãy bấm. Bấm lại nhiều lần không bị nhân đôi.
 
@@ -95,6 +95,25 @@ chỉ thấy được nếu phần gửi lại mang nó về.
   **không phải** là khách chưa trả lời. Javis khi đó giữ bước đang chờ (duyệt, phát hành) và báo chủ.
 - Tin tới lúc mất kết nối mà phần gửi lại mang về được đưa vào luồng tin mới, đánh dấu
   `recovered: true`, nên Hộp thư cũng có.
+
+### Tin tới là Javis đọc ngay, không quét theo giờ (javis-zalo 1.10.0)
+
+Trước đây cứ 20 giây Javis hỏi `javis-zalo` một lần xem có tin mới không, kể cả những ngày không có tin
+nào, và tin nhóm vẫn chờ tới 20 giây bot mới thấy. Từ javis-zalo 1.10.0, `javis-zalo` báo cho Javis ngay
+khi có tin (hoặc khi kết nối Zalo rớt, nối lại), và Javis chỉ đọc lúc đó.
+
+- Tín hiệu chỉ đi trong máy (`127.0.0.1`), kèm một mã riêng của lần chạy Javis hiện tại, và không mang
+  nội dung tin. Tin vẫn được đọc qua tool `zalo_get_messages` như cũ.
+- Javis chỉ coi một tài khoản là "tự báo" sau khi nhận được tín hiệu đầu tiên từ đúng tiến trình
+  `javis-zalo` đang chạy. Chưa có tín hiệu (bản javis-zalo cũ, tiến trình vừa dựng lại) thì Javis đọc
+  theo nhịp 20 giây như trước.
+- Khi mọi tài khoản đều tự báo và không có tin nào đang giữ, vòng đọc ngủ hẳn, không chạy theo nhịp
+  nào. Nó chỉ thức khi có việc: `javis-zalo` báo có tin, tiến trình `javis-zalo` thoát (Javis đọc ngay
+  một lượt, lượt đó dựng lại tiến trình), một bot nhận hay rời vị trí, một tài khoản được bật, hoặc một
+  kết nối được lưu ở trang Kết nối.
+- Trong lúc có tin đang giữ (chờ khách nhắn xong, chờ chủ trả lời tay), vòng đọc chạy nhịp ngắn để
+  nhả đúng giờ rồi ngủ lại. Việc đó không gọi `javis-zalo`.
+- Tắt cho cả máy: đặt biến môi trường `JAVIS_ZALO_PUSH=0` rồi khởi động lại Javis.
 
 ## Duyệt người xin vào nhóm
 

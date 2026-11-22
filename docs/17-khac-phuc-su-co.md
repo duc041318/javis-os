@@ -26,13 +26,14 @@ Rất nhiều lỗi biến mất sau một trong hai việc này, nên thử tr�
 | **Cổng 7777 bị giữ**, bản mới không lên được | Tắt tiến trình cũ TRƯỚC rồi mới bật lại. Windows: chạy `stop-javis.bat`, hoặc `taskkill /F /PID <pid>` với PID đang giữ cổng. Docker: `docker compose down` rồi `docker compose up -d`. |
 | **Hostinger không pull được image** | Đặt package GHCR ở chế độ **Public** (GitHub, repo, mục Packages, chọn `javis-os`, Package settings, Visibility = Public). Sau đó đợi GitHub Action build xong (xem tab Actions của repo) rồi Deploy lại. |
 | Mở app ra **màn tạo tài khoản admin** trên server public | Chưa có admin nên ai mở link trước sẽ tạo được admin. Tạo tài khoản ngay (mật khẩu tối thiểu 8 ký tự), hoặc lần sau đặt sẵn env `JAVIS_ADMIN_USER` và `JAVIS_ADMIN_PASSWORD` lúc deploy để đăng nhập luôn. Vào được rồi thì bật 2FA. |
-| **Claude báo chưa đăng nhập** (Javis không trả lời được) | Đăng nhập lại "bộ não" Claude 1 lần. Cách trong app: mở **Models**, ở thẻ Claude Code bấm **Đăng nhập Claude**, mở link, dán code nếu được yêu cầu. Cách bằng lệnh: `claude auth login --claudeai` (Docker: chạy trong App terminal). |
+| **Claude báo chưa đăng nhập** (Javis không trả lời được) | Kết nối lại "bộ não" Claude 1 lần. Cách trong app: mở **Models**, ở thẻ Claude Code bấm **Kết nối Claude**, mở link, dán mã nếu trang hiện mã rồi bấm **Xác nhận mã**. Đường lui bằng lệnh: `claude auth login --claudeai` (Docker: chạy trong App terminal), nhưng kiểu đăng nhập này có thể hết hạn giữa chừng. |
+| **Claude token sắp hết hạn / đã hết hạn** | Token dài hạn của Claude dùng được 1 năm. Mở **Models**, ở thẻ Claude Code bấm **Lấy token mới** rồi đăng nhập claude.ai thêm một lần là có thêm một năm. |
 | **Trang Tệp tin báo lỗi ở "Đang tải..."** | Máy chủ chưa có endpoint Tệp tin (báo lỗi 404). **Khởi động lại server** để nạp endpoint mới, rồi nhấn **Ctrl+Shift+R**. |
 | Ảnh trong hội thoại cũ hiện ô xám **Ảnh đã hết hạn** | Đúng thiết kế: `attachments/` và `inbox/` là vùng cache, file quá 30 ngày (hoặc khi vượt trần 300MB) bị dọn. Xem mục "Ảnh và file cũ biến mất" bên dưới để biết cách giữ lại hoặc tắt hẳn. |
 | Voice / micro không bật được | Trình duyệt chỉ cấp quyền micro trên **HTTPS** (hoặc localhost). Mở qua `http://<ip>:7777` sẽ luôn bị chặn. Dùng URL `https://` (Hostinger `*.hstgr.cloud`, Cloudflare Tunnel, hoặc tên miền riêng có SSL). Xem [Thương hiệu & tên miền riêng](15-thuong-hieu-ten-mien.md). |
 | Cập nhật trong app xong mà **phiên bản không đổi** | Đợi thêm; nếu vẫn báo bản cũ, kiểm tra log cập nhật: `update.log` trong thư mục state (`server/update.log` khi chạy local, `/data/state/update.log` trên Docker), hoặc `docker compose logs`. |
-| **`javis` báo 401** hoặc "token không hợp lệ" | Token sai hoặc đã bị thu hồi. Tạo cái mới ở **Tài khoản > Token API** rồi `javis login <địa-chỉ>` lại. Xem [Javis CLI](24-cli-terminal.md). |
-| **`javis task add` / `javis brain ls` báo 403** | Token của bạn là loại **chỉ chat**. Những lệnh này cần token **toàn quyền** - tạo thêm một cái ở Tài khoản > Token API. |
+| **`javis` báo 401** hoặc "token không hợp lệ" | Token sai hoặc đã bị thu hồi. Tạo cái mới ở **Tích hợp > Token API** rồi `javis login <địa-chỉ>` lại. Xem [Javis CLI](24-cli-terminal.md). |
+| **`javis task add` / `javis brain ls` báo 403** | Token của bạn là loại **chỉ chat**. Những lệnh này cần token **toàn quyền** - tạo thêm một cái ở Tích hợp > Token API. |
 | **`javis up` báo không thấy bản cài Javis** | Đúng như nó nói: gói CLI KHÔNG chứa server bên trong. Đặt `JAVIS_HOME` trỏ tới thư mục Javis, chạy lệnh từ trong thư mục đó, hoặc `javis login <địa-chỉ>` để nối tới một Javis đang chạy nơi khác. |
 
 Các mục dưới đây giải thích chi tiết hơn từng dòng trong bảng.
@@ -77,12 +78,15 @@ Chi tiết bảo mật và cách đặt mật khẩu xem [Bảo mật & tài kho
 
 ## Claude báo chưa đăng nhập
 
-Khi bạn chạy engine Claude, Javis mượn đúng phiên đăng nhập của `claude` CLI trên máy: đăng nhập 1 lần và giữ qua mọi restart/update. Nếu Javis không trả lời hoặc báo chưa đăng nhập:
+Khi bạn chạy engine Claude, Javis chạy Claude Code bằng một **token dài hạn** lấy từ thẻ Claude Code: kết nối 1 lần là dùng được 1 năm, giữ qua mọi restart/update, và không bị đăng xuất giữa chừng. Nếu Javis không trả lời hoặc báo chưa đăng nhập:
 
-1. **Cách trong giao diện:** mở **Models** (nhóm **Kết nối** trên thanh nav trái). Ở thẻ Claude Code, dòng trạng thái sẽ hiện **○ Chưa đăng nhập**. Bấm **Đăng nhập Claude**, app hiện một link; mở link để đăng nhập claude.ai; nếu trang hiện một mã code thì dán vào ô rồi bấm **Gửi code**. Khi xong, trạng thái đổi thành **● Đã kết nối**. Có nút **↻ Kiểm tra lại** để làm mới trạng thái.
-2. **Cách bằng lệnh:** chạy `claude auth login --claudeai` một lần (trên Docker thì chạy trong **App terminal**), mở link, dán code.
+1. **Cách trong giao diện:** mở **Models** (nhóm **Kết nối** trên thanh nav trái). Ở thẻ Claude Code, dòng trạng thái sẽ hiện **○ Chưa đăng nhập**. Bấm **Kết nối Claude**, app hiện một link; mở link để đăng nhập claude.ai; nếu trang hiện một mã code thì dán vào ô rồi bấm **Xác nhận mã** (máy có trình duyệt có thể không hiện mã, thẻ tự xong sau vài giây). Khi xong, trạng thái đổi thành **● Đã kết nối**. Có nút **↻ Kiểm tra lại** để làm mới trạng thái.
+2. **Dán token làm ở nơi khác:** chạy `claude setup-token` trên một máy bất kỳ (trên Windows bắt buộc làm cách này), rồi ở thẻ Claude Code bấm **Dán token**, dán token (bắt đầu bằng `sk-ant-oat01-`) và bấm **Lưu token**.
+3. **Đường lui bằng lệnh:** chạy `claude auth login --claudeai` một lần (trên Docker thì chạy trong **App terminal**), mở link, dán code. Đây là kiểu đăng nhập cũ, có thể hết hạn giữa chừng.
 
-Token đăng nhập nằm trong `~/.claude` (Docker: volume `claude-auth`) nên không mất khi update. Nếu đã đăng nhập trên máy khác, có thể copy thư mục `~/.claude` sang. Xem thêm [Models & engine](10-models-va-engine.md).
+Máy còn chạy bằng kiểu đăng nhập cũ thì thẻ hiện nút **Chuyển sang token dài hạn**: bấm vào để khỏi bị dừng giữa chừng. Javis lưu token (đã mã hoá) trong cài đặt của chính nó nên không mất khi update. Xem thêm [Models & engine](10-models-va-engine.md).
+
+**Token sắp hết hạn hoặc đã hết hạn.** Anthropic cho mỗi token dùng 1 năm. Thẻ Claude Code luôn hiện ngày hết hạn và chuyển màu vàng trong hai tuần cuối; từ một tuần trước, Javis để một thông báo mỗi ngày trong chuông. Bấm **Lấy token mới** trên thẻ, đăng nhập claude.ai thêm một lần là có thêm một năm.
 
 ## Trang Tệp tin báo lỗi ở "Đang tải..."
 
@@ -170,6 +174,8 @@ Từ 0.55.56 Watchtower **đi kèm sẵn** trong cả compose VPS lẫn compose 
 **Muốn khỏi bấm nút, để Javis tự cập nhật**: thêm `JAVIS_AUTO_UPDATE=true` vào `.env` (Hostinger: ô Environment) rồi dựng lại stack. Mặc định tắt, vì tự cập nhật nghĩa là app tự khởi động lại bất cứ lúc nào có bản mới, cắt ngang việc nền đang chạy. Chu kỳ mặc định 24 giờ, đổi bằng `JAVIS_AUTO_UPDATE_INTERVAL` (giây).
 
 **Stack báo "Partially running" sau khi cập nhật compose**: gần như luôn là container `<tên>-watchtower` không đụng được Docker socket của host (Hostinger từng dính đúng lỗi này). App Javis KHÔNG bị ảnh hưởng - nó là container riêng, vẫn chạy bình thường; chỉ là nút "Cập nhật ngay" không dùng được và bạn quay lại cách Redeploy. Xem lý do thật trong log: `docker logs javis-watchtower`.
+
+**Cập nhật xong thì tên miền báo 404 và container Javis biến mất khỏi Docker**: Watchtower dừng Javis, xoá container cũ, rồi mới dựng bản mới. Trên VPS ổ đĩa chậm, bước xoá có thể chạy quá hạn giờ của Watchtower (log `javis-watchtower` có dòng `Failed to remove container ... context deadline exceeded`): Watchtower bỏ dở, không dựng bản mới, còn Docker vẫn xoá xong container cũ. Từ bản có container `javis-guard`, chuyện này tự lành: thấy Javis biến mất hay bị dừng giữa chừng quá 2 phút là `javis-guard` dựng lại (lên đúng bản mới) hoặc bật lại, xem nó làm gì bằng `docker logs javis-guard`. Máy chưa có `javis-guard` thì bấm **Redeploy** (VPS: lấy compose mới như trên rồi `docker compose up -d --pull always`) một lần là Javis lên lại, kèm luôn `javis-guard` cho các lần sau. Dữ liệu nằm trong volume nên không mất.
 
 **Gõ lệnh compose mà báo `not found`** - ba kiểu, ba nguyên nhân khác hẳn:
 

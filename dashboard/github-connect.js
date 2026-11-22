@@ -21,14 +21,29 @@
     if (first.length > max) first = first.slice(0, max - 1) + "…";
     return first + (list.length > 1 ? " +" + (list.length - 1) : "");
   }
-  function toggle(list, name) {
-    var out = (list || []).slice(), i = out.indexOf(name);
-    if (i >= 0) out.splice(i, 1); else out.push(name);
-    return out;
+  // The picker as drawn: chosen repos first ("Selected"), then the rest. A chosen repo the list lacks stays listed
+  // while the search box is empty, so it can always be removed.
+  function splitRows(items, chosen, query) {
+    var list = (items || []).slice();
+    if (!String(query || "").trim()) {
+      (chosen || []).forEach(function (n) {
+        if (!list.some(function (x) { return x.full_name === n; })) list.unshift({ full_name: n, cloned: true });
+      });
+    }
+    var sel = [], rest = [];
+    list.forEach(function (r) { ((chosen || []).indexOf(r.full_name) >= 0 ? sel : rest).push(r); });
+    return { selected: sel, rest: rest, all: sel.concat(rest) };
   }
-  function sameSet(a, b) {
-    a = (a || []).slice().sort(); b = (b || []).slice().sort();
-    return a.length === b.length && a.every(function (x, i) { return x === b[i]; });
+  // A removal the server refused because work would be lost: the question asked on that row, and the word on its
+  // "remove anyway" button. Uncommitted edits are deleted for good; unpushed commits stay on the chat's local branch.
+  function askSpec(q) {
+    var unpushed = !!q && q.risk === "unpushed";
+    return { text: unpushed ? "gh.ask_unpushed" : "gh.ask_dirty", go: unpushed ? "gh.ask_go" : "gh.ask_drop", n: (q && q.count) || 0 };
+  }
+  // The X of the chip removes what the chip names: one repo by name, several by count.
+  function removeLabel(names) {
+    var list = (names || []).filter(Boolean);
+    return list.length > 1 ? { key: "gh.remove_all", vars: { n: list.length } } : { key: "gh.remove_chat", vars: { name: list[0] || "" } };
   }
 
   // Icon of a conversation (spec 12.1): server state -> what to draw. Pure so node tests can check every state.
@@ -41,7 +56,20 @@
       subKey: ic.merged_warning ? "gh.st_post_red" : (ic.sub ? "gh.sub_" + ic.sub : "") };
   }
 
-  var pure = { chipText: chipText, toggle: toggle, sameSet: sameSet, iconSpec: iconSpec, addToConnCount: addToConnCount };
+  // The git step before connecting (owner, 09/11/2026): one answer of /github/git -> what the dialog shows.
+  //   ready      git is here, go on to the sign-in form
+  //   installing / wait_user (macOS: Apple's dialog waits for a press on Install)
+  //   failed     Javis tried and could not; manual  Javis cannot install here (Linux without root or sudo)
+  function gitPhase(g) {
+    if (!g || g.ok === false) return "error";
+    if (g.has_git) return "ready";
+    if (g.install === "installing") return g.wait_user ? "wait_user" : "installing";
+    if (!g.can_install) return "manual";
+    return "failed";
+  }
+
+  var pure = { chipText: chipText, splitRows: splitRows, askSpec: askSpec, removeLabel: removeLabel, iconSpec: iconSpec,
+    addToConnCount: addToConnCount, gitPhase: gitPhase };
   if (typeof module !== "undefined" && module.exports) module.exports = pure;
   if (typeof document === "undefined") return;
 
@@ -84,6 +112,7 @@
   var CHEV = '<svg class="cp-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
   var BACK = '<svg class="cp-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>';
   var PLUS = '<svg class="cp-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+  var XIC = '<svg class="cp-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
 
   // ============================================================
   // 1. Connections page card
@@ -97,7 +126,8 @@
     var warn = st.connected && st.missing && st.missing.length
       ? '<div class="lv-note">' + esc(tw("gh.missing_scopes", { scopes: st.missing.join(", ") })) + "</div>" : "";
     if (st.connected && st.source === "app" && st.installs === 0) warn += '<div class="lv-note">' + esc(tw("gh.no_install")) + "</div>";
-    var noGit = st.has_git === false ? '<div class="lv-note">' + esc(tw("gh.no_git")) + "</div>" : "";
+    // No git: Connect installs it first (setupGit), so the note only says so; a card already connected gets a button.
+    var noGit = st.has_git === false ? '<div class="lv-note">' + esc(tw(st.connected ? "gh.no_git" : "gh.no_git_auto")) + "</div>" : "";
     // The repo list opens in a popup (owner, 28/10/2026, same as the bot cards on the Chatbot page): a brain can hold many
     // repos, and listing them inline stretched the Connections page. The card keeps one compact row with the counts.
     var repos = "";
@@ -117,6 +147,7 @@
       ? '<span class="conn-chip gh-acc"><span class="cdot hok">●</span> ' + esc(st.login ? "@" + st.login : "GitHub") + "</span>" +
         (st.source === "app" && st.install_url && st.installs === 0 ? '<a class="conn-chip add" target="_blank" rel="noopener" href="' +
           esc(st.install_url) + '">' + esc(tw("gh.pick_repos")) + "</a>" : "") +
+        (st.has_git === false ? '<button class="conn-chip add" type="button" data-gh-git>' + esc(tw("gh.git_install")) + "</button>" : "") +
         '<button class="conn-chip" type="button" data-gh-open>' + esc(tw(st.source === "app" ? "gh.change_account" : "gh.change_token")) + "</button>" +
         '<button class="conn-chip" type="button" data-gh-off>' + esc(tw("gh.disconnect")) + "</button>"
       : '<button class="conn-chip add" type="button" data-gh-open>＋ ' + esc(tw("gh.connect")) + "</button>") + "</div>";
@@ -147,17 +178,44 @@
     };
     var more = cardHost.querySelector("[data-gh-repos]");
     if (more) more.onclick = function () { openRepos(local); };
+    var gitBtn = cardHost.querySelector("[data-gh-git]");
+    if (gitBtn) gitBtn.onclick = function () { setupGit(function () { window.JavisConnModal && window.JavisConnModal.close(); }); };
+  }
+  // One row per repo in the look of the Tasks page (owner, 06/11/2026): a card row with the repo, a meta line, the
+  // auto-merge switch and a "..." menu for Checks, Numbers and Remove (the same sheet the Tasks page opens).
+  function localRow(r) {
+    var on = r.auto_merge !== false, parts = String(r.full_name).split("/"), repo = parts.pop(), owner = parts.join("/");
+    return '<div class="gh-rrow' + (on ? "" : " off") + '"><span class="gh-rav">' + LOGO + "</span>" +
+      '<div class="gh-rbody"><span class="gh-rti" title="' + esc(r.full_name) + '">' + (owner ? '<span class="gh-rown">' + esc(owner) + "/</span>" : "") +
+      esc(repo) + "</span>" + '<span class="gh-rmeta"><span>' + ic("message-circle") + esc(tw("gh.local_chats", { n: r.chats || 0 })) + "</span>" +
+      '<span data-gh-am class="' + (on ? "gh-on" : "") + '">' + BRANCH + esc(tw(on ? "gh.auto_merge" : "gh.auto_merge_off")) + "</span>" +
+      (r.review && r.review.on ? '<span class="gh-on">' + ic("eye") + esc(tw("gh.review_on_meta")) + "</span>" : "") + "</span></div>" +
+      '<button type="button" class="gh-sw" role="switch" aria-checked="' + on + '" aria-label="' + esc(tw("gh.auto_merge")) + '" title="' +
+      esc(tw("gh.auto_merge")) + '" data-gh-auto="' + esc(r.full_name) + '"><span></span></button>' +
+      '<button type="button" class="gh-dots" aria-label="' + esc(tw("gh.more")) + '" aria-haspopup="dialog" data-gh-menu="' + esc(r.full_name) + '">' +
+      ic("ellipsis") + "</button></div>";
   }
   function reposHtml(local) {
-    return local.map(function (r) {
-      return '<div class="gh-local-row"><span class="gh-local-name">' + esc(r.full_name) + "</span>" +
-        '<span class="gh-local-meta">' + esc(tw("gh.local_chats", { n: r.chats || 0 })) + "</span>" +
-        '<label class="gh-auto"><input type="checkbox" data-gh-auto="' + esc(r.full_name) + '"' + (r.auto_merge !== false ? " checked" : "") + "> " +
-        esc(tw("gh.auto_merge")) + "</label>" +
-        '<button class="s-btn-ghost" type="button" data-gh-checks="' + esc(r.full_name) + '">' + esc(tw("gh.checks")) + "</button>" +
-        '<button class="s-btn-ghost" type="button" data-gh-metrics="' + esc(r.full_name) + '">' + esc(tw("gh.metrics")) + "</button>" +
-        '<button class="s-btn-ghost" type="button" data-gh-remove="' + esc(r.full_name) + '">' + esc(tw("gh.remove_brain")) + "</button></div>";
-    }).join("");
+    return '<div class="gh-rlist">' + local.map(localRow).join("") + "</div>";
+  }
+  // The "..." sheet of one repo, drawn over the dialog like the action sheet of the Tasks page.
+  function repoSheet(name) {
+    var host = document.createElement("div");
+    host.className = "gh-sheet-host";
+    host.innerHTML = '<div class="gh-sheet-scrim" data-gh-close></div><div class="gh-sheet" role="dialog" aria-modal="true" aria-label="' + esc(name) + '">' +
+      '<div class="gh-sheet-h"><b>' + esc(name) + '</b><button type="button" class="gh-x" data-gh-close aria-label="' + esc(tw("gh.close")) + '">' + ic("x") + "</button></div>" +
+      '<div class="gh-sheet-b"><button type="button" class="gh-mi" data-gh-checks="' + esc(name) + '">' + ic("terminal") + esc(tw("gh.checks")) + "</button>" +
+      '<button type="button" class="gh-mi" data-gh-review="' + esc(name) + '">' + ic("eye") + esc(tw("gh.review")) + "</button>" +
+      '<button type="button" class="gh-mi" data-gh-metrics="' + esc(name) + '">' + ic("chart-column") + esc(tw("gh.metrics")) + "</button>" +
+      '<button type="button" class="gh-mi danger" data-gh-remove="' + esc(name) + '">' + ic("trash-2") + esc(tw("gh.remove_brain")) + "</button></div></div>";
+    document.body.appendChild(host);
+    function close() { host.remove(); document.removeEventListener("keydown", onKey, true); }
+    function onKey(e) { if (e.key === "Escape") { e.stopPropagation(); close(); } }
+    document.addEventListener("keydown", onKey, true);
+    host.querySelectorAll("[data-gh-close]").forEach(function (b) { b.onclick = close; });
+    var first = host.querySelector(".gh-mi");
+    if (first) first.focus();
+    return { el: host, close: close };
   }
   // The repos of this brain, one row each with its switches. Checks and Numbers open in the same dialog and come back here.
   function openRepos(local) {
@@ -168,32 +226,86 @@
       infoBody(esc(tw("gh.local_how"))) + reposHtml(local) +
       '<div class="lv-msg" role="status" data-gh-msg></div></div>', 720);
     m.querySelectorAll("[data-gh-auto]").forEach(function (b) {
-      b.onchange = function () {
-        var name = b.getAttribute("data-gh-auto");
-        local.forEach(function (r) { if (r.full_name === name) r.auto_merge = b.checked; });
-        api("/github/local/automerge", { brain: pageBrain(), full_name: name, on: b.checked ? "1" : "0" });
+      b.onclick = function () {
+        var name = b.getAttribute("data-gh-auto"), on = b.getAttribute("aria-checked") !== "true";
+        local.forEach(function (r) { if (r.full_name === name) r.auto_merge = on; });
+        b.setAttribute("aria-checked", String(on));
+        var row = b.closest(".gh-rrow"), st = row && row.querySelector("[data-gh-am]");
+        if (row) row.classList.toggle("off", !on);
+        if (st) { st.className = on ? "gh-on" : ""; st.innerHTML = BRANCH + esc(tw(on ? "gh.auto_merge" : "gh.auto_merge_off")); }
+        api("/github/local/automerge", { brain: pageBrain(), full_name: name, on: on ? "1" : "0" });
       };
     });
-    m.querySelectorAll("[data-gh-metrics]").forEach(function (b) {
-      b.onclick = function () { openMetrics(b.getAttribute("data-gh-metrics"), back); };
-    });
-    m.querySelectorAll("[data-gh-checks]").forEach(function (b) {
-      b.onclick = function () { openChecks(b.getAttribute("data-gh-checks"), back); };
-    });
-    m.querySelectorAll("[data-gh-remove]").forEach(function (b) {
-      b.onclick = async function () {
-        var name = b.getAttribute("data-gh-remove");
-        if (!window.confirm(tw("gh.remove_q", { name: name }))) return;
-        var msg = m.querySelector("[data-gh-msg]");
-        b.disabled = true;
-        var r = await api("/github/local/remove", { brain: pageBrain(), full_name: name });
-        b.disabled = false;
-        if (!r || r.ok === false) { if (msg) msg.textContent = (r && r.error) || tw("gh.err_net"); return; }
-        local = local.filter(function (x) { return x.full_name !== name; });
-        loadCard();
-        if (local.length) openRepos(local); else M.close();
+    m.querySelectorAll("[data-gh-menu]").forEach(function (d) {
+      d.onclick = function () {
+        var sh = repoSheet(d.getAttribute("data-gh-menu"));
+        sh.el.querySelectorAll("[data-gh-metrics]").forEach(function (b) {
+          b.onclick = function () { sh.close(); openMetrics(b.getAttribute("data-gh-metrics"), back); };
+        });
+        sh.el.querySelectorAll("[data-gh-checks]").forEach(function (b) {
+          b.onclick = function () { sh.close(); openChecks(b.getAttribute("data-gh-checks"), back); };
+        });
+        sh.el.querySelectorAll("[data-gh-review]").forEach(function (b) {
+          b.onclick = function () {
+            var name = b.getAttribute("data-gh-review"), rec = local.filter(function (x) { return x.full_name === name; })[0] || {};
+            sh.close();
+            openReview(name, rec, function (rv) { rec.review = rv; openRepos(local); });
+          };
+        });
+        sh.el.querySelectorAll("[data-gh-remove]").forEach(function (b) {
+          b.onclick = async function () {
+            var name = b.getAttribute("data-gh-remove");
+            sh.close();
+            if (!window.confirm(tw("gh.remove_q", { name: name }))) return;
+            var msg = m.querySelector("[data-gh-msg]");
+            if (msg) msg.textContent = "";
+            d.disabled = true;
+            var r = await api("/github/local/remove", { brain: pageBrain(), full_name: name });
+            d.disabled = false;
+            if (!r || r.ok === false) { if (msg) msg.textContent = (r && r.error) || tw("gh.err_net"); return; }
+            local = local.filter(function (x) { return x.full_name !== name; });
+            loadCard();
+            if (local.length) openRepos(local); else M.close();
+          };
+        });
       };
     });
+  }
+  // Engines that can review now, for the reviewer pickers. "" = the chat's own engine and model (the default).
+  function reviewerOptions(selected) {
+    return api("/github/reviewers").then(function (d) {
+      var items = (d && d.items) || [];
+      if (selected && !items.some(function (x) { return x.provider === selected; })) items.push({ provider: selected, label: selected });
+      return '<option value="">' + esc(tw("gh.review_default")) + "</option>" + items.map(function (x) {
+        return '<option value="' + esc(x.provider) + '"' + (x.provider === selected ? " selected" : "") + ">" + esc(x.label) + "</option>";
+      }).join("");
+    });
+  }
+  // Cross review of one repo (owner, 08/11/2026): off by default; on = Javis reviews each green commit before merging.
+  async function openReview(name, rec, back) {
+    var M = window.JavisConnModal;
+    if (!M) return;
+    var cur = rec.review || { on: false, provider: "" };
+    var html = M.head(esc(tw("gh.review_head", { name: name }))) + '<div class="conn-form gh-form">' +
+      '<div class="gh-rv-line"><span>' + esc(tw("gh.review_switch")) + "</span>" + infoBtn() +
+      '<button type="button" class="gh-sw" role="switch" aria-checked="' + !!cur.on + '" aria-label="' + esc(tw("gh.review_switch")) + '" data-f="on"><span></span></button></div>' +
+      infoBody(esc(tw("gh.review_how"))) +
+      '<div class="si-field"><label>' + esc(tw("gh.review_by")) + '</label><select class="js-input" data-f="prov"><option value="">' + esc(tw("gh.loading")) + "</option></select></div>" +
+      '<div class="lv-form-act"><button class="s-btn" type="button" data-f="save">' + esc(tw("gh.save")) + "</button>" +
+      '<button class="s-btn-ghost" type="button" data-f="cancel">' + esc(tw("gh.cancel")) + "</button>" +
+      '<span class="lv-msg" role="status"></span></div></div>';
+    var m = M.open(html, 560);
+    var form = m.querySelector(".gh-form"), sw = form.querySelector('[data-f="on"]'), sel = form.querySelector('[data-f="prov"]'), msg = form.querySelector(".lv-msg");
+    sw.onclick = function () { sw.setAttribute("aria-checked", String(sw.getAttribute("aria-checked") !== "true")); };
+    reviewerOptions(cur.provider || "").then(function (h) { sel.innerHTML = h; });
+    form.querySelector('[data-f="cancel"]').onclick = function () { if (back) back(cur); else M.close(); };
+    form.querySelector('[data-f="save"]').onclick = async function () {
+      msg.textContent = "";
+      var on = sw.getAttribute("aria-checked") === "true";
+      var r = await api("/github/local/review", { brain: pageBrain(), full_name: name, on: on ? "1" : "0", provider: sel.value });
+      if (!r || r.ok === false) { msg.textContent = (r && r.error) || tw("gh.err_net"); return; }
+      if (back) back(r.review || { on: on, provider: sel.value }); else M.close();
+    };
   }
   // Local check commands of one repo (spec 7.2): suggested from its CI, editable, one command per line.
   async function openChecks(name, back) {
@@ -241,12 +353,57 @@
     var bk = m.querySelector('[data-f="back"]');
     if (bk) bk.onclick = back;
   }
-  // The connect dialog (0.430.0): "Sign in with GitHub" first (the device flow of the Javis OS GitHub App, no token to
-  // make or copy), a pasted token below it for whoever prefers that, and the brain-backup token when there is one.
+  // Connect checks git first (owner, 09/11/2026): repos are cloned with git, so a machine without it gets git installed
+  // before the sign-in form opens, instead of a card that connects and then cannot download a single repo.
   function openForm(st) {
+    if (st && st.has_git === false) { setupGit(function (g) { connectForm(st, g); }); return; }
+    connectForm(st);
+  }
+
+  // The git step. Asks the server to install git when it is missing (it answers at once when git is already there),
+  // polls while the install runs, then calls `then(answer)`. Closing the dialog does not stop the install: pressing
+  // Connect again picks up the same install. A failure shows the command to run by hand, Try again, and a way on.
+  async function setupGit(then) {
     var M = window.JavisConnModal;
     if (!M) return;
-    var html = M.head(esc(tw("gh.dialog_head"))) + '<div class="conn-form gh-form">' +
+    var m = M.open(M.head(esc(tw("gh.git_head"))) + '<div class="conn-form gh-form gh-git"><div class="pg-loading" role="status">' +
+      esc(tw("gh.git_checking")) + "</div></div>", 560);
+    var form = m.querySelector(".gh-git");
+    function open() { return form.isConnected && m.classList.contains("open"); }
+    var g = await api("/github/git/install", {}), phase = gitPhase(g);
+    while (phase === "installing" || phase === "wait_user") {
+      if (!open()) return;
+      form.innerHTML = '<div class="pg-loading" role="status" aria-live="polite">' +
+        esc(tw(phase === "wait_user" ? "gh.git_wait_apple" : "gh.git_installing")) + "</div>" +
+        '<div class="lv-meta">' + esc(tw("gh.git_bg")) + "</div>";
+      await new Promise(function (res) { setTimeout(res, 2500); });
+      if (!open()) return;
+      g = await api("/github/git");
+      phase = gitPhase(g);
+    }
+    if (!open()) return;
+    if (phase === "ready") { loadCard(); then(g); return; }
+    var why = phase === "manual" ? tw("gh.git_manual") : ((g && g.error) || tw(phase === "error" ? "gh.err_net" : "gh.git_failed"));
+    // One button for both: the server checks for git before installing, so after a manual install it just finds it.
+    var again = tw(phase === "manual" ? "gh.git_recheck" : "gh.git_retry");
+    form.innerHTML = '<div class="lv-note">' + esc(why) + "</div>" +
+      (g && g.manual ? '<div class="lv-meta">' + esc(tw("gh.git_cmd", { btn: again })) + '</div><pre class="gh-git-cmd">' + esc(g.manual) + "</pre>" : "") +
+      '<div class="lv-form-act"><button class="s-btn" type="button" data-f="retry">' + esc(again) + "</button>" +
+      (g && g.manual_url ? '<a class="s-btn-ghost" target="_blank" rel="noopener" href="' + esc(g.manual_url) + '">' + esc(tw("gh.git_page")) + "</a>" : "") +
+      '<button class="s-btn-ghost" type="button" data-f="skip">' + esc(tw("gh.git_skip")) + "</button></div>";
+    form.querySelector('[data-f="retry"]').onclick = function () { setupGit(then); };
+    form.querySelector('[data-f="skip"]').onclick = function () { then(null); };
+  }
+
+  // The connect dialog (0.430.0): "Sign in with GitHub" first (the device flow of the Javis OS GitHub App, no token to
+  // make or copy), a pasted token below it for whoever prefers that, and the brain-backup token when there is one.
+  // `git`: the answer of the git step when it ran; "git x.y is installed" heads the form when this visit installed it.
+  function connectForm(st, git) {
+    var M = window.JavisConnModal;
+    if (!M) return;
+    var gitOk = git && git.install === "ok" && git.has_git
+      ? '<div class="lv-meta gh-git-ok">' + CHECK + "<span>" + esc(tw("gh.git_ok", { v: git.version ? " " + git.version : "" })) + "</span></div>" : "";
+    var html = M.head(esc(tw("gh.dialog_head"))) + '<div class="conn-form gh-form">' + gitOk +
       '<div class="gh-signin"><button class="s-btn gh-signin-btn" type="button" data-f="signin">' + LOGO + "<span>" +
       esc(tw("gh.signin")) + "</span></button>" + infoBtn() + "</div>" + infoBody(esc(tw("gh.signin_how"))) +
       '<div class="lv-meta">' + esc(tw("gh.signin_sub")) + "</div>" +
@@ -268,6 +425,7 @@
       if (!r || r.ok === false) { msg.textContent = (r && r.error) || tw("gh.err_net"); return; }
       M.close();
       loadCard();
+      announceConnected();
     }
     form.querySelector('[data-f="signin"]').onclick = function () { signIn(); };
     form.querySelector('[data-f="go"]').onclick = function () { go({ token: form.querySelector('[data-f="token"]').value.trim() }); };
@@ -327,6 +485,7 @@
         return;
       }
       loadCard();
+      announceConnected();
       if (r.installs === 0) { pickRepos(r); return; }
       M.close();
       return;
@@ -340,9 +499,18 @@
       '<div class="lv-meta">' + esc(tw("gh.pick_repos_how")) + "</div>" +
       '<div class="lv-form-act"><a class="s-btn" target="_blank" rel="noopener" href="' + esc(st.install_url || "") + '">' + esc(tw("gh.pick_repos")) + "</a>" +
       '<button class="s-btn-ghost" type="button" data-f="done">' + esc(tw("gh.done")) + "</button></div></div>", 560);
-    m.querySelector('[data-f="done"]').onclick = function () { M.close(); loadCard(); };
+    m.querySelector('[data-f="done"]').onclick = function () { M.close(); loadCard(); announceConnected(); };
   }
   function mount(el) { cardHost = el || null; if (cardHost) loadCard(); }
+  // Other screens that ride on the connection (the brain backup box, backup-link.js) hear about a new sign-in.
+  function announceConnected() {
+    try { window.dispatchEvent(new CustomEvent("javis:github-connected")); } catch (e) {}
+  }
+  // The same Connect dialog as the Connections page card, opened from elsewhere (backup-link.js).
+  async function connect() {
+    var st = await api("/github/status");
+    openForm(st && st.ok !== false ? st : {});
+  }
 
   // ============================================================
   // 2 and 3. Repos of the open conversation: + menu panel and chip
@@ -352,26 +520,70 @@
   function announce() {
     try { window.dispatchEvent(new CustomEvent("javis:github-repos-changed", { detail: { sid: sid(), repos: attached } })); } catch (e) {}
   }
+  // The chip lives in the row under the composer card (#cpCtx), after the pinned folder (owner, 21/11/2026: "sắp xếp
+  // lại khung giống của Claude"); it used to squeeze the model and Effort chips in the card's button row.
+  // Owner, 21/11/2026: "cho anh nút x rõ ràng khi ghim ở khung chat". The chip is a group now: the name opens the
+  // panel, the status icon opens the detail, and an X at its far end takes the repos off the chat.
   function renderChip() {
-    var host = document.getElementById("cpChips");
+    var host = document.getElementById("cpCtx");
     if (!host) return;
     var chip = document.getElementById("ghChip");
     var list = held ? held : names();
-    if (!list.length) { if (chip) chip.remove(); return; }
+    if (!list.length) { if (chip) chip.remove(); syncCtx(host); return; }
     if (!chip) {
-      chip = document.createElement("button");
-      chip.type = "button"; chip.id = "ghChip"; chip.className = "cp-pin gh-chip";
-      chip.addEventListener("click", function (e) { e.stopPropagation(); if (window.JavisComposerMenu) window.JavisComposerMenu.openItem("github"); });
+      chip = document.createElement("span");
+      chip.id = "ghChip"; chip.className = "cp-pin gh-chip";
+      chip.addEventListener("click", chipClick);
+      chip.addEventListener("keydown", function (e) {
+        if ((e.key === "Enter" || e.key === " ") && e.target.closest && e.target.closest(".gh-st")) { e.preventDefault(); chipClick(e); }
+      });
     }
-    var after = document.getElementById("pinChip") || document.getElementById("limitBtn");
-    if (chip.parentElement !== host || chip.previousElementSibling !== after) host.insertBefore(chip, after ? after.nextSibling : null);
-    var base = chipBase();
+    if (chip.parentElement !== host || chip.nextElementSibling) host.appendChild(chip);
+    syncCtx(host);
+    var base = chipBase(), rm = removeLabel(list), rmText = tw(rm.key, rm.vars);
     chip.title = list.join("\n") + (base ? "\n" + tw("gh.chip_branch", { branch: base }) : "");
-    chip.setAttribute("aria-label", tw("gh.chip_label", { names: list.join(", ") }) + (base ? ", " + tw("gh.chip_branch", { branch: base }) : ""));
-    chip.innerHTML = LOGO + "<span>" + esc(chipText(list, narrow() ? 10 : 18)) + "</span>" +
-      (base ? '<span class="gh-chip-br">' + BRANCH + esc(base) + "</span>" : "") + (chipIcon ? iconHtml(chipIcon) : "");
-    var st = chip.querySelector(".gh-st");
-    if (st) st.addEventListener("click", function (e) { e.stopPropagation(); openDetail(sid()); });
+    chip.innerHTML = '<button type="button" class="cp-pin-open" aria-label="' +
+      esc(tw("gh.chip_label", { names: list.join(", ") }) + (base ? ", " + tw("gh.chip_branch", { branch: base }) : "")) + '">' +
+      LOGO + "<span>" + esc(chipText(list, narrow() ? 28 : 44)) + "</span>" +
+      (base ? '<span class="gh-chip-br">' + BRANCH + esc(base) + "</span>" : "") + "</button>" +
+      (chipIcon ? iconHtml(chipIcon) : "") +
+      '<button type="button" class="cp-pin-x" title="' + esc(rmText) + '" aria-label="' + esc(rmText) + '">' + XIC + "</button>";
+  }
+  function chipClick(e) {
+    e.stopPropagation();
+    var t = e.target && e.target.closest ? e.target : null;
+    if (t && t.closest(".cp-pin-x")) { chipRemove(); return; }
+    if (t && t.closest(".gh-st")) { openDetail(sid()); return; }
+    if (window.JavisComposerMenu) window.JavisComposerMenu.openItem("github");
+  }
+  // The chip's X: every repo it names leaves the chat, one request each. A repo that holds unsaved work stays, and
+  // the picker opens on it with the question "keep it, or remove it anyway" (askOnOpen).
+  var askOnOpen = null;
+  function chipRemove() {
+    var chip = document.getElementById("ghChip");
+    if (chip && chip.classList.contains("is-busy")) return;
+    if (chip) chip.classList.add("is-busy");
+    var list = held ? held.slice() : names();
+    list.reduce(function (p, name) {
+      return p.then(function (stop) {
+        if (stop) return stop;
+        return removeRepo(name, false).then(function (d) { return d && d.ok !== false ? null : { name: name, d: d || {} }; });
+      });
+    }, Promise.resolve(null)).then(function (stop) {
+      var c = document.getElementById("ghChip");
+      if (c) c.classList.remove("is-busy");
+      if (!stop) return;
+      if (stop.d.code === "work_at_risk") {
+        askOnOpen = { name: stop.name, risk: stop.d.risk, count: stop.d.count };
+        if (window.JavisComposerMenu) window.JavisComposerMenu.openItem("github");
+      } else if (window.JavisAttach) window.JavisAttach.note(stop.d.error || tw("gh.err_net"));
+    });
+  }
+  // Same rule in composer-folder.js: the row hides while empty, and with folder AND repos pinned a phone shows both as
+  // icons only (.is-two, owner 21/11/2026), so a name is never cut to "ja...".
+  function syncCtx(host) {
+    host.hidden = !host.children.length;
+    host.classList.toggle("is-two", host.children.length > 1);
   }
   var chipIcon = null;
   // A base branch other than the default rides on the chip, so the chat shows where its work will land.
@@ -396,20 +608,37 @@
       if (n === seq && id === sid() && d && d.ok !== false) apply(d);
     });
   }
-  function setRepos(list) {
+  // One repo joins the chat. An empty chat holds it until the first message mints the session id.
+  function addRepo(name) {
     var id = sid();
     if (!id) {
-      held = list.length ? list.slice() : null;
-      heldBrain = chatBrain();
-      Object.keys(heldBase).forEach(function (fn) { if (list.indexOf(fn) < 0) delete heldBase[fn]; });
+      var list = held ? held.slice() : [];
+      if (list.indexOf(name) < 0) list.push(name);
+      held = list; heldBrain = chatBrain();
       renderChip();
-      return Promise.resolve("");
+      return Promise.resolve({ ok: true });
     }
     var n = ++seq;
-    return api("/github/session/" + encodeURIComponent(id) + "/repos", { brain: chatBrain(), repos: list.join(",") }).then(function (d) {
-      if (!d || d.ok === false) return (d && d.error) || tw("gh.err_net");
-      if (n === seq && id === sid()) apply(d);
-      return "";
+    return api("/github/session/" + encodeURIComponent(id) + "/repos", { brain: chatBrain(), add: name }).then(function (d) {
+      if (!d || d.ok === false) return d || { ok: false };
+      if (n === seq && id === sid()) apply(Object.assign({ icon: chipIcon }, d));
+      return { ok: true };
+    });
+  }
+  // One repo leaves the chat. The server refuses while its worktree holds unsaved work (code "work_at_risk", with
+  // risk and count); `force` is the person's "remove anyway" to that refusal.
+  function removeRepo(name, force) {
+    var id = sid();
+    if (!id) {
+      var list = (held || []).filter(function (x) { return x !== name; });
+      held = list.length ? list : null;
+      delete heldBase[name];
+      renderChip();
+      return Promise.resolve({ ok: true });
+    }
+    return api("/github/session/" + encodeURIComponent(id) + "/detach", { brain: chatBrain(), full_name: name, force: force ? "1" : "" }).then(function (d) {
+      if (!d || d.ok === false) return d || { ok: false };
+      return refresh().then(function () { return { ok: true }; });
     });
   }
   // app.js: the first message just minted a session id. Attach the repos held on the empty chat before the turn runs.
@@ -438,7 +667,7 @@
   // menu "Change repo / Change branch" once repos are attached, a repo list split into "Selected" and "Repos", and a
   // branch list per repo. Three views in the same box; each one has a back row to the menu.
   function panel(box, menuApi) {
-    box.innerHTML = '<div class="cp-empty">' + esc(tw("gh.loading")) + "</div>";
+    box.innerHTML = '<div class="cp-empty pg-loading">' + esc(tw("gh.loading")) + "</div>";
     // The + menu stops clicks from bubbling to the page, so the shared (i) handler of info-tip.js never sees them.
     box.addEventListener("click", function (e) {
       var b = e.target.closest ? e.target.closest("button.info-i") : null;
@@ -456,7 +685,10 @@
         box.querySelector("[data-go-connect]").onclick = function () { menuApi.close(); goConnections(); };
         return;
       }
-      (held || names().length) ? homeView(box, menuApi) : reposView(box, menuApi, false);
+      // The chip's X on a repo with unsaved work lands straight on the list, where that row asks what to do.
+      if (!(held || names().length)) reposView(box, menuApi, false);
+      else if (askOnOpen) reposView(box, menuApi, true);
+      else homeView(box, menuApi);
     });
   }
   // Status read when the panel opened: tells the repo list whether "add repos on GitHub" applies.
@@ -467,7 +699,7 @@
   function addReposUrl() {
     return ghStatus && ghStatus.source === "app" && ghStatus.install_url ? String(ghStatus.install_url) : "";
   }
-  function goConnections() { try { window.Alpine.store("nav").go("mcp"); } catch (e) { location.hash = "#mcp"; } }
+  function goConnections() { try { window.Alpine.store("nav").go("mcp"); } catch (e) { location.hash = "#p=mcp"; } }
   // Inside a sub view our own back row leads back to the GitHub menu; the + menu's back row above it would only
   // repeat "Repo GitHub", so it hides there and comes back on the menu view.
   function outerBack(box, show) {
@@ -506,34 +738,34 @@
     if (stb) stb.onclick = function () { menuApi.close(); openDetail(sid()); };
     var first = box.querySelector(".cp-mi"); if (first) first.focus();
   }
-  // One repo row: the owner small above, the name large, a check on the right when chosen.
-  function repoRow(r, i, on) {
-    var parts = String(r.full_name).split("/");
-    var tag = r.cloned ? tw("gh.cloned") : (r.private ? tw("gh.private") : "");
-    return '<button type="button" class="cp-mi gh-repo" role="option" aria-selected="' + on + '" data-gh-i="' + i + '">' +
-      '<span class="gh-two"><span class="gh-owner">' + esc(parts[0]) + (tag ? " · " + esc(tag) : "") + "</span>" +
-      '<span class="gh-name">' + esc(parts[1] || r.full_name) + "</span></span>" +
-      (on ? '<span class="gh-tick">' + CHECK + "</span>" : "") + "</button>";
-  }
-  // Ticking a repo attaches it at once and unticking removes it (owner, 01/11/2026): no "Attach" button at the foot of
-  // a long list that had to be scrolled to. Changes go to the server one at a time; ticks made while one is in flight
-  // ride on the next request, so the server always ends on the last state the person sees.
-  function reposView(box, menuApi, canBack) {
-    outerBack(box, !canBack);
-    var chosen = held ? held.slice() : names(), sent = chosen.slice(), busy = false, items = [], timer = 0, n = 0, addUrl = addReposUrl();
-    box.innerHTML = (canBack ? backRow(tw("gh.menu")) + '<div class="cp-sep"></div>' : "") +
-      '<input type="search" class="cp-search" placeholder="' + esc(tw("gh.search_ph")) + '" aria-label="' + esc(tw("gh.search_ph")) + '">' +
-      '<div class="cp-results gh-results" role="listbox" aria-multiselectable="true"></div>' +
-      '<div class="gh-foot"><div class="cp-pin-err" role="status"></div>' +
-      (addUrl ? '<a class="cp-mi gh-more-conn" data-gh-add="1" target="_blank" rel="noopener" href="' + esc(addUrl) + '">' + PLUS +
+  // The "+" row at the foot of the list: add repos on GitHub (app sign-in), or connect more (pasted token).
+  function footRow(addUrl) {
+    return addUrl
+      ? '<a class="cp-mi gh-more-conn" data-gh-add="1" target="_blank" rel="noopener" href="' + esc(addUrl) + '">' + PLUS +
         '<span class="cp-mi-lbl">' + esc(tw("gh.add_on_github")) + "</span></a>"
-        : '<button type="button" class="cp-mi gh-more-conn" data-gh-conn="1">' + PLUS + '<span class="cp-mi-lbl">' + esc(tw("gh.connect_more")) + "</span></button>") +
-      "</div>";
+      : '<button type="button" class="cp-mi gh-more-conn" data-gh-conn="1">' + PLUS + '<span class="cp-mi-lbl">' + esc(tw("gh.connect_more")) + "</span></button>";
+  }
+  // ONE repo list for every picker: the main chat (reposView below), a team chat, a project and an assistant
+  // (team-github.js). Owner, 21/11/2026: "cho anh nút x rõ ràng ... tìm xem khi thao tác có dễ bị chọn nhầm không".
+  //   - A chosen repo is a row with an X. The row itself does nothing, so a stray tap can no longer drop a repo.
+  //   - Any other repo is one tap to add, marked with a +.
+  //   - Adding and removing are separate requests, one at a time. Before, each tick sent the whole list: one repo
+  //     the server would not take off (unsaved work) refused it all, the repo just ticked was dropped with it, and
+  //     the chat "jumped back" to the old repo.
+  //   - A repo holding unsaved work asks on its own row: keep it, or remove it anyway. No dead end.
+  // o: { brain(), current() -> [full names], add(name) -> Promise<{ok, error}>,
+  //      remove(name, force) -> Promise<{ok, error, code, risk, count}>,
+  //      head: html above the search box, addUrl, connections(), ask: {name, risk, count} to open on a question }
+  function repoList(box, o) {
+    var items = [], shown = [], pending = {}, ask = o.ask || null, timer = 0, n = 0, chain = Promise.resolve();
+    var addUrl = o.addUrl || "";
+    box.innerHTML = (o.head || "") +
+      '<input type="search" class="cp-search" placeholder="' + esc(tw("gh.search_ph")) + '" aria-label="' + esc(tw("gh.search_ph")) + '">' +
+      '<div class="cp-results gh-results"></div>' +
+      '<div class="gh-foot"><div class="cp-pin-err" role="status"></div>' + footRow(addUrl) + "</div>";
     var input = box.querySelector(".cp-search"), out = box.querySelector(".cp-results"), err = box.querySelector(".cp-pin-err");
-    var back = box.querySelector("[data-gh-back]");
-    if (back) back.onclick = function () { homeView(box, menuApi); };
     var conn = box.querySelector("[data-gh-conn]");
-    if (conn) conn.onclick = function () { menuApi.close(); goConnections(); };
+    if (conn) conn.onclick = function () { if (o.connections) o.connections(); };
     // Back from GitHub with more repos ticked: list them again without a reload, once per return to the tab.
     var away = false;
     function onBack() {
@@ -546,51 +778,115 @@
       document.addEventListener("visibilitychange", onBack);
       window.addEventListener("focus", onBack);
     }
+    // What the list shows as chosen: what the chat has, plus a repo still on its way in.
+    function chosenNow() {
+      var list = (o.current() || []).slice();
+      Object.keys(pending).forEach(function (k) { if (pending[k] === "add" && list.indexOf(k) < 0) list.push(k); });
+      return list;
+    }
+    // Two lines: the owner small above (with "downloaded" or "private"), the name large.
+    function twoLine(r) {
+      var parts = String(r.full_name).split("/");
+      var tag = r.cloned ? tw("gh.cloned") : (r.private ? tw("gh.private") : "");
+      return '<span class="gh-two"><span class="gh-owner">' + esc(parts[0]) + (tag ? " · " + esc(tag) : "") + "</span>" +
+        '<span class="gh-name">' + esc(parts[1] || r.full_name) + "</span></span>";
+    }
+    function askHtml(q, i) {
+      var a = askSpec(q);
+      return '<div class="gh-ask" role="group"><div class="gh-ask-t">' + esc(tw(a.text, { n: a.n })) + "</div>" +
+        '<div class="gh-ask-act"><button type="button" class="gh-ask-keep" data-gh-keep="1">' + esc(tw("gh.ask_keep")) + "</button>" +
+        '<button type="button" class="gh-ask-go" data-gh-force="' + i + '">' + esc(tw(a.go)) + "</button></div></div>";
+    }
+    function selRow(r, i) {
+      var st = pending[r.full_name], label = tw("gh.remove_one", { name: r.full_name });
+      var asking = !st && ask && ask.name === r.full_name;
+      return '<div class="gh-sel' + (st ? " is-busy" : "") + (asking ? " is-asking" : "") + '"><div class="cp-mi gh-repo gh-on">' + twoLine(r) +
+        (st ? '<span class="gh-busy">' + esc(tw(st === "add" ? "gh.adding" : "gh.removing")) + "</span>"
+          : '<button type="button" class="gh-row-x" data-gh-x="' + i + '" title="' + esc(label) + '" aria-label="' + esc(label) + '">' + XIC + "</button>") +
+        "</div>" + (asking ? askHtml(ask, i) : "") + "</div>";
+    }
+    function addRow(r, i) {
+      return '<button type="button" class="cp-mi gh-repo" data-gh-i="' + i + '" aria-label="' + esc(tw("gh.add_one", { name: r.full_name })) + '">' +
+        twoLine(r) + '<span class="gh-add">' + PLUS + "</span></button>";
+    }
     function draw() {
-      var sel = [], rest = [];
-      items.forEach(function (r, i) { (chosen.indexOf(r.full_name) >= 0 ? sel : rest).push(repoRow(r, i, chosen.indexOf(r.full_name) >= 0)); });
-      out.innerHTML = (sel.length ? '<div class="gh-sec">' + esc(tw("gh.sec_selected")) + '</div><div class="gh-group">' + sel.join("") + "</div>" : "") +
-        (rest.length ? '<div class="gh-sec">' + esc(tw("gh.sec_repos")) + '</div><div class="gh-group">' + rest.join("") + "</div>" : "") +
-        (!items.length ? '<div class="cp-empty">' + esc(tw("gh.none_found")) +
+      var v = splitRows(items, chosenNow(), input.value), i = 0;
+      shown = v.all;
+      var sel = v.selected.map(function (r) { return selRow(r, i++); }).join("");
+      var rest = v.rest.map(function (r) { return addRow(r, i++); }).join("");
+      out.innerHTML = (sel ? '<div class="gh-sec">' + esc(tw("gh.sec_selected")) + '</div><div class="gh-group">' + sel + "</div>" : "") +
+        (rest ? '<div class="gh-sec">' + esc(tw("gh.sec_repos")) + '</div><div class="gh-group">' + rest + "</div>" : "") +
+        (!shown.length ? '<div class="cp-empty">' + esc(tw("gh.none_found")) +
           (addUrl ? ' <a data-gh-add="1" target="_blank" rel="noopener" href="' + esc(addUrl) + '">' + esc(tw("gh.add_on_github")) + "</a>" : "") +
           "</div>" : "");
     }
-    function sync() {
-      if (busy) return;
-      if (sameSet(chosen, sent)) return;
-      var list = chosen.slice(), adds = list.some(function (x) { return sent.indexOf(x) < 0; });
-      busy = true;
-      err.textContent = adds ? tw("gh.cloning") : "";
-      setRepos(list).then(function (msg) {
-        busy = false;
-        if (msg) { chosen = sent.slice(); err.textContent = msg; draw(); return; }
-        sent = list;
+    // One change at a time, in the order asked: the server binds a repo by rewriting the chat's whole folder list.
+    function run(r, kind, force) {
+      var name = r.full_name;
+      if (pending[name]) return;
+      pending[name] = kind;
+      if (ask && ask.name === name) ask = null;
+      err.textContent = kind === "add" && !r.cloned ? tw("gh.cloning") : "";
+      draw();
+      chain = chain.then(function () {
+        return kind === "add" ? o.add(name) : o.remove(name, !!force);
+      }).then(null, function () { return { ok: false }; }).then(function (d) {   // a thrown call must not leave the row busy for good
+        delete pending[name];
+        if (!box.isConnected) return;
         err.textContent = "";
-        sync();
+        if (!d || d.ok === false) {
+          if (kind === "remove" && d && d.code === "work_at_risk") ask = { name: name, risk: d.risk, count: d.count };
+          else err.textContent = (d && d.error) || tw("gh.err_net");
+        } else if (kind === "add") {
+          r.cloned = true;
+        }
+        draw();
       });
     }
     function load() {
       var q = input.value.trim(), k = ++n;
-      api("/github/repos?brain=" + encodeURIComponent(chatBrain()) + "&q=" + encodeURIComponent(q)).then(function (d) {
-        if (k !== n) return;
+      api("/github/repos?brain=" + encodeURIComponent(o.brain()) + "&q=" + encodeURIComponent(q)).then(function (d) {
+        if (k !== n || !box.isConnected) return;
         if (!d || d.ok === false) { err.textContent = (d && d.error) || tw("gh.err_net"); items = []; draw(); return; }
         items = d.items || [];
-        // Attached repos stay listed (in "Selected") even when the search hides them, so they can be unticked.
-        chosen.forEach(function (name) {
-          if (!items.some(function (x) { return x.full_name === name; }) && !q) items.unshift({ full_name: name, cloned: true });
-        });
         draw();
       });
     }
     out.addEventListener("click", function (e) {
-      var b = e.target.closest ? e.target.closest("[data-gh-i]") : null;
-      if (!b) return;
-      var r = items[+b.getAttribute("data-gh-i")];
-      if (r) { chosen = toggle(chosen, r.full_name); draw(); sync(); }
+      var t = e.target.closest ? e.target : null;
+      if (!t) return;
+      if (t.closest("[data-gh-keep]")) { ask = null; draw(); return; }
+      var b = t.closest("[data-gh-force]");
+      if (b) { if (shown[+b.getAttribute("data-gh-force")]) run(shown[+b.getAttribute("data-gh-force")], "remove", true); return; }
+      b = t.closest("[data-gh-x]");
+      if (b) { if (shown[+b.getAttribute("data-gh-x")]) run(shown[+b.getAttribute("data-gh-x")], "remove", false); return; }
+      b = t.closest("[data-gh-i]");
+      if (b && shown[+b.getAttribute("data-gh-i")]) run(shown[+b.getAttribute("data-gh-i")], "add", false);
     });
     input.addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(load, 200); });
-    input.focus();
+    // Opened on a question: the eye belongs on that row, and a phone must not raise its keyboard over it.
+    if (!ask) input.focus();
+    draw();
     load();
+  }
+  // The repo list of the main chat. Its back row leads to the short menu, or out of the panel once no repo is left.
+  function reposView(box, menuApi, canBack) {
+    outerBack(box, !canBack);
+    var ask = askOnOpen;
+    askOnOpen = null;
+    repoList(box, {
+      head: canBack ? backRow(tw("gh.menu")) + '<div class="cp-sep"></div>' : "",
+      addUrl: addReposUrl(), brain: chatBrain, ask: ask,
+      current: function () { return held ? held.slice() : names(); },
+      add: addRepo, remove: removeRepo,
+      connections: function () { menuApi.close(); goConnections(); }
+    });
+    var back = box.querySelector("[data-gh-back]");
+    if (back) back.onclick = function () {
+      if (held || names().length) { homeView(box, menuApi); return; }
+      outerBack(box, true);
+      menuApi.back();
+    };
   }
   // Several repos: pick the repo first, then its branch.
   function branchReposView(box, menuApi) {
@@ -716,17 +1012,31 @@
         return '<li class="gh-chk gh-chk-' + esc(c.conclusion || "") + '">' + (c.url ? '<a href="' + esc(c.url) + '" target="_blank" rel="noopener">' + esc(c.name) + "</a>" : esc(c.name)) +
           " · " + esc(c.conclusion || "") + "</li>";
       }).join("");
-      var canMerge = (r.integ === "ready") && (r.ci === "green" || r.ci === "no_ci");
+      var canMerge = !r.merging && (r.integ === "ready") && (r.ci === "green" || r.ci === "no_ci");
+      // A push or PR that failed after green local checks: Javis retries on its own, this is the shortcut.
+      var canPush = !!(r.gate && r.gate.ship_failed);
+      // Cross review is the person's call (owner, 08/11/2026): Review now on an open PR, and Fix / Skip on its findings.
+      var found = r.review_open || [];
+      var canReview = !!r.pr_number && r.integ !== "merged" && !r.reviewing && !r.merging;
+      var review = r.reviewing ? '<div class="lv-meta">' + esc(tw("gh.reviewing")) + "</div>" :
+        found.length ? '<div class="gh-findings"><div class="gh-local-head">' + esc(tw("gh.review_found", { n: found.length })) + "</div><ul>" +
+          found.map(function (f) { return "<li><code>" + esc(f.file + ":" + f.line) + "</code> " + esc(f.problem) + (f.scenario ? " (" + esc(f.scenario) + ")" : "") + "</li>"; }).join("") +
+          "</ul></div>" : "";
       return '<div class="gh-row" data-repo="' + esc(r.full_name) + '"><div class="gh-row-head"><b>' + esc(r.full_name) + "</b>" +
         (r.branch ? ' <code>' + esc(r.branch) + "</code>" : "") + "</div>" +
         '<div class="gh-row-state">' + esc(tw(CI_KEY[r.ci] || "gh.ci_none")) + " · " + esc(tw(INTEG_KEY[r.integ] || "gh.in_no_pr")) +
         (r.post_merge === "red" ? " · " + esc(tw("gh.st_post_red")) : "") + (r.fix_rounds ? " · " + esc(tw("gh.rounds", { n: r.fix_rounds })) : "") + "</div>" +
         (r.stuck_reason ? '<div class="lv-note">' + esc(r.stuck_reason) + "</div>" : "") +
         ((r.merge_block || []).length ? '<div class="lv-note">' + esc(tw("gh.needs_person")) + " " + r.merge_block.map(function (x) { return esc(x.path + " (" + x.kind + ")"); }).join(", ") + "</div>" : "") +
-        (checks ? '<ul class="gh-checks">' + checks + "</ul>" : "") +
+        (checks ? '<ul class="gh-checks">' + checks + "</ul>" : "") + review +
         '<div class="lv-form-act">' + (r.pr_url ? '<a class="s-btn-ghost" href="' + esc(r.pr_url) + '" target="_blank" rel="noopener">' + esc(tw("gh.open_pr", { n: r.pr_number })) + "</a>" : "") +
-        (canMerge ? '<button class="s-btn" type="button" data-merge="' + esc(r.full_name) + '">' + esc(tw("gh.merge")) + "</button>" : "") +
-        '<span class="lv-msg" role="status"></span></div></div>';
+        (found.length && !r.reviewing ? '<button class="s-btn" type="button" data-rv-fix="' + esc(r.full_name) + '">' + esc(tw("gh.review_fix")) + "</button>" +
+          '<button class="s-btn-ghost" type="button" data-rv-skip="' + esc(r.full_name) + '">' + esc(tw("gh.review_skip")) + "</button>" : "") +
+        (canMerge && !found.length ? '<button class="s-btn" type="button" data-merge="' + esc(r.full_name) + '">' + esc(tw("gh.merge")) + "</button>" : "") +
+        (canReview ? '<span class="gh-rv-now"><select class="js-input" data-rv-prov aria-label="' + esc(tw("gh.review_by")) + '"></select>' +
+          '<button class="s-btn-ghost" type="button" data-rv-now="' + esc(r.full_name) + '">' + esc(tw("gh.review_now")) + "</button></span>" : "") +
+        (canPush ? '<button class="s-btn" type="button" data-push="' + esc(r.full_name) + '">' + esc(tw("gh.push_again")) + "</button>" : "") +
+        '<span class="lv-msg" role="status">' + (r.merging ? esc(tw("gh.merging")) : "") + "</span></div></div>";
     }).join("") : '<div class="mp-empty">' + esc(tw("gh.no_work")) + "</div>";
     var queue = (d.queue || []).length ? '<div class="gh-queue"><div class="gh-local-head">' + esc(tw("gh.queue_head")) + "</div>" +
       d.queue.map(function (q) { return '<div class="gh-local-row"><span class="gh-local-meta">' + esc(q.text) + '</span><button class="s-btn-ghost" type="button" data-unqueue="' + q.id + '">' + esc(tw("gh.queue_cancel")) + "</button></div>"; }).join("") + "</div>" : "";
@@ -743,17 +1053,61 @@
     document.body.appendChild(m);
     m.addEventListener("click", function (e) { if (e.target === m || (e.target.closest && e.target.closest("[data-x]"))) closeDetail(); });
     var body = m.querySelector(".gh-detail-body");
+    var open = function () { return document.getElementById("ghDetail") === m; };
     function load() {
       api("/github/session/" + encodeURIComponent(id) + "?brain=" + encodeURIComponent(chatBrain())).then(function (d) {
+        if (!open()) return;
         if (!d || d.ok === false) { body.innerHTML = '<div class="lv-note">' + esc((d && d.error) || tw("gh.err_net")) + "</div>"; return; }
         body.innerHTML = detailHtml(d);
+        // A merge started earlier (maybe before this panel was closed) is still running on the server: follow it.
+        if ((d.work || []).some(function (r) { return r.merging || r.reviewing; })) setTimeout(function () { if (open()) load(); }, 3000);
+        var provSel = body.querySelectorAll("[data-rv-prov]");
+        if (provSel.length) reviewerOptions("").then(function (h) { provSel.forEach(function (s) { s.innerHTML = h; }); });
+        function act(b, path, name, extra, busyKey) {
+          var msg = b.closest(".lv-form-act").querySelector(".lv-msg");
+          b.disabled = true; msg.textContent = tw(busyKey);
+          api("/github/session/" + encodeURIComponent(id) + path, Object.assign({ full_name: name }, extra || {})).then(function (r) {
+            decorate();
+            if (!open()) return;
+            if (!r || r.ok === false) { b.disabled = false; msg.textContent = (r && r.error) || tw("gh.err_net"); return; }
+            if (r.reviewer) msg.textContent = tw("gh.review_started", { who: r.reviewer });
+            load();
+          });
+        }
+        body.querySelectorAll("[data-rv-now]").forEach(function (b) {
+          b.onclick = function () {
+            var s = b.parentElement.querySelector("[data-rv-prov]");
+            act(b, "/review", b.getAttribute("data-rv-now"), { provider: s ? s.value : "" }, "gh.reviewing");
+          };
+        });
+        body.querySelectorAll("[data-rv-fix]").forEach(function (b) {
+          b.onclick = function () { act(b, "/review/fix", b.getAttribute("data-rv-fix"), null, "gh.review_fixing"); };
+        });
+        body.querySelectorAll("[data-rv-skip]").forEach(function (b) {
+          b.onclick = function () { act(b, "/review/skip", b.getAttribute("data-rv-skip"), null, "gh.merging"); };
+        });
         body.querySelectorAll("[data-merge]").forEach(function (b) {
           b.onclick = function () {
             var msg = b.parentElement.querySelector(".lv-msg");
             b.disabled = true; msg.textContent = tw("gh.merging");
+            // The server merges in the background: closing this panel or the tab no longer stops it.
             api("/github/session/" + encodeURIComponent(id) + "/merge", { full_name: b.getAttribute("data-merge") }).then(function (r) {
+              decorate();
+              if (!open()) return;
               if (!r || r.ok === false) { b.disabled = false; msg.textContent = (r && r.error) || tw("gh.err_net"); return; }
-              load(); decorate();
+              load();
+            });
+          };
+        });
+        body.querySelectorAll("[data-push]").forEach(function (b) {
+          b.onclick = function () {
+            var msg = b.parentElement.querySelector(".lv-msg");
+            b.disabled = true; msg.textContent = tw("gh.pushing");
+            api("/github/session/" + encodeURIComponent(id) + "/push", { full_name: b.getAttribute("data-push") }).then(function (r) {
+              decorate();
+              if (!open()) return;
+              if (!r || r.ok === false) { b.disabled = false; msg.textContent = (r && r.error) || tw("gh.err_net"); return; }
+              load();
             });
           };
         });
@@ -784,6 +1138,8 @@
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 
-  window.JavisGithubRepos = { mount: mount, claimPending: claimPending, refresh: refresh, decorate: decorate, openDetail: openDetail,
-    current: function () { return attached.slice(); } };
+  // `logo`: the GitHub mark, so other chat screens (Teams) show the same logo as the main chat (2026-11-06).
+  // `list`: the one repo list, for the pickers of team-github.js (team chat, project, assistant).
+  window.JavisGithubRepos = { mount: mount, connect: connect, claimPending: claimPending, refresh: refresh, decorate: decorate, openDetail: openDetail,
+    current: function () { return attached.slice(); }, logo: LOGO, list: repoList };
 })();

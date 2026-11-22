@@ -9,6 +9,7 @@ draft PR ready. Tests drive CI by setting check runs per SHA (`set_checks`).
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -47,6 +48,8 @@ class FakeGitHub:
         self.device = {"pending": 1, "slow": False, "deny": False, "expires_in": 0, "refresh_token": "",
                        "refreshed_token": "", "client_ids": [], "polls": 0}
         self.installs = 1
+        # POST /user/repos: False answers 403 like a "Sign in with GitHub" token (no Administration permission).
+        self.can_create = True
         self.lock = threading.Lock()
         handler = self._handler()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -56,6 +59,8 @@ class FakeGitHub:
 
     def close(self):
         self.server.shutdown()
+        if getattr(self, "git_server", None):
+            self.git_server.shutdown()
 
     # ---- repos ----
     def add_repo(self, full_name, default_branch="main", files=None, private=False, push=True):
@@ -78,6 +83,81 @@ class FakeGitHub:
                                  "permissions": {"push": push, "pull": True, "admin": False}, "description": ""}
         self.pulls.setdefault(full_name, [])
         return bare
+
+    def add_empty_repo(self, full_name, private=True, push=True):
+        """A repo with no commit yet, as GitHub makes it (POST /user/repos without auto_init)."""
+        bare = self.root / (full_name.replace("/", "__") + ".git")
+        git(["init", "-q", "--bare", "-b", "main", str(bare)], self.root)
+        self.repos[full_name] = {"full_name": full_name, "default_branch": "main", "private": private,
+                                 "clone_url": bare.as_uri(), "bare": str(bare),
+                                 "permissions": {"push": push, "pull": True, "admin": True}, "description": ""}
+        self.pulls.setdefault(full_name, [])
+        return bare
+
+    def serve_private(self, full_name):
+        """Serve this repo the way github.com serves a PRIVATE one, and return its new clone URL.
+
+        Smart HTTP through `git http-backend`: every request needs the token, and partial clone is honoured, so
+        `--filter=blob:none` really leaves blobs behind and git fetches them later, on its own, when a checkout needs
+        them. A `file://` remote hides both: it ignores the filter and never asks who is calling.
+        `git_requests` records (path, authorized) of every git request.
+        """
+        rep = self.repos[full_name]
+        git(["config", "uploadpack.allowFilter", "true"], rep["bare"])
+        git(["config", "uploadpack.allowAnySHA1InWant", "true"], rep["bare"])
+        if not getattr(self, "git_server", None):
+            self.git_requests = []
+            self.git_server = ThreadingHTTPServer(("127.0.0.1", 0), self._git_handler())
+            threading.Thread(target=self.git_server.serve_forever, daemon=True).start()
+        rep["private"] = True
+        rep["clone_url"] = f"http://127.0.0.1:{self.git_server.server_address[1]}/{Path(rep['bare']).name}"
+        return rep["clone_url"]
+
+    def _git_handler(self):
+        outer = self
+        want = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
+
+        class GitHandler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _serve(self):
+                scheme, _, cred = (self.headers.get("Authorization") or "").partition(" ")
+                ok = scheme.lower() == "basic" and cred.strip() == want
+                outer.git_requests.append((self.path, ok))
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if not ok:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="fake github"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                u = urlparse(self.path)
+                env = {**os.environ, "GIT_PROJECT_ROOT": str(outer.root), "GIT_HTTP_EXPORT_ALL": "1",
+                       "REQUEST_METHOD": self.command, "PATH_INFO": u.path, "QUERY_STRING": u.query,
+                       "CONTENT_TYPE": self.headers.get("Content-Type") or "", "CONTENT_LENGTH": str(len(body)),
+                       "REMOTE_USER": outer.login, "REMOTE_ADDR": "127.0.0.1"}
+                for header, var in (("Content-Encoding", "HTTP_CONTENT_ENCODING"), ("Git-Protocol", "GIT_PROTOCOL")):
+                    if self.headers.get(header):
+                        env[var] = self.headers[header]
+                out = subprocess.run(["git", "http-backend"], input=body, capture_output=True, env=env).stdout
+                head, _, payload = out.partition(b"\r\n\r\n")
+                status, headers = 200, []
+                for line in head.decode("latin-1").split("\r\n"):
+                    key, _, value = line.partition(":")
+                    if key.lower() == "status":
+                        status = int(value.split()[0])
+                    elif key:
+                        headers.append((key, value.strip()))
+                self.send_response(status)
+                for key, value in headers:
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = _serve
+        return GitHandler
 
     def add_branch(self, full_name, branch, filename="BRANCH.md", text="branch\n"):
         """A second branch on GitHub, one commit ahead of the default branch."""
@@ -249,6 +329,15 @@ class FakeGitHub:
                 if path == "/user":
                     h = {"X-OAuth-Scopes": fake.scopes} if fake.scopes is not None else {}
                     return self._send(200, {"login": fake.login, "id": 4242}, headers=h)
+                if path == "/user/repos" and method == "POST":
+                    if not fake.can_create:
+                        return self._send(403, {"message": "Resource not accessible by integration"})
+                    fn = f"{fake.login}/{body.get('name') or ''}"
+                    if fn in fake.repos:
+                        return self._send(422, {"message": "Repository creation failed.",
+                                                "errors": [{"message": "name already exists on this account"}]})
+                    fake.add_empty_repo(fn, private=bool(body.get("private")))
+                    return self._send(201, fake.repos[fn])
                 if path == "/user/repos":
                     page = int(q.get("page") or 1)
                     items = list(fake.repos.values()) if page == 1 else []

@@ -104,7 +104,7 @@ Nếu tool bị chặn vì mức quyền, câu trả lời sẽ chứa nguyên v
 
 | Tên trên thẻ | slug | Tool cung cấp | Quyền tối thiểu | Mặc định |
 |---|---|---|---|---|
-| Thời gian & ngày (VN) | `datetime-vn` | `javis_now`, `javis_date_add` | chỉ đọc | Bật |
+| Thời gian & ngày (múi giờ chọn ở Cài đặt) | `datetime-vn` | `javis_now`, `javis_date_add` | chỉ đọc | Bật |
 | Đặt việc định kỳ & nhắc hẹn | `javis-schedule` | `javis_schedule` | ghi (safe) | Bật |
 | Giao việc Kanban | `javis-task` | `javis_task` | ghi (safe) | Bật |
 | Quản lý nhóm chat | `javis-team` | `javis_team` | ghi (safe), chỉ chủ | Bật |
@@ -113,12 +113,11 @@ Nếu tool bị chặn vì mức quyền, câu trả lời sẽ chứa nguyên v
 | Đọc video YouTube | `youtube-read` | `javis_youtube_read` | chỉ đọc | Bật |
 | Meta Ads (Graph API) | `meta-ads-graph` | `meta_ads_accounts`, `meta_ads_insights`, `meta_ads_campaigns`, `meta_ads_get` | chỉ đọc | Bật |
 | Facebook Trang (Graph API) | `meta-pages-graph` | `fb_pages_list`, `fb_page_posts`, `fb_page_comments`, `fb_page_post`, `fb_page_photo`, `fb_page_album`, `fb_page_video`, `fb_page_edit`, `fb_page_delete`, `fb_page_reply` | toàn quyền | Bật |
-| Theo dõi Facebook (Apify) | `fb-monitor-apify` | `fb_monitor` | chỉ đọc | Bật |
 | Nhật ký dùng tool | `tool-audit` | `javis_tool_stats` + hook `post_tool_call` | chỉ đọc | **Tắt** |
 
 Từng cái làm được gì:
 
-- **Giao việc Kanban**: giao một việc nền vào hàng đợi ngay từ chat (`op=add`) và xem việc đang chạy tới đâu (`op=list`). Có từ 0.17.1. Trước đó đường duy nhất để giao việc là `POST /kanban/task`, mà gọi được nó thì phải chạy được lệnh máy - nên chỉ Claude Code với Codex làm được, dù tài liệu vẫn hứa mọi bộ não đều làm được. Tool này gọi thẳng vào hàng đợi in-process, không mở thêm cửa HTTP nào. Mặc định giao việc ở mức `full` (tự thao tác ra ngoài như lúc chat); nói rõ nếu muốn việc chỉ ghi nháp (`auto`) hay chỉ đọc (`suggest`). Trước 0.55.62 tool này từ chối mức full và mặc định `suggest`. Chuyển cột, huỷ việc, duyệt việc chờ phê duyệt vẫn làm ở trang Việc. Từ 0.107.0 nhận thêm `route`: `auto` (một worker chung làm) hoặc `wf:<slug>` để chạy đúng một quy trình có thật; slug sai bị từ chối, còn route auto mà tên việc nhắc tới một quy trình có thật thì tool cảnh báo.
+- **Giao việc Kanban**: giao một việc nền vào hàng đợi ngay từ chat (`op=add`) và xem việc đang chạy tới đâu (`op=list`). Có từ 0.17.1. Trước đó đường duy nhất để giao việc là `POST /kanban/task`, mà gọi được nó thì phải chạy được lệnh máy - nên chỉ Claude Code với Codex làm được, dù tài liệu vẫn hứa mọi bộ não đều làm được. Tool này gọi thẳng vào hàng đợi in-process, không mở thêm cửa HTTP nào. Mặc định giao việc ở mức `full` (tự thao tác ra ngoài như lúc chat); nói rõ nếu muốn việc chỉ ghi nháp (`auto`) hay chỉ đọc (`suggest`). Trước 0.55.62 tool này từ chối mức full và mặc định `suggest`. Chuyển cột, duyệt việc chờ phê duyệt vẫn làm ở trang Việc; huỷ việc thì làm được ngay trong chat (`op=cancel`). Từ 0.107.0 nhận thêm `route`: `auto` (một worker chung làm) hoặc `wf:<slug>` để chạy đúng một quy trình có thật; slug sai bị từ chối, còn route auto mà tên việc nhắc tới một quy trình có thật thì tool cảnh báo.
 - **Quản lý nhóm chat**: nhờ Javis ngay trong chat tạo nhóm chat, đổi tên, thêm bớt trợ lý, chọn trưởng nhóm, lưu trữ hay xoá nhóm, và tạo trợ lý mới với model riêng rồi ghép vào nhóm trong một lần ("tạo nhóm thử gồm ba trợ lý, mỗi người một model"). Có từ 0.173.0. Tool gọi thẳng cùng bộ thao tác mà trang Nhóm dùng, nên luật y như bấm tay. Xoá chỉ nhận nhóm đã lưu trữ và chỉ khi bạn nói rõ là xoá; file trợ lý không bị xoá theo. Bot chăm khách không thấy tool này. Từ 0.357.0 tool còn **giao một việc cho Team có sẵn** (op `dispatch`) và đọc lại trạng thái, nghiệm thu của việc (op `job`); kết quả tự báo về khung chat đã giao.
 - **Đấu thêm MCP**: nhờ Javis ngay trong chat đấu một nguồn MCP mới, và nó **hiện ra trang Kết nối** ở khu "Đã kết nối" như tài khoản bạn tự thêm bằng tay, dùng chung cho mọi bộ não. Trước plugin này Javis không có đường nào ghi vào kho kết nối, nên nó chỉ còn cách chạy `claude mcp add` - server đó rơi vào cấu hình riêng của Claude Code, sáu bộ não còn lại không thấy, và trên trang Kết nối nó không nằm ở khu "Đã kết nối" mà lọt xuống khu gập "Kết nối sẵn của Claude Code và Codex" (mặc định đóng), nên nhìn vào tưởng như chẳng có gì được thêm. Ba rào an toàn: mức quyền mặc định là **chỉ đọc** (muốn cho ghi thì bạn tự nâng ở trang Kết nối); nguồn chạy bằng **lệnh trên máy** (stdio) được thêm ở trạng thái **tắt** để bạn tự đọc lệnh rồi mới bật; dịch vụ đã có sẵn trong Kho kết nối (Gmail, Lịch, POS...) thì Javis chỉ tay sang đúng card chứ không đẻ một bản tự khai song song. Thử kết nối hỏng thì mục đó **vẫn nằm lại** trang Kết nối kèm lý do, chứ không biến mất im lặng.
 - **Zalo mở rộng (gói `javis.zalo` trên Javis Store)**: từ 0.73.0 các tool Zalo bù chỗ MCP chuẩn còn thiếu không còn đi sẵn trong app nữa, để ai không dùng Zalo thì không phải mang theo. Gói gồm gửi ảnh và file (`zalo_send_image`), tag đúng người, ghi chú, nhắc hẹn, poll trong nhóm (`zalo_group_members`, `zalo_send_mention`, `zalo_create_note`, `zalo_create_reminder`, `zalo_create_poll`) và đọc ảnh trong nhóm (`zalo_read_images`). Quét QR Zalo xong là Javis mời cài; máy đã dùng Zalo từ trước thì trang Kết nối hiện nút cài. Chi tiết ở [Zalo](12-zalo.md).
@@ -130,7 +129,7 @@ Từng cái làm được gì:
 - **Gửi tin Zalo an toàn**: gửi tin Zalo thay cho tool thô. Nó khoá cứng vào tài khoản đang nghe và chỉ gửi được cho cuộc chat trong danh sách đang theo dõi; tên khớp nhiều người thì từ chối và bắt hỏi lại. Hai plugin Zalo dùng chung với [Kênh Zalo](12-zalo.md).
 - **Meta Ads (Graph API)**: đọc số liệu quảng cáo Facebook/Instagram (danh sách tài khoản ads, chiến dịch, hiệu suất). **Chỉ đọc, không tiêu tiền.** Cần đã đấu kết nối "Meta Ads (Facebook & Instagram)" ở trang Kết nối.
 - **Facebook Trang (Graph API)**: quản lý Trang/Fanpage. Đọc danh sách Trang, bài và bình luận là chỉ-đọc; đăng bài, đăng ảnh, đăng album, đăng video, sửa chữ, xoá bài, trả lời bình luận là hành động **thật, công khai** và cần mức toàn quyền. Dùng Fanpage đã nối ở thẻ Facebook Messenger trang Kết nối (hoặc kết nối "Facebook Trang" trong Kho nếu đã cài từ trước).
-- **Theo dõi Facebook (Apify)**: theo dõi Trang và Nhóm **công khai** để tìm bài nhiều lượt chia sẻ, qua dịch vụ Apify. Chỉ đọc, không đụng tài khoản cá nhân, chạy được trên VPS. Cần dán Personal API token của apify.com vào kết nối "Theo dõi Facebook (Apify)".
+- **Theo dõi Facebook (Apify)** không còn nằm sẵn trong Javis (từ 12/11/2026): tool `fb_monitor` đi cùng gói **Theo dõi Facebook (Apify)** trong Kho cài đặt. Đã cài gói đó từ trước thì bấm cập nhật gói là có lại; chưa cài thì cài gói rồi dán Personal API token của apify.com ở trang Kết nối.
 - **Nhật ký dùng tool**: đếm số lần **mỗi** tool được engine gọi (qua hook `post_tool_call`) rồi cho xem thống kê tool hay dùng nhất. Đây là ví dụ minh hoạ cơ chế hook, nên mặc định để tắt; bật ở trang Plugins, chat vài lượt có gọi tool, rồi hỏi Javis "tool nào hay dùng nhất".
 
 Lưu ý về cột "Quyền tối thiểu": đó là mức khai báo cho **cả plugin** và là cái hiển thị trên thẻ. Từng tool bên trong vẫn có mức riêng. Ví dụ `meta-pages-graph` ghi "toàn quyền" trên thẻ, nhưng ba tool đọc bài/bình luận của nó chỉ cần mức chỉ-đọc, còn các tool đăng và xoá mới cần toàn quyền.
@@ -310,7 +309,7 @@ Plugin dùng hook này vẫn chịu đúng rào chung: plugin người dùng t�
 
 ## Trang riêng và đường HTTP (từ 0.64.26)
 
-Plugin mở được đường web của riêng nó, dưới `/ext/<slug>/`. Dùng cho trang cài đặt, hoặc cho dịch vụ bên ngoài gọi vào (webhook, cửa OAuth). Gói "Javis trong ChatGPT" trong kho là ví dụ chạy thật.
+Plugin mở được đường web của riêng nó, dưới `/ext/<slug>/`. Dùng cho trang cài đặt, hoặc cho dịch vụ bên ngoài gọi vào (webhook, cửa OAuth). Gói **Javis Gate** (`javis.gate`) trong kho là ví dụ chạy thật.
 
 ```python
 def register(ctx):
@@ -326,6 +325,74 @@ def register(ctx):
 - **`register_well_known`**: chỉ GET, công khai, không cookie. Hai plugin xin cùng tên thì plugin nạp trước giữ.
 - Khai `page: ""` trong `plugin.yaml` thì thẻ plugin có nút **Mở trang**.
 - Chỉ plugin đi kèm app, plugin của gói đã cài và plugin toàn cục mới có đường. **Plugin trong brain thì không**, vì model ghi được vào brain.
+
+## Javis Gate: AI bên ngoài nhắn vào khung chat (từ 0.440.0)
+
+Gói **Javis Gate** (`javis.gate`) mở cửa MCP có OAuth cho ChatGPT, Claude và AI khác. Ngoài bộ công
+cụ Javis đã có, cửa này có thêm năm công cụ chỉ AI bên ngoài thấy (`server/chat_bridge.py`):
+
+| Công cụ | Việc | Mức quyền |
+|---|---|---|
+| `javis_chat_find` | Tìm hội thoại theo tên (không phân biệt dấu) hoặc nội dung | Mọi mức |
+| `javis_chat_read` | Đọc các tin cuối của một hội thoại | Mọi mức |
+| `javis_chat_send` | Nhắn vào hội thoại như chủ gõ, chờ câu trả lời | Chỉ Toàn quyền |
+| `javis_chat_result` | Đọc câu trả lời khi Javis làm lâu | Mọi mức |
+| `javis_chat_note` | Ghi lại cuộc chat bên ngoài: chủ nói gì, đã chốt gì (từ 0.441.0) | Ghi nháp, Toàn quyền |
+| `javis_sync_setup` | Bật Javis Sync trên máy của AI viết code: trả về một lệnh cài, AI tự chạy | Ghi nháp, Toàn quyền |
+
+- **Tin nhắn chạy đúng như chủ gõ:** đi qua chính vòng chat của dashboard, nên chữ chạy trên mọi tab
+  đang mở, có nút Dừng, lưu vào Lịch sử, ghi `memory/conversations` và vào vòng tự học. Bong bóng
+  tin mang nhãn **từ ChatGPT** hay **từ Claude**.
+- **Hội thoại đang trả lời** thì tin thành tin gõ thêm, như khi chủ gõ thêm lúc Javis đang làm.
+- **Chỉ hội thoại của chủ** (khung Trò chuyện, chat với Cộng sự). Hội thoại của khách và nhóm chat thì
+  không đọc, không nhắn được.
+- **Ghi chép không chạy Javis:** `javis_chat_note` chỉ lưu, không tốn hạn mức bộ não của Javis, nhưng đi
+  qua đúng đường lưu lượt chat nên vẫn vào Lịch sử, nhật ký và vòng tự học. Mỗi cuộc chat bên ngoài có một
+  hội thoại riêng **Từ ChatGPT: <tên>** (hay **Từ Claude: ...**); đưa `id` thì ghi thẳng vào hội thoại đó
+  của Javis. Javis không đọc được lịch sử chat của ChatGPT hay Claude, nên đây là cách AI bên ngoài tự gửi
+  sang phần đáng giữ.
+- Năm công cụ **không bao giờ** có trong bộ công cụ của chính Javis: chúng chỉ hiện khi cửa của gói gọi
+  `mcp_hub.tra_loi_jsonrpc(..., gate={"source": "<tên AI>"})`.
+
+### Tự lưu hội thoại Claude Code và Codex (Javis Sync)
+
+AI viết code bận làm việc nên gần như không tự gọi `javis_chat_note`. **Javis Sync**
+(`tools/javis-sync/javis_sync.py`) lo việc đó tự động: nó chạy trên máy có Claude Code hoặc Codex, làm **Stop hook**
+của Claude Code và chương trình **notify** của Codex. Mỗi lượt xong, nó gửi câu anh gõ và câu trả lời cuối của AI (không
+gửi các bước gọi công cụ ở giữa) lên `POST /chat/external` của Javis.
+
+- Mỗi phiên bên ngoài là một hội thoại riêng: **Từ Claude Code: <thư mục dự án>: <câu đầu>** hay **Từ Codex: ...**,
+  đi đúng đường lưu lượt chat nên vào Lịch sử, `memory/conversations` và vòng tự học. Javis không chạy model nào, không
+  tốn hạn mức.
+- API key lọt vào câu chữ được che trước khi lưu. Câu quá dài thì cắt, kèm dòng ghi còn bao nhiêu ký tự.
+- Javis tắt hay mất mạng thì lượt chưa gửi được giữ lại, lần sau gửi bù; lượt nào Javis có rồi thì bỏ qua, không trùng.
+- Hook không bao giờ làm hỏng Claude Code hay Codex: lỗi chỉ ghi vào `~/.javis-sync/sync.log`.
+
+**Cài: chỉ cần nối Gate.** Claude Code hay Codex vừa nối vào Javis Gate là được Gate dặn hỏi anh một câu: "Bật Javis
+Sync không?". Anh trả lời đồng ý là nó tự gọi tool `javis_sync_setup`, tự chạy lệnh cài trên máy, xong báo lại. Không phải
+gõ lệnh, không phải chép token. Muốn bật lúc khác thì nhắn nó "bật Javis Sync".
+
+- Tool đó tạo một token loại **chỉ lưu hội thoại**: chỉ vào được đúng `/chat/external`, không chạy được lượt chat nào,
+  không đọc được gì. Token hiện ở trang **Tích hợp**, tab **Token API**, tên "Javis Sync (Claude Code)", thu hồi ở đó.
+- Cần mức Ghi nháp hoặc Toàn quyền của cửa Gate. Địa chỉ Javis lấy từ tên miền trong **Cài đặt** (hoặc `DOMAIN_NAME`);
+  chưa đặt thì AI tự lấy từ địa chỉ Gate nó đang nối.
+- Cần Python 3.8 trở lên trên máy đó. Phiên đang mở nhận hook sau khi khởi động lại Claude Code hay Codex.
+
+Cài tay (máy không nối Gate): tạo token ở trang **Tích hợp**, tab **Token API**, rồi chạy:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/blogminhquy/javis-os/main/tools/javis-sync/javis_sync.py
+python3 javis_sync.py install --url https://<tên-miền-javis> --token jvs_...
+```
+
+Lệnh `install` thử kết nối trước, sai URL hay token thì không cài gì. Nó chép script vào `~/.javis-sync/`, thêm hook vào
+`~/.claude/settings.json` và dòng `notify` vào `~/.codex/config.toml` (có sao lưu `.bak`). Codex đang có chương trình
+notify khác thì chương trình đó vẫn chạy tiếp. Chỉ cài một bên: thêm `--claude` hoặc `--codex`.
+
+- Lượt đầu tiên của một phiên Claude Code gửi bù cả phần đã nói trước khi cài.
+- Xem tình trạng: `python3 ~/.javis-sync/javis_sync.py status`. Gỡ: `... uninstall` (trả lại notify cũ của Codex).
+- Không gửi một thư mục: thêm đường dẫn vào `"exclude"` trong `~/.javis-sync/config.json`. Tạm tắt một cửa sổ:
+  `JAVIS_SYNC_OFF=1`.
 
 ## Bảng tra nhanh nút và trạng thái
 

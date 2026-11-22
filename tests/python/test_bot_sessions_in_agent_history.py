@@ -87,18 +87,45 @@ import main  # noqa: E402
 b1, err = chatbot_store.create_bot({"name": "Javis Vũ", "agent_slug": "lan", "brain": "brain"})
 b2, err2 = chatbot_store.create_bot({"name": "Nhi Mai", "agent_slug": "hoa", "brain": "brain"})
 check("(chuẩn bị) tạo hai bot dùng hai Agent khác nhau", b1 and b2 and not err and not err2, (err, err2))
-k = main._kenh_bot_cua_agent("brain", "agent:lan")
+k = main._agent_history_channels("brain", "agent:lan")
 slug1 = chatbot_store.get_bot(b1)["slug"]
-check("kênh bot của Agent lan là đúng kênh phiên của bot đó (bot:<slug>)", k == ["bot:" + slug1], k)
-check("Agent không có bot nào thì không thêm gì", main._kenh_bot_cua_agent("brain", "agent:khong-ai-dung") == [])
-check("kênh không phải agent: thì không gộp gì", main._kenh_bot_cua_agent("brain", "workflow:viet-bai") == []
-      and main._kenh_bot_cua_agent("brain", "") == [] and main._kenh_bot_cua_agent("brain", None) == [])
-b3, err3 = chatbot_store.create_bot({"name": "Bot Brain Riêng", "agent_slug": "lan", "brain": "brain-rieng"})
+bots_of = lambda ks: [c for c in ks if c.startswith("bot:")]
+check("kênh bot của Agent lan là đúng kênh phiên của bot đó (bot:<slug>)", bots_of(k) == ["bot:" + slug1], k)
+# 2026-11-08: the owner's admin-channel chats routed to the agent join too (`<channel>@<slug>`).
+check("agent history also holds the owner's admin chats routed to it",
+      [c for c in k if not c.startswith("bot:")] == [f"{c}@lan" for c in main.OWNER_TURN_CHANNELS], k)
+check("Agent không có bot nào thì không thêm kênh bot nào (chỉ kênh admin gọi nó)",
+      main._agent_history_channels("brain", "agent:khong-ai-dung") == [f"{c}@khong-ai-dung" for c in main.OWNER_TURN_CHANNELS])
+check("kênh không phải agent: thì không gộp gì", main._agent_history_channels("brain", "workflow:viet-bai") == []
+      and main._agent_history_channels("brain", "") == [] and main._agent_history_channels("brain", None) == [])
+# A REAL second brain folder: a name that is no folder runs (and stores its chats) in the default brain, see below.
+BRAIN_RIENG = tempfile.mkdtemp(prefix="brain-rieng-")
+b3, err3 = chatbot_store.create_bot({"name": "Bot Brain Riêng", "agent_slug": "lan", "brain": BRAIN_RIENG})
 check("(chuẩn bị) một bot cùng Agent nhưng ở brain RIÊNG", b3 and not err3, err3)
-k2 = main._kenh_bot_cua_agent("brain", "agent:lan")
-check("bot ở brain khác thì không lẫn vào lịch sử của brain đang mở", k2 == ["bot:" + slug1], k2)
-k3 = main._kenh_bot_cua_agent("brain-rieng", "agent:lan")
+k2 = main._agent_history_channels("brain", "agent:lan")
+check("bot ở brain khác thì không lẫn vào lịch sử của brain đang mở", bots_of(k2) == ["bot:" + slug1], k2)
+k3 = main._agent_history_channels(BRAIN_RIENG, "agent:lan")
 check("và lịch sử của brain riêng có kênh bot của nó", "bot:" + chatbot_store.get_bot(b3)["slug"] in k3, k3)
+
+# 2026-11-20 (owner: Telegram chats of a bot missing from its agent's history): a bot is matched by the brain its
+# chats are STORED under (`_brain_key`, what `_tg_answer` writes), not by the raw string in its record. Each of these
+# is the default brain spelled another way, so its chats sit in the default brain and must show there.
+DEF = str(main._default_brain_dir())
+lech = {}
+for ten, br in (("Bot Duong Dan", DEF), ("Bot Gach Cuoi", DEF.rstrip("/") + "/"),
+                ("Bot Duong Cu", "/khong-con/thu-muc-brain-cu")):
+    bx, ex = chatbot_store.create_bot({"name": ten, "agent_slug": "lan", "brain": br})
+    lech[ten] = "bot:" + chatbot_store.get_bot(bx)["slug"]
+k4 = main._agent_history_channels("brain", "agent:lan")
+for ten, kenh in lech.items():
+    check(f"bot lưu brain mặc định bằng cách viết khác ({ten}) vẫn vào lịch sử Agent", kenh in k4, k4)
+check("brain riêng THẬT vẫn không lẫn vào", "bot:" + chatbot_store.get_bot(b3)["slug"] not in k4, k4)
+import unicodedata  # noqa: E402
+bn, en = chatbot_store.create_bot({"name": "Bot Vu", "agent_slug": unicodedata.normalize("NFD", "javis-vũ"),
+                                    "brain": "brain"})
+kn = main._agent_history_channels("brain", "agent:" + unicodedata.normalize("NFC", "javis-vũ"))
+check("tên Agent có dấu: NFD (tên file macOS) và NFC vẫn khớp", bn and "bot:" + chatbot_store.get_bot(bn)["slug"] in kn,
+      (en, kn))
 
 # 5. Endpoint: gộp phiên bot là OPT-IN. Lúc trang Cộng sự chọn "phiên gần nhất để mở tiếp" (limit=1) mà lẫn phiên
 #    của khách vào thì tin chủ gõ sẽ rơi vào cuộc chat của khách.

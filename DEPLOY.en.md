@@ -14,7 +14,7 @@ Javis OS is a personal AI agent plus a Second Brain. Its "brain" is the **Claude
 
 ## Way 1 - Hostinger Docker Manager (1-click, the fastest) ⚡
 
-> 🛒 **No VPS yet?** [Get a Hostinger VPS here](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). Docker Manager comes built in, so Javis installs in one click. Once it is ready, come back to the steps below.
+> 🛒 **No VPS yet?** [Get a Hostinger VPS here](https://www.hostinger.com?REFERRALCODE=JAVISOS). Docker Manager comes built in, so Javis installs in one click. Once it is ready, come back to the steps below.
 
 On the Hostinger VPS go to **Docker Manager → Compose → URL**, paste the link and **Deploy**:
 ```
@@ -49,7 +49,7 @@ hPanel → VPS) and you get the **create admin account** screen.
 
 ## Way 2 - Docker on any VPS (pull the image, no source clone needed)
 
-> 🛒 **Need a VPS?** A [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) runs this option too.
+> 🛒 **Need a VPS?** A [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=JAVISOS) runs this option too.
 
 Docker is required. Do not have it? `curl -fsSL https://get.docker.com | sh`
 ```bash
@@ -305,6 +305,15 @@ in, run once:
 claude auth login --claudeai
 ```
 Managing the service: `journalctl -u javis -f` · `sudo systemctl restart javis`
+
+**Installing as root on Linux:** a fresh install no longer runs Javis as root. The script creates a
+regular account `javis` and runs the service under it, because Claude Code refuses Full access under
+root. A clone inside `/root` (no other account can enter it) is moved to `/opt/<folder name>`. Sign in
+to Claude on the Models page, or with `su - javis -c 'claude auth login --claudeai'`. Updating is still
+`./update.sh` run as root. A machine installed earlier keeps the account it has. Options:
+`JAVIS_USER=<name>` picks the account name, `JAVIS_INSTALL_DIR=<folder>` picks where the clone moves,
+`JAVIS_RUN_AS_ROOT=1` keeps the old behaviour (it then needs `IS_SANDBOX=1` in `.env`, only on a
+machine dedicated to Javis, since the AI gets the whole machine).
 
 ---
 

@@ -20,9 +20,13 @@ Ba loại engine, khác nhau ở CÔNG CỤ có được - đây là chỗ phả
   MCP hub qua .grok/config.toml trong brain). Mức quyền xuống thẳng cờ chặn của CLI:
   suggest -> chặn Write/Edit/Bash, auto -> chặn Bash, full -> không chặn ở tầng CLI.
 - api (openrouter/openai/gemini/anthropic-api): KHÔNG có tool native. Bù lại hub cấp
-  javis_read_file / javis_list_dir / javis_write_file / javis_use_skill + tool MCP, và
-  javis_write_file tự chặn khi mode là suggest (mcp_hub._builtin_tools). Không có Bash,
-  không có WebFetch - hẹp hơn Claude, nhưng đủ cho việc nền đọc/ghi ghi chú trong vault.
+  javis_read_file / javis_list_dir / javis_write_file / javis_use_skill, tìm và đọc web
+  (javis_web_search / javis_web_fetch) + tool MCP, và javis_write_file tự chặn khi mode là
+  suggest (mcp_hub._builtin_tools). Từ 05/11/2026 có thêm TERMINAL THẬT (javis_terminal,
+  javis_process) trong brain, nhưng chỉ khi việc chạy ở mức `full` VÀ engine Claude mà nó thay
+  thế cũng được chạy Bash (`cli_cho_bash`). Nghĩa là cùng một việc, đổi bộ não sang API key
+  thì được đúng những gì Claude Code được: loop bị cô lập, việc mức auto/suggest vẫn không có
+  lệnh máy; việc Toàn quyền (dựng video bằng ffmpeg chẳng hạn) thì có.
 
 Hợp đồng sự kiện giữ y như ClaudeSDK để nơi gọi không phải sửa: query() sinh dict
 {"type": "tool_call"|"final"|"error"|"usage", ...}. Đường API sinh "text" nhiều mảnh nên
@@ -86,6 +90,10 @@ _AUTH_FINAL_PATTERNS = ("please run /login", "not logged in", "invalid api key",
                         "log out and sign in again")
 _AUTH_FINAL_MAX = 400   # câu lỗi đăng nhập luôn ngắn; final dài là nội dung thật, đừng nghi oan
 
+# Providers signed in as the Models page counts them, `fn(settings) -> [id, ...]` (main._routing_connected_ids, set by
+# main at import). None when this module runs alone: the chain then follows the saved order only, as before 2026-11-22.
+CONNECTED_IDS = None
+
 
 def final_loi_dang_nhap(text: str) -> bool:
     """Final này có phải câu báo mất đăng nhập của engine CLI không."""
@@ -103,12 +111,17 @@ def final_loi_dang_nhap(text: str) -> bool:
 # thật thì watchdog idle-timeout của engine bắt sớm hơn nhiều, nên đặt trần theo việc nền
 # DÀI NHẤT hợp lệ chứ không theo việc trung bình. Chỉnh qua env JAVIS_BG_MAX_WALL_S
 # (giây; giá trị rác hoặc <= 0 thì về mặc định).
-BG_MAX_WALL_S_DEFAULT = 3600
+#
+# 2026-11-07 the owner removed every model time cap ("bỏ hết các trần của các model"): the default is now 0 = no
+# cap. A positive JAVIS_BG_MAX_WALL_S still sets one. Kanban runs keep their lease by heartbeat, not by this number,
+# so a long run is never reclaimed while its worker lives; the Stop button on the Tasks page still ends it.
+BG_MAX_WALL_S_DEFAULT = 0
 
 
 def bg_max_wall_s() -> int:
+    """The wall-clock cap for one background run, in seconds; 0 = no cap. Engines read 0 as no cap (`if max_wall_s`)."""
     try:
-        v = int(os.getenv("JAVIS_BG_MAX_WALL_S", "") or 0)
+        v = int(float(os.getenv("JAVIS_BG_MAX_WALL_S", "") or 0))
         if v > 0:
             return v
     except (TypeError, ValueError):
@@ -164,7 +177,78 @@ async def pick_openrouter_free(key: str = "") -> str:
     return best
 
 
-def read_spec(settings: dict = None) -> dict:
+# Tags of the work Javis starts on its own. On an Automatic background model these run on the LIGHT pick;
+# everything else (reminder, loop, Kanban dispatch, workflow, ingest) is work the owner handed over and runs
+# on the MID pick. See model_routing.background_spec.
+LIGHT_TAGS = ("next-prompt", "learn", "reply-policy", "habit-coach", "web-watch-summary", "incident-triage",
+              "agent-judge", "auto-learning", "curator",
+              # javis_scout with effort="quick" (scout.py). A "careful" scout carries the tag "scout" and runs MID.
+              "scout-quick")
+
+
+def tier_for_tag(tag) -> str:
+    t = str(tag or "")
+    return "light" if any(t == x or t.startswith(x + "-") or t.startswith(x + ":") for x in LIGHT_TAGS) else "mid"
+
+
+def _rung_model(m: dict, provider: str, tier: str, start_model: str) -> str:
+    """The model an Automatic background job runs NOW (job_scorecard.py): the job's own rung on the provider's
+    ladder when a job is running, else the starting rung of its tier, moved by what the owner asked for.
+    No ladder yet (nothing picked, or the brain was not sure) -> `start_model`, as before the scorecard."""
+    try:
+        import job_scorecard
+        ladder = [x for x in (model_routing.background_picks(m, provider).get("ladder") or []) if x]
+        if not ladder:
+            return start_model
+        main_model = model_routing.profile(m, provider)["model"]
+        rungs = ladder + ([main_model] if main_model not in ladder else [])
+        job_scorecard.remember_ladder(provider, rungs)
+        r = job_scorecard.active()
+        if r is not None:
+            return r.choose(provider, ladder, tier, main_model, start_model)
+        base = rungs.index(start_model) if start_model in rungs else None
+        return rungs[job_scorecard.start_index(tier, len(rungs), job_scorecard.intent(), base)]
+    except Exception as e:   # noqa: BLE001 - the scorecard must never stop a background job
+        print(f"[aux] scorecard: {type(e).__name__}: {e}", file=sys.stderr)
+        return start_model
+
+
+def _score_link(e, error=None) -> None:
+    """Tell the running job's scorecard which link answered, or why one did not."""
+    try:
+        import job_scorecard
+        r = job_scorecard.active()
+        if r is None:
+            return
+        model = getattr(e, "model", None) or ""
+        if error is None:
+            r.link_answered(model)
+            return
+        low = str(error).lower()
+        # The model itself is not usable here (the plan does not carry it, it was withdrawn) or it gave nothing
+        # usable: that is about the rung. A sign-in, a spent quota or an outage is not.
+        about_model = "model" in low and any(k in low for k in ("not found", "does not exist", "not supported",
+                                                                "no access", "unknown model", "invalid model"))
+        r.link_failed(model, quota=not about_model and cooldown_for(error) > 0)
+    except Exception:   # noqa: BLE001
+        pass
+
+
+def _score_tokens(ev) -> None:
+    try:
+        import job_scorecard
+        r = job_scorecard.active()
+        if r is None or not isinstance(ev, dict):
+            return
+        if ev.get("type") == "final":
+            r.add_tokens((ev.get("tokens_in") or 0) + (ev.get("tokens_out") or 0))
+        elif ev.get("type") == "usage":
+            r.add_tokens((ev.get("input") or 0) + (ev.get("output") or 0))
+    except Exception:   # noqa: BLE001
+        pass
+
+
+def read_spec(settings: dict = None, tag: str = None) -> dict:
     """{'provider','model'} của model việc nền. Cấu hình cũ chỉ có 'model' (luôn là alias
     Claude) nên thiếu provider = anthropic-cli - giữ nguyên hành vi bản cũ.
 
@@ -175,8 +259,11 @@ def read_spec(settings: dict = None) -> dict:
     phần tiêu tiền lúc người ta không ngồi nhìn.
     """
     s = settings if settings is not None else cfgmod.read_settings()
-    aux = (s.get("model", {}) or {}).get("auxiliary") or {}
-    spec = {"provider": (aux.get("provider") or CLAUDE), "model": (aux.get("model") or "")}
+    # `tag` names the job, and with it the tier an Automatic background model runs (tier_for_tag).
+    bg = model_routing.background_spec(s.get("model", {}) or {}, tier_for_tag(tag))
+    spec = {"provider": (bg.get("provider") or CLAUDE), "model": (bg.get("model") or "")}
+    if bg.get("auto"):
+        spec["model"] = _rung_model(s.get("model", {}) or {}, spec["provider"], tier_for_tag(tag), spec["model"])
     if spec["provider"] not in API_PROVIDERS:
         return spec                      # gói thuê bao: không tính tiền theo token, kệ phanh
     try:
@@ -255,6 +342,11 @@ def api_key_for(provider: str, settings: dict = None) -> str:
         return (m.get(field) or "none") if (m.get("openai_compat_base") or "").strip() else ""
     if provider == "anthropic-compat":
         return (m.get(field) or "none") if (m.get("anthropic_compat_base") or "").strip() else ""
+    if provider == "ollama-local":
+        # Ollama at home has no auth: an empty key is normal. Same placeholder as the chat path (main.py, the key of a
+        # routed provider) and `ollama_local_chat_with_mcp`. Before this, `_ApiAuxEngine` read "" as "no key", so a
+        # Team turn said "engine ollama-local is not ready" and background work answered "no API key" (#1218).
+        return ((m.get(field) or "").strip() or "local") if (m.get("ollama_local_endpoint") or "").strip() else ""
     return m.get(field) or ""
 
 
@@ -330,7 +422,8 @@ class _ApiAuxEngine:
     """
 
     def __init__(self, provider, model, system_prompt=None, vault_root=None,
-                 mode="full", tag="aux", reasoning="off", api_key="", account_id=""):
+                 mode="full", tag="aux", reasoning="off", api_key="", account_id="",
+                 terminal=False):
         self.provider = provider
         self.model = model
         # 0.350.0: one link per account of the card, so the chain moves to key 2 when key 1 is out of quota.
@@ -342,6 +435,9 @@ class _ApiAuxEngine:
         self.tag = tag
         self.reasoning = reasoning
         self.session_id = None      # engine API không có phiên nối tiếp - giữ cho đủ hợp đồng
+        # Được terminal thật hay không: chỗ dựng engine quyết theo engine Claude nó thay
+        # (`cli_cho_bash`), ở đây chỉ còn rào chót là mức `full`.
+        self.terminal = bool(terminal) and (mode or "full") == "full"
 
     def is_available(self) -> bool:
         return bool(self.api_key or api_key_for(self.provider))
@@ -381,24 +477,47 @@ class _ApiAuxEngine:
 
         tools, route = [], {}
         # `no_tools` (strip_tools): text-only turn on untrusted input, so the hub is never asked for anything.
+        co_terminal = False
+        ctx = None
         if not getattr(self, "no_tools", False):
+            ctx = self._ngu_canh_terminal()
             try:
-                tools, route = await mcp_hub.discover_all(self.javis_mode or "full",
-                                                          vault_root=self.vault_root)
+                if ctx is not None:
+                    tools, route = await mcp_hub.discover_all(
+                        self.javis_mode or "full", vault_root=self.vault_root,
+                        workspace_root=list(ctx.workspace_roots), coding_ctx_cua_phien=ctx)
+                    co_terminal = "javis_terminal" in route
+                else:
+                    tools, route = await mcp_hub.discover_all(self.javis_mode or "full",
+                                                              vault_root=self.vault_root)
             except Exception as e:
                 print(f"[aux discover] {e}", file=sys.stderr)
 
         messages = []
-        sysprompt = self.system_prompt or ""
+        # Token saving, phase 3 (owner, 18/11/2026): a Kanban job, loop or reminder on an API key carries the short
+        # background rule set in place of CLAUDE.md, for a share of jobs at the saving levels (background_prompt.py).
+        import background_prompt
+        sysprompt = background_prompt.for_api(self.system_prompt or "", self.tag, prompt)
         # Khai THẬT năng lực của engine này. Không có dòng này, model chỉ thấy "gọi tool X
         # không được" rồi tự dựng một lý do nghe hợp lý mà sai - hay gặp nhất là đổ cho quyền
         # ("phiên này bị chặn quyền"), khiến chủ đi sửa mức quyền trong khi mức quyền không hề
         # sai. Nói rõ THIẾU GÌ và VÌ SAO thì câu báo về mới dẫn đúng tới việc cần làm.
+        if co_terminal:
+            _may = ("terminal thật (javis_terminal, chạy nền bằng background=true rồi xem bằng "
+                    "javis_process) với thư mục làm việc là brain, nên chạy được ffmpeg, python, "
+                    "script dựng video... như trên máy chủ; ")
+            _thieu = "Bạn KHÔNG có: "
+        else:
+            _may = ""
+            _thieu = ("Bạn KHÔNG có: lệnh máy (Bash/terminal - việc này không chạy ở mức Toàn quyền "
+                      "hoặc đã bị giới hạn công cụ), ")
         sysprompt += (
             "\n\n[Sự thật hệ thống - năng lực của phiên này] Bạn đang chạy bằng engine API "
-            f"'{self.provider}', KHÔNG phải Claude Code. Bạn có: các tool qua MCP Hub của Javis "
+            f"'{self.provider}', KHÔNG phải Claude Code. Bạn có: {_may}tìm và đọc web "
+            "(javis_web_search, javis_web_fetch; chưa thấy trong danh sách thì tìm bằng "
+            "javis_search_tools rồi gọi qua javis_run_tool), các tool qua MCP Hub của Javis "
             "(gồm tool đọc/ghi file trong vault và mọi MCP người dùng đã đấu vào Javis). "
-            "Bạn KHÔNG có: lệnh máy (Bash), tự mở URL (WebFetch/WebSearch), và KHÔNG có các "
+            f"{_thieu}các "
             "connector gắn thẳng vào TÀI KHOẢN Claude - Gmail, Google Drive, Google Calendar "
             "gọi bằng tool native `mcp__<tên>__*` chỉ tồn tại trên engine Claude Code. "
             "Nếu việc được giao cần một trong những thứ đó, hãy nói THẲNG là engine hiện tại "
@@ -420,7 +539,12 @@ class _ApiAuxEngine:
                   "ollama-local": eng.ollama_local_chat_with_mcp,
                   "openai-compat": eng.openai_compat_chat_with_mcp,
                   "anthropic-compat": eng.anthropic_compat_chat_with_mcp}[self.provider]
-            stream = fn(key, self.model, messages, self.reasoning, tools, route)
+            # Việc nền có tool là việc CỦA CHỦ (task, loop, workflow, team), nên chạy với trần vòng của
+            # chủ (mặc định 500) chứ không phải trần 30 của bot nói chuyện với khách. Trước 05/11/2026
+            # việc nền bằng API key dừng ở vòng 30: điền Google Sheet, dựng video đều đứt giữa chừng.
+            # Lượt `no_tools` (đầu vào không tin cậy) không đi nhánh này.
+            stream = eng.chay_trong_phien_coding(
+                lambda: fn(key, self.model, messages, self.reasoning, tools, route))
         else:
             fn = {"openrouter": eng.openrouter_stream, "openai": eng.openai_stream,
                   "gemini": eng.gemini_stream, "groq": eng.groq_stream,
@@ -461,7 +585,57 @@ class _ApiAuxEngine:
                         return
         finally:
             eng.TEAM_REQUEST_OBSERVER.reset(observer_token)
+            if co_terminal:
+                self._don_terminal(ctx.session_id)
         yield {"type": "final", "content": "".join(buf)}
+
+    @staticmethod
+    def _don_terminal(sid: str) -> None:
+        """Hết lượt: bỏ bộ tool của phiên khỏi cache hub, dọn thư mục trạng thái nếu không còn
+        tiến trình nền nào (tiến trình còn chạy thì vẫn sống tiếp và báo khi xong)."""
+        try:
+            import mcp_hub
+            mcp_hub.bo_cache_phien(sid)
+        except Exception:
+            pass
+        try:
+            import coding_terminal
+            coding_terminal.don_neu_ranh(sid)
+        except Exception:
+            pass
+
+    def _ngu_canh_terminal(self):
+        """Ngữ cảnh làm việc cho terminal của MỘT lượt việc nền, hoặc None khi lượt này không được.
+
+        Thư mục làm việc là brain của việc. Mỗi lượt một mã phiên riêng (`nen-<tag>-<ngẫu nhiên>`)
+        nên thư mục hiện hành, biến môi trường và tiến trình nền của việc này không lẫn sang việc
+        khác. Tiến trình chạy nền xong thì báo về khung chat của chủ nếu lượt biết (turn_context),
+        còn không thì về Javis Core của brain (`main._report_route`, nhánh khung chat không tồn tại)."""
+        if not self.terminal or not self.vault_root:
+            return None
+        try:
+            import uuid
+            from pathlib import Path
+            import coding_ctx
+            import turn_context
+            goc = str(Path(self.vault_root).resolve())
+            if not Path(goc).is_dir():
+                return None
+            nhan = re.sub(r"[^a-z0-9]+", "-", str(self.tag or "aux").lower()).strip("-")[:40] or "aux"
+            sid = f"nen-{nhan}-{uuid.uuid4().hex[:8]}"
+            turn = turn_context.current() or {}
+            chat = str(turn.get("chat_id") or "") if turn.get("la_chu") else ""
+            ctx = coding_ctx.CodingToolContext(session_id=sid, workspace_root=goc, workspace_roots=(goc,),
+                                               permission_mode=coding_ctx.FULL, chat_id=chat)
+            try:
+                import coding_checkpoint
+                coding_checkpoint.luot_moi(sid)
+            except Exception:
+                pass
+            return ctx
+        except Exception as e:
+            print(f"[aux terminal] {type(e).__name__}: {e}", file=sys.stderr)
+            return None
 
     def _ghi_muc_dung(self, ev: dict) -> None:
         """Cộng lượt việc nền này vào sổ mức dùng.
@@ -551,6 +725,35 @@ def _cool_key(e) -> str:
     return (f"{kind}:{getattr(e, 'model', '') or ''}" + (f":{acc}" if acc else "")) if kind else ""
 
 
+# Plan CLI link classes -> their provider id, for a link not pointed at one account (no `account_provider`).
+_PLAN_CLASS_PROVIDER = {"ClaudeSDK": CLAUDE, "CodexCLI": CODEX, "GrokCLI": GROK_CLI, "AntigravityCLI": ANTIGRAVITY}
+
+
+def _note_plan_limit(e, error) -> None:
+    """A plan link was refused for running out of plan quota: the usage ring turns red and Javis's own work waits,
+    exactly as after a refused chat turn (the chat path does this in main._limit_frame). Before, only chat recorded
+    it, so background work could run a plan dry while the ring stayed green. Same detector as chat: the plan's own
+    sentence, or plain quota words for Grok and Antigravity, which print no fixed sentence. Never raises."""
+    try:
+        prov = getattr(e, "account_provider", None)
+        if not (isinstance(prov, str) and prov):
+            prov = _PLAN_CLASS_PROVIDER.get(type(e).__name__, "")
+        import limit_learner
+        hint = limit_learner.ENGINE_HINT_BY_PROVIDER.get(prov, "")
+        if not hint:
+            return                      # an API key has no plan to run out of
+        import plan_limits
+        hit = limit_learner.parse_subscription_limit(str(error or ""), engine_hint=hint)
+        model = getattr(e, "model", "")
+        model = model if isinstance(model, str) else ""
+        if hit is not None:
+            plan_limits.ghi_het(hint, float(hit.reset_epoch or 0), model=model)
+        elif hint in ("grok-cli", "antigravity-cli") and plan_limits.la_het_han_muc(error):
+            plan_limits.ghi_het(hint, model=model)
+    except Exception as exc:  # noqa: BLE001 - a meter must never break the routing
+        print(f"[aux router] plan limit: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def _resting(e, now: float) -> float:
     """Monotonic time a resting link wakes, 0 when it is not resting."""
     key = _cool_key(e)
@@ -617,6 +820,7 @@ class _FallbackChain:
 
     @staticmethod
     def _rest(e, error) -> None:
+        _note_plan_limit(e, error)
         key, secs = _cool_key(e), cooldown_for(error)
         if key and secs:
             _COOLDOWN[key] = time.monotonic() + secs
@@ -642,7 +846,7 @@ class _FallbackChain:
                     fail = f"{self._name(e)} không sẵn sàng"
                     continue
                 got_final, got_error, acted = False, None, False
-                async for ev in e.query(prompt):
+                async for ev in _query_retrying_hub(e, prompt, self._name(e)):
                     t = (ev or {}).get("type")
                     if t == "tool_call":
                         acted = True
@@ -683,13 +887,16 @@ class _FallbackChain:
                         got_error = ((ev.get("content") or "").strip()[:300]
                                      or f"{self._name(e)} kết thúc lỗi ({ev.get('subtype') or 'final'})")
                         break
+                    _score_tokens(ev)
                     yield ev
                     if t == "final":
                         got_final = True
                 if got_final:
                     _COOLDOWN.pop(_cool_key(e), None)            # it works again: no more rest
+                    _score_link(e)
                     return                                       # mắt này chạy ngon → xong
                 fail = got_error or f"{self._name(e)} kết thúc mà không có final"
+                _score_link(e, fail)
                 self._rest(e, fail)
                 if acted:
                     # 0.350.0 (spec 2.7): this link already called a tool before it broke. Running the prompt again on
@@ -701,6 +908,7 @@ class _FallbackChain:
                     return
             except Exception as exc:
                 fail = f"{self._name(e)}: {type(exc).__name__}: {exc}"
+                _score_link(e, fail)
                 self._rest(e, fail)
             print(f"[aux router] {self._name(e)} lỗi → thử mắt xích kế tiếp. Lý do: {str(fail)[:300]}",
                   file=sys.stderr)
@@ -712,14 +920,28 @@ class _FallbackChain:
         yield {"type": "error", "content": noi}
 
 
+def cli_cho_bash(cli) -> bool:
+    """Engine Claude mà việc nền này đang thay có được chạy Bash không.
+
+    Mọi quyết định an toàn của việc nền (loop bị `_isolate`, task theo năng lực, nhắc hẹn theo
+    mức quyền) đã được tính sẵn thành `allowed_tools` / `disallowed_tools` trên engine Claude.
+    Engine API đọc lại đúng hai thứ đó để quyết có terminal hay không, nên không có đường nào
+    mà đổi bộ não sang API key lại mở ra lệnh máy ở chỗ Claude Code bị chặn."""
+    chan = getattr(cli, "disallowed_tools", None) or []
+    cho = getattr(cli, "allowed_tools", None)
+    return "Bash" not in chan and (cho is None or "Bash" in cho)
+
+
 def _build_api(spec, claude_cli_obj, mode, tag):
+    _mode = mode or getattr(claude_cli_obj, "javis_mode", None) or "full"
     return _ApiAuxEngine(
         provider=spec["provider"],
         model=spec.get("model") or "",
         system_prompt=getattr(claude_cli_obj, "system_prompt", None),
         vault_root=getattr(claude_cli_obj, "javis_vault", None),
-        mode=mode or getattr(claude_cli_obj, "javis_mode", None) or "full",
+        mode=_mode,
         tag=tag or getattr(claude_cli_obj, "tag", "aux"),
+        terminal=_mode == "full" and cli_cho_bash(claude_cli_obj),
     )
 
 
@@ -739,6 +961,14 @@ def _build_codex(spec, claude_cli_obj, mode, tag, codex_profile=None):
             cc.profile = codex_profile()   # profile javis = thấy MCP của Javis (POS, connector...)
         except Exception as e:
             print(f"[aux codex profile] {e}", file=sys.stderr)
+    # The turn key (X-Javis-Turn) rides on every query, as on a chat turn (main._apply_codex_hub). Without it a reminder
+    # or Kanban job on Codex reached the hub as "nobody", so javis_team op=dispatch refused it with "lượt không có danh
+    # tính" and the team never woke up. Only when the profile's `javis` entry IS the hub (hub on): an override under
+    # mcp_servers.javis with no hub entry would be a broken half-entry. No bound turn -> no key, nothing sent.
+    try:
+        cc.hub_turn = bool(cc.profile) and bool(cfgmod.read_settings().get("mcp", {}).get("hub", True))
+    except Exception as e:  # noqa: BLE001 - no key means "nobody", never a broken job
+        print(f"[aux codex turn] {e}", file=sys.stderr)
     try:
         import mcp_hub
         mcp_hub.dat_codex_vault(cc.extra_config, getattr(claude_cli_obj, "javis_vault", None))
@@ -784,6 +1014,42 @@ def _hub_bat_buoc_hong(text) -> bool:
         return codex_loi_hub_bat_buoc(text)
     except Exception:
         return False
+
+
+# One more try when the required hub was late (#1306). Codex exits on that error BEFORE it calls the model, so running
+# the same link again costs no model turn and cannot repeat an action. Without it the run was dropped until the
+# schedule's next slot. The pause lets the hub finish whatever made it slow (connector discovery for several sessions
+# opening in the same minute). A second failure goes up unchanged and stops the chain as before.
+HUB_RETRY_WAIT_S = 30.0
+
+
+async def _query_retrying_hub(e, prompt, name=""):
+    """`e.query(prompt)`, run a second time when its first event of substance is the required-hub failure."""
+    import asyncio
+    for attempt in (0, 1):
+        stream = e.query(prompt)
+        started, late_hub = False, False
+        try:
+            async for ev in stream:
+                t = (ev or {}).get("type")
+                if t == "error" and attempt == 0 and not started and _hub_bat_buoc_hong(ev.get("content")):
+                    late_hub = True
+                    break
+                if t in ("text", "tool_call", "tool_result", "final"):
+                    started = True
+                yield ev
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:  # noqa: BLE001 - a stream that will not close must not hide the run's own result
+                    pass
+        if not late_hub:
+            return
+        print(f"[aux router] {name or type(e).__name__}: required hub was late, one more try in "
+              f"{int(HUB_RETRY_WAIT_S)} s.", file=sys.stderr)
+        await asyncio.sleep(HUB_RETRY_WAIT_S)
 
 
 def _build_grok(spec, claude_cli_obj, mode, tag):
@@ -1006,7 +1272,8 @@ def _links_for_step(step: dict, cli, mode, tag, codex_profile, settings, claude_
                 vault_root=getattr(cli, "javis_vault", None),
                 mode=mode or getattr(cli, "javis_mode", None) or "full",
                 tag=tag or getattr(cli, "tag", "aux"), reasoning=level if level in model_routing.LEVELS else "off",
-                api_key=key, account_id=acc)
+                api_key=key, account_id=acc,
+                terminal=(mode or getattr(cli, "javis_mode", None) or "full") == "full" and cli_cho_bash(cli))
             if len(accs) > 1:
                 return [mk(a["key"], a["id"]) for a in accs]
             if accs:
@@ -1022,7 +1289,7 @@ def swap(cli, mode: str = None, tag: str = None, spec: dict = None,
     """Engine Claude đã dựng -> ROUTER việc nền (0.350.0, docs/dev/2026-10-model-routing-spec.md part 2.4).
 
     Order: the background model (or `spec`, e.g. an assistant's own model) -> fallback 1, 2, ... of the Models page
-    usage order, each on its provider's starting config -> MAIN last, on its starting config. An API card contributes
+    usage order, each on the model picked on its card -> MAIN last, on its starting config. An API card contributes
     one link per usable key. The chain is the same at every permission level: a link that already called a tool and
     then broke stops the chain (_FallbackChain), so nothing is sent twice. Before 0.350.0 the chain was fixed
     (Claude, the main brain, OpenRouter free) and `full` jobs had none.
@@ -1032,20 +1299,42 @@ def swap(cli, mode: str = None, tag: str = None, spec: dict = None,
     try:
         s = settings if settings is not None else cfgmod.read_settings()
         m = s.get("model", {}) or {}
-        sp = spec if spec is not None else read_spec(s)
+        sp = spec if spec is not None else read_spec(s, tag=tag)
         first = {"provider": sp.get("provider") or CLAUDE, "model": sp.get("model") or "",
                  "reasoning": (sp.get("reasoning") if sp.get("reasoning") in model_routing.LEVELS
                                else model_routing.background_spec(m)["reasoning"] if spec is None else "off")}
         # Settings not yet moved to 0.350.0 have no stored order: MAIN plus every API card holding a key, which is
         # exactly what the migration will store.
         conn = None
-        if not model_routing.stored_order(m):
+        stored = model_routing.stored_order(m)
+        if not stored:
             conn = [model_routing.main_provider(m)] + [p for p in API_PROVIDERS if api_key_for(p, s)]
+        elif CONNECTED_IDS is not None:
+            # 2026-11-22: a card signed in after the order was saved (Antigravity signs in from a terminal) joins the
+            # chain at the end, as the Models page draws it. Claude Code and ChatGPT were both signed out and the jobs
+            # never reached the Antigravity that was signed in. Cards of the saved order all stay, as before.
+            try:
+                extra = [p for p in (CONNECTED_IDS(s) or []) if p not in stored]
+            except Exception as e:  # noqa: BLE001 - the saved order still runs
+                print(f"[aux router] signed-in cards: {type(e).__name__}: {e}", file=sys.stderr)
+                extra = []
+            if extra:
+                conn = stored + extra
         chain, claude_used = [], []
         # A plan's quota belongs to the account, not the model: a second Claude step after Claude ran dry would only
         # cost another failed call, so each plan provider appears once.
         for st in model_routing.background_chain(m, conn, first=first, once=(CLAUDE, CODEX, GROK_CLI, ANTIGRAVITY)):
             chain.extend(_links_for_step(st, cli, mode, tag, codex_profile, s, claude_used))
+        # Automatic background model on a plan: the pick is a model Javis chose from the provider's list, and a
+        # plan provider appears only once above. If the provider refuses that model (the plan does not carry it,
+        # it was withdrawn), the job must still run: one last link on MAIN's own model, as before Automatic.
+        if spec is None and first["provider"] in (CLAUDE, CODEX, GROK_CLI, ANTIGRAVITY) \
+                and model_routing.background_auto(m):
+            main_prof = model_routing.profile(m, first["provider"])
+            if (main_prof["model"] or "") != (first["model"] or ""):
+                chain.extend(_links_for_step({"provider": first["provider"], "model": main_prof["model"],
+                                              "reasoning": first["reasoning"], "step": "main"},
+                                             cli, mode, tag, codex_profile, s, claude_used))
         if not chain:
             return cli
         return chain[0] if len(chain) == 1 else _FallbackChain(chain)

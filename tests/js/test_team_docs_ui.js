@@ -45,7 +45,8 @@ check("the team picture opens the info panel", tm.includes('class="tm-ava-btn" d
 check("the info panel: members, working folder, pictures, files with Add, links with Add, from the conversation assets",
   tm.includes("function infoTabHtml(t)") && tm.includes('"/sessions/" + q(sid) + "/assets?brain="') &&
   tm.includes("data-info-add-file") && tm.includes("data-info-add-link") && tm.includes("tm-info-imgs") && tm.includes('teamUrl("/files")'));
-check("info is the first tab of the side panel", tm.includes('var tabs = ["info", "jobs", "team"]'));
+// 17/11/2026 (owner): the order is Jobs, Info, Team; a team without jobs still opens on Info (test_team_jobs_tab.js).
+check("the side panel's tabs are Jobs, Info, Team", tm.includes('return ["jobs", "info", "team"].map(function (k) {'));
 check("files sent with a message show as chips, the stored names line is not repeated",
   tm.includes("((m.meta || {}).files || [])") && tm.includes("fileChipHtml"));
 const keys = ["teams.tab_info", "teams.info_open", "teams.attach", "teams.attach_err", "teams.attach_wait", "teams.uploading",
@@ -65,7 +66,9 @@ check("dragging the list edge past the threshold snaps it to the avatar strip an
 check("a remembered strip width comes back as the strip; double-click restores the default list",
   ws.includes("if (v) datBeRong(page, ben, chanBeRong(ben, v, page));") && ws.includes("datBeRong(page, ben, 0);"));
 check("hovering an avatar in the strip shows its name card, the card goes with the rows",
-  ws.includes("hienTheMini(b)") && ws.includes('b.addEventListener("mouseleave", anTheMini)') && /function veDanhSach\(\) \{\n[^\n]*\n    anTheMini\(\);/.test(ws));
+  // 2026-11-13: the card goes when the rows are really replaced; a list that is the same again keeps rows and card.
+  ws.includes("hienTheMini(b)") && ws.includes('b.addEventListener("mouseleave", anTheMini)')
+  && /if \(host\.__wsHtml === html\) return;\n\s*anTheMini\(\);[^\n]*\n\s*host\.innerHTML = html;/.test(ws));
 check("CSS: the strip hides the words on wide screens only, keeps a dot for waiting work",
   /@media \(min-width: 901px\) \{\n  \.wspage\.ws-mini > \.ws-left/.test(css) && css.includes(".wspage.ws-mini .ws-item-wrap[data-st]::after")
   && css.includes(".ws-mini-tip {"));

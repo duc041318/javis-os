@@ -31,6 +31,10 @@ No Graph API Explorer, no Page ID or token to copy. First time, and want every c
 
 The same connection on the Facebook Messenger card lets Javis post to the Page: text, photos, albums, video, editing and deleting posts. Ask Javis "post this to the Page" to post now, or "every day at 8am post something" to schedule it. It needs `pages_manage_posts` (Log in with Facebook asks for it; the app must add that permission first, see the [step-by-step guide](31-messenger-step-by-step.md)). A Page connected before 0.438.0 needs one more Log in with Facebook. The checklist has a **Can post to the Page** row saying whether the permission is there. The store no longer lists the Facebook Pages card; machines that installed it keep using it.
 
+## Post insights (optional)
+
+For Javis to read the reach, saves and clicks of posts and of the Page, tick **Read post insights (reach, saves)** on the form before clicking Log in with Facebook. It asks for the `read_insights` permission; the Meta app must add that permission first, otherwise Facebook refuses the whole login, so the box starts unticked. For a Page already connected, click **New token**, tick it and log in again. The checklist has a **Reads post insights** row saying whether the Page token has the permission.
+
 ## Page comments (from 0.434.0)
 
 The way Pancake shows them: **every top-level comment under a post is its own conversation** in the inbox, and the replies under that comment join the same conversation. The conversation title quotes the start of the post. What you type in the inbox shows **publicly right under the top-level comment** on Facebook. An image can go with it, other files cannot (a comment only takes images).
@@ -50,10 +54,10 @@ The step people get wrong is the token: a user token pasted where a Page token b
 1. On Meta, create an app with the Messenger use case and connect the Page (steps 1.1 to 1.3 below, no need to click Generate yet).
 2. Open [Graph API Explorer](https://developers.facebook.com/tools/explorer), pick the right app, add `pages_show_list`, `pages_messaging`, `pages_manage_metadata`, `pages_read_engagement`, click **Generate Access Token** and tick the right Page. Copy the `EAA...` string.
 3. Open Javis through its HTTPS domain, go to **Connections**, card **Facebook Messenger**, click **Connect**, then **Paste a token instead**. Paste the App ID, App secret, Page ID and the token, then click **Connect and check**.
-4. Javis derives a non-expiring Page token, registers the app webhook with `messages` and `messaging_postbacks`, subscribes the Page to the app, saves the channel and shows a checklist with a fix for every red row.
+4. Javis derives a non-expiring Page token, registers the app webhook with `messages`, `messaging_postbacks` and `message_echoes` (so the bot sees the files staff send from the Page inbox), subscribes the Page to the app, saves the channel and shows a checklist with a fix for every red row.
 5. Open **Chatbot**, **Bots** to create a bot for the new channel (section 3).
 
-Every connected Page has **Check**, **Repair** (registers the webhook and subscribes the Page again) and **New token** buttons. Any brain can call the `messenger_check` and `messenger_repair` tools when the bot goes silent. Business verification and App Review for `pages_messaging` (section 4) still happen on Meta's site.
+Every connected Page has **Check**, **Repair** (registers the webhook and subscribes the Page again) and **New token** buttons. Any brain can call the `messenger_check` and `messenger_repair` tools when the bot goes silent. Business verification and App Review for `pages_messaging` (section 4) still happen on Meta's site. To have Javis message a customer from chat, the brain finds the chat with `inbox_find` and sends with `inbox_reply`, through that chat's own Page or Instagram account. Messenger accepts a message within 24 hours of the customer's last one.
 
 The manual steps below still work.
 
@@ -70,7 +74,7 @@ The manual steps below still work.
 > If the Page was connected on the Facebook Messenger card on the Connections page, **skip this section**: the Page is already in the channel list, go straight to section 3. That card also shows the webhook address and verify token if you need to paste them by hand.
 
 1. Open Javis **through its HTTPS domain** (not localhost or an IP), go to the **Chatbot** page, **Bots** tab, click **Add a channel**, choose **Messenger**.
-2. The form shows a **Webhook address** and a **Verify token**. Back in the Meta app, under Messenger's **Configure webhooks**, paste them as the Callback URL and Verify token and click **Verify and save**. Tick the **messages** and **messaging_postbacks** fields.
+2. The form shows a **Webhook address** and a **Verify token**. Back in the Meta app, under Messenger's **Configure webhooks**, paste them as the Callback URL and Verify token and click **Verify and save**. Tick the **messages**, **messaging_postbacks** and **message_echoes** fields.
 3. Back in Javis, paste three things separated by spaces into the token field: `Page ID`, `Page access token`, `App secret`. Click **Check** (Javis asks Meta for the Page name), then **Save**.
 
 ## 3. Attach a bot

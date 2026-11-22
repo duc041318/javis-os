@@ -44,6 +44,101 @@
       "default_perm": "readonly",
       "risk": "Composio là cổng đa ứng dụng: mọi hành động lên app thật (đọc mail, gửi mail, sửa sheet, tạo issue...) đều chạy qua MỘT tool chung.\nJavis soi TỪNG lệnh bên trong theo tên lệnh: có động từ đọc (LIST, GET, FETCH, SEARCH...) là đọc, còn lại coi là ghi.\n\nMức Chỉ đọc: đọc dữ liệu các app đã nối (xem lịch, đọc mail, liệt kê file) và xem tài khoản đã nối. Lệnh nào không chắc là đọc thì bị chặn.\n\nMức Ghi nháp: thêm quyền nối app mới (Composio đưa link đăng nhập, bạn tự đăng nhập, Javis không thấy mật khẩu).\n\nMức Toàn quyền: Javis chạy được MỌI hành động của các app bạn đã nối qua Composio, kể cả gửi tin, sửa và xoá dữ liệu thật.\nChỉ nâng khi thật sự cần; phạm vi đúng bằng quyền bạn đã cấp cho từng app bên Composio."
     },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare",
+      "icon": "/static/logos/cloudflare.jpg",
+      "category": "Lập trình",
+      "description": "Toàn bộ API Cloudflare ngay trong chat qua MCP chính chủ: DNS, Workers, Pages, KV, R2, D1, tường lửa, SSL, cache, thống kê lưu lượng, Zero Trust. Dán API token là xong, quyền của token quyết định Javis được làm gì.",
+      "group": "cloudflare",
+      "group_line": "Dán API token: tự chọn quyền từng mảng, dùng chung được với gói Cloudflare Deploy (Wrangler).",
+      "status": "beta",
+      "transport": "http",
+      "url": "https://mcp.cloudflare.com/mcp",
+      "auth": {
+        "type": "apikey",
+        "fields": [
+          {
+            "key": "api_token",
+            "label": "API token (Cloudflare)",
+            "placeholder": "Dán API token tạo ở dash.cloudflare.com...",
+            "header": "Authorization: Bearer {api_token}"
+          },
+          {
+            "key": "account_id",
+            "label": "Account ID (tuỳ chọn)",
+            "placeholder": "Chỉ cần khi token thấy nhiều tài khoản. Lấy ở trang tổng quan Cloudflare, cột bên phải",
+            "optional": true
+          }
+        ],
+        "guide": "Làm 1 lần:\n1. Vào dash.cloudflare.com > Hồ sơ (My Profile) > API Tokens > Create Token.\n2. Muốn Javis làm được mọi việc thì chọn Create Custom Token.\nThêm quyền Edit cho những mảng bạn dùng (Zone, DNS, Workers Scripts, Pages, Workers KV, R2, D1, Firewall...) và Account Resources : Read.\nChỉ muốn xem thì chọn quyền Read.\n3. Ở Zone Resources chọn All zones hoặc đúng các tên miền cần quản lý.\n4. Muốn deploy bằng gói 'Cloudflare Deploy (Wrangler)' thì token cần thêm Workers Scripts : Edit và Cloudflare Pages : Edit.\n5. KHÔNG bật lọc theo IP (Client IP Address Filtering): MCP của Cloudflare chưa hỗ trợ token có lọc IP.\n6. Bấm tạo, copy token NGAY lúc đó (đóng là không xem lại được) rồi dán vào ô dưới. Ô Account ID chỉ cần điền khi token thấy nhiều tài khoản.\n\nToken là hàng rào thật: Javis chỉ làm được đúng những gì token cho phép. Lỡ lộ token thì vào lại trang đó bấm Roll hoặc Delete.",
+        "guide_url": "https://github.com/cloudflare/mcp#readme",
+        "steps": [
+          {
+            "text": "Mở trang API Tokens của Cloudflare rồi bấm Create Token.",
+            "link": "https://dash.cloudflare.com/profile/api-tokens",
+            "link_label": "Mở trang API Tokens"
+          },
+          {
+            "text": "Chọn Create Custom Token. Muốn toàn quyền thì cấp Edit cho các mảng bạn dùng (Zone, DNS, Workers, Pages, KV, R2, D1, Firewall) và thêm Account Resources : Read. Chỉ xem thì cấp Read."
+          },
+          {
+            "text": "Không bật lọc theo IP: MCP của Cloudflare chưa nhận token có lọc IP."
+          },
+          {
+            "text": "Copy token ngay khi hiện ra, dán vào ô bên dưới rồi bấm Kết nối.",
+            "link": "https://github.com/cloudflare/mcp#readme",
+            "link_label": "Hướng dẫn của Cloudflare"
+          }
+        ]
+      },
+      "tool_meta": {
+        "read": [
+          "docs",
+          "search"
+        ],
+        "danger": [
+          "execute"
+        ]
+      },
+      "default_perm": "readonly",
+      "risk": "MCP của Cloudflare chỉ có 3 công cụ: docs (tra tài liệu), search (tìm API cần gọi) và execute (chạy đoạn mã gọi API Cloudflare thật).\n\nexecute gọi được MỌI API mà token cho phép, từ đọc thống kê tới XOÁ tên miền, sửa DNS, deploy Worker, xoá bucket R2.\nJavis không phân biệt được một lần execute là đọc hay xoá, nên nó nằm ở nhóm nguy hiểm.\n\nMức Chỉ đọc và Ghi nháp: Javis chỉ tra tài liệu và tìm API, chưa đụng tới tài khoản.\n\nMức Toàn quyền: Javis tự thao tác thật. Sai một bản ghi DNS là website hoặc email tắt ngay, xoá Worker hay bucket là mất dữ liệu.\n\nCách an toàn nhất: muốn Javis chỉ đọc số liệu thì tạo token CHỈ CÓ quyền Read rồi mới nâng Toàn quyền. Khi đó execute có chạy cũng không sửa được gì.",
+      "thay_goi": [
+        "javis.cloudflare"
+      ]
+    },
+    {
+      "id": "cloudflare-oauth",
+      "name": "Cloudflare (đăng nhập web)",
+      "icon": "/static/logos/cloudflare.jpg",
+      "category": "Lập trình",
+      "description": "Cùng MCP chính chủ của Cloudflare nhưng không cần tạo API token: bấm Kết nối, đăng nhập Cloudflare rồi tick quyền muốn cấp ngay trên trang của Cloudflare. Quản lý DNS, Workers, Pages, KV, R2, D1, tường lửa, SSL, cache, thống kê lưu lượng.",
+      "group": "cloudflare",
+      "group_line": "Đăng nhập trên web: một chạm, không tạo token. Quyền tick lúc đăng nhập, sửa được bằng cách kết nối lại.",
+      "status": "beta",
+      "transport": "http",
+      "url": "https://mcp.cloudflare.com/mcp",
+      "auth": {
+        "type": "oauth",
+        "fields": [],
+        "guide": "Bấm Kết nối, đăng nhập tài khoản Cloudflare rồi chọn quyền muốn cấp cho Javis trên trang của Cloudflare.\n\nJavis tự đăng ký ứng dụng theo chuẩn OAuth của MCP Cloudflare, không cần tạo token hay dán key. Đây là cách Cloudflare khuyên dùng.\n\nQuyền tick lúc đăng nhập là hàng rào thật: chỉ muốn xem số liệu thì chỉ tick quyền đọc. Sau này thiếu quyền thì bấm Kết nối lại và tick thêm.\n\nTài khoản có nhiều Account Cloudflare thì nói rõ trong chat là làm trên tài khoản nào.\n\nGói Cloudflare Deploy (Wrangler) chưa dùng được kết nối này: nó cần cách Dán API token.",
+        "guide_url": "https://github.com/cloudflare/mcp#readme"
+      },
+      "tool_meta": {
+        "read": [
+          "docs",
+          "search"
+        ],
+        "danger": [
+          "execute"
+        ]
+      },
+      "default_perm": "readonly",
+      "risk": "MCP của Cloudflare chỉ có 3 công cụ: docs (tra tài liệu), search (tìm API cần gọi) và execute (chạy đoạn mã gọi API Cloudflare thật).\n\nexecute gọi được MỌI API mà quyền bạn đã cấp cho phép, từ đọc thống kê tới XOÁ tên miền, sửa DNS, deploy Worker, xoá bucket R2.\nJavis không phân biệt được một lần execute là đọc hay xoá, nên nó nằm ở nhóm nguy hiểm.\n\nMức Chỉ đọc và Ghi nháp: Javis chỉ tra tài liệu và tìm API, chưa đụng tới tài khoản.\n\nMức Toàn quyền: Javis tự thao tác thật. Sai một bản ghi DNS là website hoặc email tắt ngay, xoá Worker hay bucket là mất dữ liệu.\n\nCách an toàn nhất: muốn Javis chỉ đọc số liệu thì lúc đăng nhập CHỈ tick quyền đọc rồi mới nâng Toàn quyền. Khi đó execute có chạy cũng không sửa được gì.",
+      "thay_goi": [
+        "javis.cloudflare-oauth"
+      ]
+    },
             {
       "id": "zalo",
       "name": "Zalo Agent MCP",
@@ -53,7 +148,7 @@
       "status": "beta",
       "transport": "stdio",
       "command": "npx",
-      "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.9.0", "mcp", "start"],
+      "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.14.0", "mcp", "start"],
       "lenh_cu": [
         { "command": "npx", "args": ["-y", "zalo-agent-cli", "mcp", "start"] },
         { "command": "npx", "args": ["-y", "zalo-agent-cli@1.6.2", "mcp", "start"] },
@@ -66,7 +161,13 @@
         { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.6.0", "mcp", "start"] },
         { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.6.1", "mcp", "start"] },
         { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.7.0", "mcp", "start"] },
-        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.8.0", "mcp", "start"] }
+        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.8.0", "mcp", "start"] },
+        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.9.0", "mcp", "start"] },
+        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.9.1", "mcp", "start"] },
+        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.10.0", "mcp", "start"] },
+        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.11.0", "mcp", "start"] },
+        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.12.0", "mcp", "start"] },
+        { "command": "npx", "args": ["-y", "--prefer-offline", "https://codeload.github.com/blogminhquy/javis-zalo/tar.gz/refs/tags/v1.13.0", "mcp", "start"] }
       ],
       "ngoai_le_ban_chinh_thuc": "Zalo KHÔNG đi theo bản gốc nữa (chủ repo chốt 2026-10-05): Javis chạy bản CLI riêng javis-zalo (github.com/blogminhquy/javis-zalo), cài từ tarball của tag phát hành, chỉ thư viện zca-js bên dưới đi theo bản chính thức trên npm. Ghim theo tag vì đăng nhập QR (zalo_login.py), gửi ảnh/tag/ghi chú nhóm (zalo_cli.py) và gói javis.zalo đọc thẳng định dạng của đúng bản đó. Ba chỗ ghim (ở đây, zalo_cli.py, zalo_login.py) phải luôn trùng nhau; --prefer-offline vì tag không đổi nên khỏi hỏi lại GitHub mỗi lần khởi động.",
       "requires": { "node": ">=20" },
@@ -90,7 +191,7 @@
           "zalo_get_labels"
         ],
         "write": ["zalo_mark_read"],
-        "danger": ["zalo_send_message", "zalo_send_typing", "zalo_send_file", "zalo_add_reaction", "zalo_review_join_requests"]
+        "danger": ["zalo_send_message", "zalo_send_link", "zalo_send_typing", "zalo_send_file", "zalo_add_reaction", "zalo_review_join_requests"]
       },
       "default_perm": "full",
       "companion_pack": "javis.zalo",
@@ -194,6 +295,7 @@
       "name": "Google Search Console",
       "icon": "search",
       "category": "Marketing",
+      "key_family": "google",
       "description": "Số liệu SEO website: khách tìm từ khoá gì ra trang của bạn, lượt hiển thị, lượt bấm, trang top.",
       "status": "beta",
       "transport": "stdio",
@@ -231,9 +333,11 @@
       "status": "beta",
       "transport": "stdio",
       "command": "uvx",
-      "args": ["workspace-mcp@latest", "--tool-tier", "core"],
+      "_args_doc": "Tier 'complete', not 'core' (2026-11-14, a customer could not work on Forms, Drive and Sheets). Core carries 43 tools and leaves out exactly the everyday ones: editing a form's questions (batch_update_form) and reading its responses (list_form_responses), listing a Drive folder, renaming, moving or copying a file (list_drive_items, update_drive_file, copy_drive_file), and finding a spreadsheet's tabs, adding a tab or appending rows (get_spreadsheet_info, create_sheet, append_table_rows). The card promised Sheets, Forms and Drive, so the model was handed a job with no tool to do it. Complete carries 119 tools; the hub's lazy layer already hides a pool this size behind search (core's 43 was over the 40 threshold too), so the prompt does not grow. OAuth scopes are chosen per service, not per tier, so an existing sign-in keeps working. The old default sits in lenh_cu so connections made before this move to the new command.",
+      "args": ["workspace-mcp@latest", "--tool-tier", "complete"],
       "lenh_cu": [
-        { "command": "uvx", "args": ["workspace-mcp", "--tool-tier", "core"] }
+        { "command": "uvx", "args": ["workspace-mcp", "--tool-tier", "core"] },
+        { "command": "uvx", "args": ["workspace-mcp@latest", "--tool-tier", "core"] }
       ],
       "_env_doc": "workspace-mcp nhận Client ID + Secret nên chạy luồng OAuth 'confidential', mà chỗ nó hứng kết quả đăng nhập là http://localhost:8000/oauth2callback - HTTP trần. Thư viện oauthlib mặc định NÉM InsecureTransportError với http, nên thiếu biến này là bấm đồng ý xong quay về vẫn lỗi, không tài nào đăng nhập xong - đúng kiểu bế tắc mà hướng dẫn không nói ra được. README upstream khai biến này 'required'; đây là hằng số kỹ thuật của package, không phải thứ bắt user gõ. An toàn vì callback chỉ chạy trên loopback của chính máy đó.",
       "env": { "OAUTHLIB_INSECURE_TRANSPORT": "1" },
@@ -278,13 +382,25 @@
         ]
       },
       "tool_meta": {
-        "write": ["*create*", "*update*", "*upload*", "*draft*", "*modify*", "*move*", "*add*", "*set*", "*manage*", "import_*"],
-        "danger": ["*send*", "*delete*", "run_*"]
+        "read": ["get_drive_shareable_link", "list_script_deployments"],
+        "write": ["*create*", "*update*", "*upload*", "*draft*", "*modify*", "*move*", "*add*", "*set*", "*manage*", "import_*",
+                  "*copy*", "*export*", "*append*", "*format*", "*resize*"],
+        "danger": ["*send*", "*delete*", "run_*",
+                   "manage_drive_access", "set_drive_file_permissions", "manage_task_list", "manage_gmail_filter", "manage_deployment"]
       },
       "_tool_meta_doc": "workspace-mcp 2.x thêm run_script_function (CHẠY một hàm Apps Script, tức làm được mọi thứ script đó làm) và import_to_google_*. Tên không chứa từ gợi ý ghi nào nên trước đây classify xếp cả hai vào nhóm ĐỌC. generate_trigger_code chỉ sinh đoạn code, không tạo trigger.",
-      "ghi_da_can_nhac": ["generate_trigger_code"],
+      "_tool_meta_complete_doc": "Tier complete (2026-11-14) brought tools whose names carry no write hint, so classify() put them in READ and a read-only connection could run them: copy_drive_file, export_doc_to_pdf (writes a PDF into Drive), append_table_rows, format_sheet_range, resize_sheet_dimensions. Two read tools went the other way on a hint word and were hidden at Read only: get_drive_shareable_link ('share') and list_script_deployments ('deploy'). Danger, same reasoning as the Sheets card: sharing a file or calendar pushes business data out (manage_drive_access also transfers ownership); a Gmail filter acts on every future mail and 'apply' rewrites old ones; manage_deployment publishes Apps Script as a web app; manage_task_list deletes a whole list, matching the Google Tasks card. call_rules keep the ordinary actions of a combined tool at Draft and lift only the one that loses a whole container (a sheet tab, a doc tab, a contact group, a batch of contacts) or shares a calendar. update_drive_file with trashed=true is the Drive delete.",
+      "call_rules": {
+        "manage_sheet_tab": { "key": "action", "else": "write", "danger_values": ["delete"] },
+        "manage_doc_tab": { "key": "action", "else": "write", "danger_values": ["delete"] },
+        "manage_contact_group": { "key": "action", "else": "write", "danger_values": ["delete"] },
+        "manage_contacts_batch": { "key": "action", "else": "write", "danger_values": ["delete"] },
+        "manage_calendar": { "key": "action", "else": "danger", "read_values": ["list_sharing"], "write_values": ["create"] },
+        "update_drive_file": { "key": "trashed", "else": "write", "danger_values": ["true"] }
+      },
+      "ghi_da_can_nhac": ["generate_trigger_code", "start_google_auth", "download_chat_attachment", "get_gmail_attachment_content"],
       "default_perm": "safe",
-      "risk": "Mức Ghi nháp (mặc định) cho phép Javis soạn nháp thư, tạo lịch, tạo tài liệu, và cả SỬA tài liệu có sẵn lẫn DI CHUYỂN file trong Drive.\nCác tool gộp (manage_event, manage_task...) cũng thuộc mức này, nên Javis sửa và xoá được từng sự kiện lịch hay việc cần làm lẻ.\n\nMức Toàn quyền thêm quyền GỬI EMAIL THẬT, XOÁ file, thư, và CHẠY hàm Apps Script bằng tài khoản Google của bạn.\n\nChỉ cần đọc thì hạ xuống Chỉ đọc."
+      "risk": "Mức Ghi nháp (mặc định) cho phép Javis soạn nháp thư, tạo lịch, tạo tài liệu, và cả SỬA tài liệu có sẵn lẫn DI CHUYỂN file trong Drive.\nJavis cũng sửa được câu hỏi Google Form, thêm hay đổi tên tab, ghi thêm dòng vào Sheets, đổi tên và sao chép file Drive.\nCác tool gộp (manage_event, manage_task...) cũng thuộc mức này, nên Javis sửa và xoá được từng sự kiện lịch hay việc cần làm lẻ.\n\nMức Toàn quyền thêm quyền GỬI EMAIL THẬT, XOÁ file, thư, và CHẠY hàm Apps Script bằng tài khoản Google của bạn.\nCũng ở mức này: CHIA SẺ file hay lịch cho người khác, xoá cả một tab, danh sách việc hay nhóm danh bạ, tạo bộ lọc Gmail, xuất bản Apps Script.\n\nChỉ cần đọc thì hạ xuống Chỉ đọc."
     },
     {
       "id": "google-tasks",
@@ -335,7 +451,7 @@
         "guide_url": "https://github.com/taylorwilsdon/google_workspace_mcp",
         "steps": [
           { "text": "TRƯỚC KHI LÀM, đọc dòng này: kết nối này chạy trên chính máy cài Javis, và lần đầu gọi tool nó mở trình duyệt CỦA MÁY ĐÓ để bạn bấm đồng ý. Javis chạy trên VPS không màn hình thì đường này không đi được." },
-          { "text": "Đã đấu Google Workspace hoặc dịch vụ Google khác rồi thì DÙNG LẠI key của nó (nút bên dưới ô nhập), chỉ cần làm thêm bước bật API." },
+          { "text": "Đã đấu Google Workspace hoặc dịch vụ Google khác rồi thì DÙNG LẠI key của nó (ô Dùng lại key ở đầu khung này), chỉ cần làm thêm bước bật API." },
           { "text": "Vào Google Cloud tạo project (hoặc dùng project sẵn có), bật Google Tasks API.", "link": "https://console.cloud.google.com/apis/library/tasks.googleapis.com", "link_label": "Bật Tasks API" },
           { "text": "Màn hình đồng ý OAuth: chọn External rồi thêm email Google của bạn vào Test users. Bỏ bước này là Google chặn ngay lúc đăng nhập.", "link": "https://console.cloud.google.com/auth/audience", "link_label": "Mở màn hình đồng ý" },
           { "text": "Tạo OAuth client, chọn loại 'Ứng dụng dành cho máy tính' (Desktop app). Loại này KHÔNG phải khai URI chuyển hướng nào cả, thấy phần đó trống là đúng.", "link": "https://console.cloud.google.com/apis/credentials/oauthclient", "link_label": "Tạo OAuth client" },
@@ -357,7 +473,7 @@
       "name": "Google Ads",
       "icon": "/static/logos/google-ads.webp",
       "category": "Quảng cáo",
-      "description": "Số liệu Google Ads qua MCP chính chủ của Google (chỉ đọc): chiến dịch, chi phí, chuyển đổi, từ khoá qua truy vấn GAQL. Chạy local; cần developer token + Google Cloud, cài 1 lần hơi kỹ thuật.",
+      "description": "Số liệu Google Ads qua MCP chính chủ của Google: chiến dịch, chi phí, chuyển đổi, từ khoá, lịch sử thay đổi qua truy vấn GAQL. Mặc định chỉ đọc. Chạy local; cần Google Cloud project + OAuth client, không cần developer token, cài 1 lần khoảng 10 phút.",
       "status": "beta",
       "transport": "stdio",
       "command": "uvx",
@@ -393,9 +509,10 @@
           },
           {
             "key": "developer_token",
-            "label": "Developer token (Google Ads API Center)",
-            "placeholder": "Chuỗi 22 ký tự, lấy ở tài khoản quản lý MCC",
-            "env": "GOOGLE_ADS_DEVELOPER_TOKEN"
+            "label": "Developer token (tuỳ chọn - chỉ điền khi bạn còn token cũ, Google không còn yêu cầu)",
+            "placeholder": "Bỏ trống nếu không có",
+            "env": "GOOGLE_ADS_DEVELOPER_TOKEN",
+            "optional": true
           },
           {
             "key": "login_customer_id",
@@ -414,8 +531,8 @@
             "optional": true
           }
         ],
-        "guide": "Cần trước: không cài thêm gì. Javis tự tải bản chính thức mới nhất của Google (PyPI) mỗi lần khởi động.\n\nLàm 1 lần, khoảng 10 phút:\n1. Google Ads > tài khoản quản lý MCC > Công cụ > API Center: lấy developer token, mức Explorer đủ để đọc.\n2. Vào console.cloud.google.com, tạo project rồi bật Google Ads API.\n3. Màn hình đồng ý OAuth: chọn External, thêm email của bạn vào Test users.\n4. Thông tin xác thực > Tạo OAuth client ID loại 'Ứng dụng web'.\n5. Ở phần 'URI chuyển hướng được ủy quyền', thêm đúng địa chỉ này:\nhttp://localhost:7777/connect/oauth/callback\nNếu chạy trên VPS thì thêm cả https://<tên-miền>/connect/oauth/callback\n6. Điền các ô bên dưới rồi bấm nút đăng nhập. Trình duyệt sẽ mở để bạn cho phép Javis đọc Google Ads.\n\nJavis tự dựng file đăng nhập, KHÔNG cần cài Google Cloud CLI và không phải chạy lệnh nào.\n\nGặp cảnh báo 'ứng dụng chưa được xác minh' thì bấm Nâng cao > Tiếp tục, vì đây là app của chính bạn.\n\nĐã tự chạy gcloud rồi thì dán nội dung file application_default_credentials.json vào ô cuối, Javis sẽ dùng luôn.",
-        "guide_url": "https://console.cloud.google.com/apis/credentials"
+        "guide": "Cần trước: không cài thêm gì. Javis tự tải bản chính thức mới nhất của Google (PyPI) mỗi lần khởi động.\n\nLàm 1 lần, khoảng 10 phút:\n1. Vào console.cloud.google.com, tạo project rồi bật Google Ads API.\n2. Mở trang Google Ads API của project đó (nút bên dưới), bấm 'Apply for access' để lên mức Explorer.\nMức Test mặc định chỉ đọc được tài khoản thử nghiệm. Explorer đọc được tài khoản thật, thường được duyệt trong vài phút.\n3. Google Auth Platform > Audience: chọn External, thêm email của bạn vào Test users.\n4. Google Auth Platform > Clients > Tạo OAuth client ID loại 'Ứng dụng web'.\n5. Ở phần 'URI chuyển hướng được ủy quyền', thêm đúng địa chỉ này:\nhttp://localhost:7777/connect/oauth/callback\nNếu chạy trên VPS thì thêm cả https://<tên-miền>/connect/oauth/callback\n6. Điền Client ID và Client Secret bên dưới rồi bấm nút đăng nhập. Trình duyệt sẽ mở để bạn cho phép Javis đọc Google Ads.\n\nKHÔNG cần developer token và không cần tài khoản quản lý MCC: quyền truy cập giờ gắn với Google Cloud project.\nÔ developer token chỉ dành cho ai còn token cũ.\n\nJavis tự dựng file đăng nhập, KHÔNG cần cài Google Cloud CLI và không phải chạy lệnh nào.\n\nGặp cảnh báo 'ứng dụng chưa được xác minh' thì bấm Nâng cao > Tiếp tục, vì đây là app của chính bạn.\n\nKhi app còn ở trạng thái Testing, Google thu hồi đăng nhập sau 7 ngày: bấm đăng nhập lại là xong, hoặc vào Audience > Publish app để dùng lâu dài.\n\nĐã tự chạy gcloud rồi thì dán nội dung file application_default_credentials.json vào ô cuối, Javis sẽ dùng luôn.",
+        "guide_url": "https://console.cloud.google.com/google/ads-apis/overview"
       },
       "validate": {
         "tool": "customers_list_accessible_customers",
@@ -423,9 +540,12 @@
       },
       "oauth_file": { "format": "google_adc", "env": "GOOGLE_APPLICATION_CREDENTIALS", "ext": ".json" },
       "tool_meta": {
-        "read": ["customers_*", "metadata_*", "search_*"]
+        "read": ["customers_*", "metadata_*", "search_*"],
+        "write": ["assets_create_asset"],
+        "danger": ["labels_*", "assets_upload_video_asset"]
       },
-      "default_perm": "readonly"
+      "default_perm": "readonly",
+      "risk": "Mức Chỉ đọc (mặc định) chỉ đọc số liệu, không sửa được gì trong tài khoản quảng cáo.\n\nMức Ghi nháp cho Javis TẠO asset mới (tiêu đề, ảnh, sitelink, chú thích) trong tài khoản Google Ads.\n\nMức Toàn quyền thêm quyền TẠO, SỬA, XOÁ nhãn, gắn hoặc gỡ nhãn khỏi chiến dịch và nhóm quảng cáo, và TẢI VIDEO từ máy lên YouTube để làm asset.\nXoá nhãn không hoàn tác được; video đã tải lên nằm trên kênh YouTube của bạn.\n\nBản MCP 0.0.6 của Google chưa có tool nào sửa ngân sách, giá thầu hay bật tắt chiến dịch. Bản sau có thêm tool thì mức quyền sẽ được khai lại."
     },
     {
       "id": "google-analytics",
@@ -576,7 +696,7 @@
         "guide": "Server MCP Gmail của Google đang ở giai đoạn Developer Preview: phải ghi danh chương trình (miễn phí) và bật thêm API MCP riêng, thiếu là bị chặn 403 dù đăng nhập thành công.\nLàm 1 lần, khoảng 10 phút:\n1. Ghi danh Google Workspace Developer Preview Program bằng đúng tài khoản Google sẽ đăng nhập (nút bên dưới).\n2. Vào console.cloud.google.com, tạo project, bật CẢ HAI API: Gmail API và Gmail MCP API (tìm 'Gmail MCP' trong thư viện API, có nút bên dưới).\n3. Màn hình đồng ý OAuth: chọn External, thêm email của bạn vào Test users.\n4. Thông tin xác thực > Tạo OAuth client ID loại 'Ứng dụng web'.\n5. Ở phần 'URI chuyển hướng được ủy quyền', thêm đúng địa chỉ này:\nhttp://localhost:7777/connect/oauth/callback\nNếu chạy trên VPS thì thêm cả https://<tên-miền>/connect/oauth/callback\n6. Copy Client ID + Client Secret dán vào đây rồi bấm Kết nối.\n\nTrình duyệt sẽ mở để bạn đăng nhập Google và bấm đồng ý. Gặp cảnh báo 'ứng dụng chưa được xác minh' thì bấm Nâng cao > Tiếp tục, vì đây là app của chính bạn.\n\nCó thể dùng CHUNG một OAuth client với Google Calendar, chỉ cần bật thêm Gmail API + Gmail MCP API và khai thêm phạm vi Gmail ở trang Quyền dữ liệu.\nMàn hình đồng ý có ô tick cho từng nhóm quyền: TICK HẾT, bỏ ô nào là tool tương ứng chết ngay.\nĐăng nhập xong mà Test vẫn báo thiếu quyền thì soát lại bước ghi danh, bước bật API và bước khai phạm vi - ba bước hay bị bỏ sót nhất.",
         "guide_url": "https://console.cloud.google.com/apis/credentials",
         "steps": [
-          { "text": "Đã đấu Google Calendar rồi thì DÙNG LẠI key của nó (nút bên dưới ô nhập), chỉ cần làm thêm bước 2 cho Gmail.", "link": "", "link_label": "" },
+          { "text": "Đã đấu Google Calendar rồi thì DÙNG LẠI key của nó (ô Dùng lại key ở đầu khung này), chỉ cần làm thêm bước 2 cho Gmail.", "link": "", "link_label": "" },
           { "text": "Ghi danh Google Workspace Developer Preview (miễn phí) bằng ĐÚNG tài khoản Google sẽ đăng nhập. Bỏ bước này là bị chặn 403 dù đăng nhập thành công.", "link": "https://developers.google.com/workspace/preview", "link_label": "Mở trang ghi danh" },
           { "text": "Vào Google Cloud tạo project (hoặc dùng project sẵn có), bật CẢ HAI API: Gmail API và Gmail MCP API.", "link": "https://console.cloud.google.com/apis/library/gmailmcp.googleapis.com", "link_label": "Bật Gmail MCP API" },
           { "text": "Màn hình đồng ý OAuth: chọn External, thêm email của bạn vào Test users.", "link": "https://console.cloud.google.com/auth/audience", "link_label": "Mở màn hình đồng ý" },
@@ -603,6 +723,82 @@
       },
       "default_perm": "readonly",
       "risk": "Mức Ghi nháp cho phép Javis SOẠN NHÁP thư và gắn, gỡ nhãn trong hộp thư của bạn.\n\nServer Gmail chính chủ không có tool gửi thẳng nên Javis không tự gửi được, luôn dừng ở bản nháp để bạn tự bấm gửi.\n\nChỉ cần đọc và tìm thư thì giữ mức Chỉ đọc."
+    },
+    {
+      "id": "http-api",
+      "name": "API tuỳ chỉnh (API key)",
+      "icon": "key-round",
+      "category": "Khác",
+      "description": "Nối bất kỳ dịch vụ nào có REST API và API key mà chưa có MCP (POS, CRM, vận chuyển, hoá đơn điện tử...). Dán địa chỉ gốc và key, mọi bộ não gọi được API đó. Key mã hoá, chỉ server gắn vào lời gọi, model không bao giờ thấy.",
+      "status": "beta",
+      "transport": "internal",
+      "internal": "http_api",
+      "auth": {
+        "type": "apikey",
+        "fields": [
+          {
+            "key": "base_url",
+            "label": "Địa chỉ gốc của API",
+            "placeholder": "Ví dụ: https://api.ten-dich-vu.com/v1"
+          },
+          {
+            "key": "api_key",
+            "label": "API key",
+            "placeholder": "Dán API key..."
+          },
+          {
+            "key": "auth_style",
+            "label": "Cách gửi key (tuỳ chọn, bỏ trống = Authorization: Bearer)",
+            "placeholder": "Ví dụ: X-API-Key: {key}  hoặc  ?api_key={key}",
+            "optional": true
+          },
+          {
+            "key": "extra_headers",
+            "label": "Header thêm (tuỳ chọn, mỗi dòng Tên: giá trị)",
+            "placeholder": "Ví dụ: X-Shop-Id: 12345",
+            "multiline": true,
+            "optional": true
+          },
+          {
+            "key": "docs_url",
+            "label": "Link tài liệu API (tuỳ chọn, để Javis tự đọc)",
+            "placeholder": "Ví dụ: https://docs.ten-dich-vu.com/api",
+            "optional": true
+          },
+          {
+            "key": "notes",
+            "label": "Ghi chú cho Javis (tuỳ chọn)",
+            "placeholder": "Ví dụ: đơn hàng ở /orders, tồn kho ở /inventory",
+            "multiline": true,
+            "optional": true
+          }
+        ],
+        "guide": "1. Mở trang tài liệu API của dịch vụ, tìm địa chỉ gốc (base URL) và tạo một API key.\n2. Xem tài liệu nói key gửi kiểu nào. Phổ biến nhất là header Authorization: Bearer, khi đó để trống ô Cách gửi key.\nDịch vụ dùng header khác thì ghi dạng X-API-Key: {key}; dùng tham số trên đường dẫn thì ghi ?api_key={key}.\nKey dạng tên:mật khẩu với Authorization: Basic {key} được Javis tự mã hoá.\n3. Dán link tài liệu và vài dòng ghi chú (endpoint hay dùng) để Javis gọi đúng ngay từ đầu.\n\nMỗi dịch vụ là một kết nối riêng. Key chỉ được gửi tới đúng máy chủ của địa chỉ gốc. Địa chỉ http:// chỉ dùng được cho máy trong mạng nội bộ."
+      },
+      "validate": {
+        "tool": "api_request",
+        "args": {
+          "method": "GET",
+          "path": ""
+        },
+        "label_paths": [
+          "host"
+        ]
+      },
+      "call_rules": {
+        "api_request": {
+          "key": "method",
+          "default": "GET",
+          "read_values": [
+            "GET",
+            "HEAD",
+            "OPTIONS"
+          ],
+          "else": "danger"
+        }
+      },
+      "default_perm": "readonly",
+      "risk": "Mức Chỉ đọc (mặc định) chỉ cho Javis gọi GET, tức chỉ xem dữ liệu.\n\nMức Toàn quyền cho Javis gọi POST, PUT, PATCH, DELETE: tạo đơn, sửa, xoá, gửi tin thật trên dịch vụ đó, có thể không hoàn tác được.\nGhi nháp không mở được các lệnh này vì Javis không biết một API lạ ghi ra sao.\n\nAPI key có toàn quyền như chính tài khoản đã tạo nó: nên tạo key riêng cho Javis, giới hạn quyền ngay ở dịch vụ nếu dịch vụ cho phép."
     },
                         {
       "id": "substack",
@@ -785,6 +981,90 @@
       "purge_warning": "Xoá kết nối này là mất phiên Google đã dán. Muốn dùng lại phải lấy lại cookie từ trình duyệt một lần nữa.",
       "risk": "Kết nối này dùng COOKIE PHIÊN Google, credential tương đương đang đăng nhập tài khoản Google của bạn, không phải OAuth giới hạn phạm vi như Gmail hay Lịch.\n\nMức Chỉ đọc: liệt kê notebook, đọc nguồn, xem trạng thái. Không đụng gì.\n\nMức Ghi nháp: thêm quyền tạo notebook, thêm nguồn, lưu ghi chú, hỏi đáp trong notebook và tạo tóm tắt/audio ở Studio - những thứ này tiêu quota NotebookLM của bạn.\n\nMức Toàn quyền: thêm quyền XOÁ notebook, xoá nguồn, và CHIA SẺ notebook cho người khác. Chia sẻ nhầm thì gỡ lại được nhưng người ta đã đọc rồi, nên nó nằm ở mức cao nhất.\n\nnotebooklm-py là thư viện KHÔNG chính thức, chạy trên giao thức nội bộ của NotebookLM. Google đổi giao thức lúc nào cũng có thể làm kết nối này gãy.",
       "rate_limit": { "calls_per_min": 20 }
+    },
+    {
+      "id": "asana",
+      "name": "Asana",
+      "icon": "/static/logos/asana.svg",
+      "category": "Văn phòng",
+      "description": "Việc và dự án trong Asana qua MCP chính chủ (V2): tìm việc, xem dự án, tiến độ, người phụ trách, hạn chót, tạo và cập nhật việc, bình luận. Đăng nhập Asana trong dashboard, chạy được cả trên VPS. Cần tạo một MCP app trong Asana 1 lần (~5 phút).",
+      "status": "beta",
+      "transport": "http",
+      "url": "https://mcp.asana.com/v2/mcp",
+      "auth": {
+        "type": "oauth",
+        "authorize_url": "https://app.asana.com/-/oauth_authorize",
+        "token_url": "https://app.asana.com/-/oauth_token",
+        "_resource_doc": "Asana V2 (developers.asana.com, Connecting MCP clients to Asana's V2 server): server MCP nằm ở /v2/mcp nhưng token gắn với resource https://mcp.asana.com/v2 (KHÔNG có /mcp). Asana không cho tự đăng ký app (DCR), nên phải đi nhánh EXPLICIT với Client ID/Secret của MCP app người dùng tự tạo, và nhánh đó không tự dò được resource: khai cứng ở đây. Asana khuyên KHÔNG gửi scope (quyền đi theo quyền của người đăng nhập), nên không khai scopes. Bản V1 (https://mcp.asana.com/sse) đã tắt, đừng dùng.",
+        "resource": "https://mcp.asana.com/v2",
+        "fields": [
+          {
+            "key": "client_id",
+            "label": "Client ID (MCP app của Asana)",
+            "placeholder": "Ví dụ: 1209876543210987"
+          },
+          {
+            "key": "client_secret",
+            "label": "Client secret",
+            "placeholder": "Dán client secret của MCP app"
+          }
+        ],
+        "guide": "Asana chỉ cho các app được tạo sẵn đăng nhập vào MCP V2, nên bạn tạo một MCP app của riêng mình 1 lần, khoảng 5 phút:\n1. Mở trang Developer console của Asana (nút bên dưới), bấm Create new app, chọn loại MCP app.\n2. Vào mục OAuth của app, thêm đúng địa chỉ chuyển hướng (redirect URL) này:\nhttp://localhost:7777/connect/oauth/callback\nNếu chạy trên VPS thì thêm cả https://<tên-miền>/connect/oauth/callback\nĐịa chỉ phải khớp từng ký tự, kể cả cổng và dấu / cuối.\n3. Copy Client ID và Client secret của app, dán vào hai ô bên dưới rồi bấm Kết nối.\n4. Trang Asana mở ra, chọn workspace rồi bấm Allow.\n\nJavis thấy và làm được đúng những gì tài khoản Asana của bạn thấy và làm được, không hơn.\nMuốn Javis chỉ xem thì giữ mức Chỉ đọc.\n\nBáo lỗi 'redirect_uri does not match' thì soát lại bước 2: thiếu https, sai cổng hoặc thừa dấu / là Asana từ chối.",
+        "guide_url": "https://developers.asana.com/docs/integrating-with-asanas-mcp-server",
+        "steps": [
+          {
+            "text": "Mở Developer console của Asana, bấm Create new app và chọn loại MCP app.",
+            "link": "https://app.asana.com/0/my-apps",
+            "link_label": "Mở Developer console"
+          },
+          {
+            "text": "Vào mục OAuth của app, thêm địa chỉ dưới đây vào ô Redirect URL. Phải khớp từng ký tự, kể cả cổng và dấu / cuối.",
+            "copy": "redirect"
+          },
+          {
+            "text": "Copy Client ID và Client secret của app, dán vào hai ô bên dưới rồi bấm Kết nối."
+          },
+          {
+            "text": "Trang Asana mở ra, chọn workspace rồi bấm Allow. Báo lỗi 'redirect_uri does not match' thì soát lại bước 2. Cần thêm chi tiết thì xem hướng dẫn MCP của Asana.",
+            "link": "https://developers.asana.com/docs/integrating-with-asanas-mcp-server",
+            "link_label": "Hướng dẫn MCP của Asana"
+          }
+        ],
+        "setup": {
+          "links": [
+            {
+              "label": "Mở Developer console của Asana",
+              "url": "https://app.asana.com/0/my-apps"
+            },
+            {
+              "label": "Hướng dẫn MCP của Asana",
+              "url": "https://developers.asana.com/docs/integrating-with-asanas-mcp-server"
+            }
+          ]
+        }
+      },
+      "_tool_meta_doc": "Phân loại theo tiền tố động từ thay vì danh sách tên cứng: bộ tool của Asana V2 còn đổi, glob giữ đúng hàng rào cho tool mới. Xoá nằm ở nhóm nguy hiểm vì không hoàn tác được từ chat.",
+      "tool_meta": {
+        "read": [
+          "get_*",
+          "list_*",
+          "search_*",
+          "*_typeahead*"
+        ],
+        "write": [
+          "create_*",
+          "update_*",
+          "add_*",
+          "set_*",
+          "duplicate_*"
+        ],
+        "danger": [
+          "delete_*",
+          "remove_*"
+        ]
+      },
+      "default_perm": "readonly",
+      "risk": "Asana MCP làm việc bằng chính quyền của tài khoản Asana bạn đăng nhập.\n\nMức Chỉ đọc: tìm và đọc việc, dự án, người phụ trách, tiến độ, bình luận. Không đổi gì.\n\nMức Ghi nháp: thêm quyền tạo việc, sửa việc (tên, hạn, người phụ trách, trạng thái xong), thêm bình luận. Đồng đội thấy ngay và có thể nhận thông báo.\n\nMức Toàn quyền: thêm quyền XOÁ việc, dự án hoặc gỡ người khỏi việc. Xoá trong Asana vào thùng rác, nhưng Javis không khôi phục giúp được.\n\nWorkspace đông người thì nên bắt đầu ở Chỉ đọc rồi nâng dần."
     }
   ]
 }

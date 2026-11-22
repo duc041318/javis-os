@@ -11,7 +11,10 @@ nói thẳng nguyên nhân là một tính năng, không phải trang trí.
 """
 import asyncio
 import json
+import os
+import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +27,7 @@ _CHECK_TIMEOUT = 60       # trần một lần ping (stdio spawn nguội trên W
 
 _state: dict = {}         # conn_id -> {ok, kind, message, checked_at, tools}
 _task = None
+_main_loop = None       # the event loop `start()` ran on; a worker thread hands the owner notice to it (`_send`)
 
 # Bản tiếng Anh của các câu cố định bên dưới. `_state` và `_engines` vẫn GIỮ câu tiếng Việt
 # (`javis_connections` của bộ não đọc chúng), chỉ lúc trả ra màn hình (`snapshot`,
@@ -52,6 +56,7 @@ _EN = {
     "Phiên đăng nhập Claude Code đã hết hạn và không tự làm mới được.":
         "The Claude Code session has expired and could not refresh itself.",
     "Chưa kết nối ChatGPT (OAuth).": "ChatGPT (OAuth) is not connected.",
+    "Token dài hạn của Claude đã hết hạn.": "The long-lived Claude token has expired.",
     "Đang khởi động (lần chạy đầu có thể phải tải gói cài đặt) - chưa phải lỗi. Chờ một lát rồi "
     "bấm Kiểm tra.":
         "Still starting (a first run may be downloading its package) - not an error yet. Wait a "
@@ -84,7 +89,7 @@ def _hien(rec: dict) -> dict:
 
 # Thứ tự các nhánh CÓ Ý NGHĨA: auth soi trước (chuỗi 401/unauthorized đặc trưng),
 # spawn trước net (lỗi spawn stdio hay kèm chữ chung chung như "connection closed").
-_AUTH_HINTS = ("401", "unauthorized", "invalid_grant", "oauth session expired",
+_AUTH_HINTS = ("unauthorized", "invalid_grant", "oauth session expired",
                "token expired", "invalid token", "invalid_token", "authentication",
                "hết phiên đăng nhập")
 _SPAWN_HINTS = ("filenotfounderror", "no such file", "not recognized", "enoent",
@@ -92,7 +97,19 @@ _SPAWN_HINTS = ("filenotfounderror", "no such file", "not recognized", "enoent",
 _BROKEN_INSTALL_HINTS = ("module_not_found", "cannot find module", "err_module_not_found")
 _NET_HINTS = ("timeout", "timed out", "getaddrinfo", "connection refused",
               "connecterror", "connectionerror", "ssl", "network", "unreachable",
-              "connection closed", "server disconnected", "502", "503", "504")
+              "connection closed", "server disconnected")
+_NET_STATUS = ("502", "503", "504")
+
+
+def _has_status(low: str, *codes: str) -> bool:
+    """One of these HTTP status codes stands in the error text AS a code, not as digits inside something else.
+
+    The codes used to be plain substrings. An error text often carries a path, and a path can hold any digits: a
+    missing binary under `/tmp/jt-24013-x/` read as "401", so "could not start" was shown as "sign-in expired, click
+    Reconnect" (found 2026-11-10 through a CI run whose runner pid contained 401; the same happens to a user whose
+    install path does). A code counts only when no letter, digit, path separator, dot, dash or underscore touches it:
+    "HTTP 401", "(401)", "status_code=401" and "401 Unauthorized" still match."""
+    return any(re.search(r"(?<![\w/\\.\-])" + c + r"(?![\w/\\.\-])", low) for c in codes)
 
 
 def _is_npx(conn) -> bool:
@@ -110,13 +127,13 @@ def classify_error(err: str, conn=None) -> tuple[str, str]:
     (nút Kết nối lại) nên thà bỏ sót (rơi vào unknown) còn hơn bắt nhầm."""
     low = (err or "").lower()
     if (conn or {}).get("connector_id") == "composio" and (
-            "401" in low or "bearer token rejected" in low):
+            _has_status(low, "401") or "bearer token rejected" in low):
         message = ("Composio từ chối consumer key mà Javis đang dùng. Vào Composio "
                    "For You → Connect my agent, lấy key ck_*, nhập vào thẻ Composio "
                    "trong Javis rồi bấm Kết nối hoặc Kết nối lại. Kết nối lại riêng "
                    "Calendar không thay đổi key này.")
         return "auth", message
-    if any(s in low for s in _AUTH_HINTS):
+    if _has_status(low, "401") or any(s in low for s in _AUTH_HINTS):
         return "auth", "Hết phiên đăng nhập - bấm Kết nối lại để đăng nhập lại."
     # Node cannot load a module of the connector's own package: an install that was cut short
     # (see npx_cache). Checked before the generic spawn hints, which would only say "could not
@@ -128,9 +145,16 @@ def classify_error(err: str, conn=None) -> tuple[str, str]:
                            "phút rồi bấm Kiểm tra để Javis dọn bản hỏng và cài lại.")
     if any(s in low for s in _SPAWN_HINTS):
         return "spawn", "Không khởi động được trình kết nối trên máy chạy Javis."
-    if any(s in low for s in _NET_HINTS):
+    if _has_status(low, *_NET_STATUS) or any(s in low for s in _NET_HINTS):
         return "net", "Dịch vụ không phản hồi - có thể do mạng hoặc máy chủ dịch vụ."
     return "unknown", (err or "Lỗi không rõ").strip()[:160]
+
+
+def _oauth_facts(oauth_mcp, conn_id) -> tuple:
+    """(signed in, missing scopes) of one OAuth connection. The missing scopes are only asked for when signed in."""
+    if not oauth_mcp.status(conn_id).get("connected"):
+        return False, []
+    return True, list(oauth_mcp.scope_report(conn_id).get("missing") or [])
 
 
 async def check_one(conn, pool=None) -> dict:
@@ -143,7 +167,9 @@ async def check_one(conn, pool=None) -> dict:
     if (conn.get("auth") == "oauth"):
         try:
             import oauth_mcp
-            if not oauth_mcp.status(conn["id"]).get("connected"):
+            # Both calls read the token store: on a worker thread (2026-11-13, see `_loop`).
+            connected, missing = await asyncio.to_thread(_oauth_facts, oauth_mcp, conn["id"])
+            if not connected:
                 rec.update(kind="auth",
                            message="Chưa hoàn tất đăng nhập - bấm Kết nối lại để đăng nhập.")
                 _state[conn["id"]] = rec
@@ -151,7 +177,6 @@ async def check_one(conn, pool=None) -> dict:
             # Đăng nhập rồi nhưng token THIẾU PHẠM VI QUYỀN: tools/list của Google không cần
             # token nên ping bên dưới vẫn xanh, chỉ tool thật mới chết. Không soi ở đây thì
             # trang Kết nối nói dối là mọi thứ ổn (vụ Lịch thiếu calendar.events.freebusy).
-            missing = oauth_mcp.scope_report(conn["id"]).get("missing") or []
             if missing:
                 rec.update(kind="auth",
                            message="Thiếu quyền: " + ", ".join(oauth_mcp.short_scopes(missing))
@@ -180,7 +205,7 @@ async def check_one(conn, pool=None) -> dict:
     spec = mcp_client._conn_spec(conn)
     try:
         spec["headers"].update(await mcp_client._oauth_headers(conn))
-        tools = await asyncio.wait_for(pool.list_tools(spec), timeout=_CHECK_TIMEOUT)
+        tools = await asyncio.wait_for(pool.list_tools(spec, fresh=True), timeout=_CHECK_TIMEOUT)
         rec.update(ok=True, tools=len(tools))
         # Nối được nhưng hộp công cụ RỖNG thì không được tô xanh. Đèn xanh ghi "Hoạt động
         # bình thường (0 công cụ)" là câu nói dối tai hại nhất trang này: người dùng tin là
@@ -220,7 +245,7 @@ async def check_one(conn, pool=None) -> dict:
 
 async def check_by_id(conn_id, pool=None) -> dict:
     """Ép check ngay một connection theo id (nút test trên UI)."""
-    conn = next((c for c in mcp_store.resolved(enabled_only=False)
+    conn = next((c for c in await asyncio.to_thread(mcp_store.resolved, False)
                  if c["id"] == conn_id), None)
     if not conn:
         return _hien({"ok": False, "kind": "unknown", "message": "Không tìm thấy kết nối",
@@ -231,7 +256,7 @@ async def check_by_id(conn_id, pool=None) -> dict:
 async def sweep(pool=None) -> int:
     """Quét mọi connection đang bật. Trả số connection đã check."""
     n = 0
-    for conn in mcp_store.resolved(enabled_only=True):
+    for conn in await asyncio.to_thread(mcp_store.resolved, True):
         try:
             await check_one(conn, pool)
             n += 1
@@ -259,6 +284,12 @@ def forget(conn_id) -> None:
 
 _engines: dict = {}       # name -> {ok, message, source, ts, notified}
 on_engine_down = None     # main.py gắn: async fn(text) gửi Telegram MỘT lần khi não chuyển chết
+# main.py sets it (2026-11-22): fn(token_info) when the long-lived Claude token has TOKEN_REMIND_DAYS or fewer days left.
+# Called on every probe in that window; the receiver keeps it to one notice a day.
+on_claude_token_soon = None
+TOKEN_REMIND_DAYS = 7
+# main.py sets it: fn() run on every probe, for checks of their own (the tokens of extra Claude accounts). Never raises.
+on_probe = None
 
 # Mẫu lỗi đăng nhập trong OUTPUT một lượt chạy engine (vụ 2026-07-27: Claude CLI hết phiên,
 # mọi task trả "Failed to authenticate: OAuth session expired and could not be refreshed").
@@ -288,6 +319,7 @@ ENGINE_FIX_DEFAULT_EN = "Go to the Models page to connect and use Javis."
 
 
 _ENGINE_NOTICE_FILE = "engine_down_notified.json"   # in STATE_DIR (0.402.0)
+_notice_lock = threading.Lock()
 
 
 def _engine_notice_path():
@@ -306,17 +338,24 @@ def _engine_notified_saved() -> dict:
 
 
 def _engine_notified_set(name: str, on: bool) -> None:
-    d = _engine_notified_saved()
-    if bool(d.get(name)) == on:
-        return
-    if on:
-        d[name] = time.time()
-    else:
-        d.pop(name, None)
-    try:
-        _engine_notice_path().write_text(json.dumps(d), encoding="utf-8")
-    except OSError as e:
-        print(f"[engine health] cannot save notice state: {e}", file=sys.stderr)
+    # Under a lock and written whole (2026-11-13): the periodic probe now runs on a worker thread while a chat turn
+    # can report an engine on the event loop, and a half-written file read by the other one would send the same
+    # "Javis is not usable" notice twice.
+    with _notice_lock:
+        d = _engine_notified_saved()
+        if bool(d.get(name)) == on:
+            return
+        if on:
+            d[name] = time.time()
+        else:
+            d.pop(name, None)
+        try:
+            path = _engine_notice_path()
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(d), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"[engine health] cannot save notice state: {e}", file=sys.stderr)
 
 
 def looks_like_error_line(text) -> bool:
@@ -359,9 +398,25 @@ def _set_engine(name, ok, message="", source="probe"):
                 + ENGINE_FIX_EN.get(name, ENGINE_FIX_DEFAULT_EN)
                 + f" (details: {name} - {_EN.get(message) or message})"))
             if asyncio.iscoroutine(coro):
-                asyncio.ensure_future(coro)
+                _send(coro)
         except Exception as e:
             print(f"[engine health] notify lỗi: {e}", file=sys.stderr)
+
+
+def _send(coro) -> None:
+    """Start the owner notice. `_set_engine` runs on the event loop for a chat turn and on a worker thread for the
+    periodic probe (`_loop`), and only the loop can start a coroutine: from a thread it is handed to the loop that
+    `start()` saw."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        if _main_loop is not None and not _main_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(coro, _main_loop)
+        else:
+            coro.close()
+            print("[engine health] notice not sent: no event loop to send it from", file=sys.stderr)
+        return
+    asyncio.ensure_future(coro)
 
 
 def flag_engine_auth_error(name, raw) -> bool:
@@ -483,6 +538,11 @@ def probe_engines() -> None:
     đúng lỗi khách gặp (banner đỏ 'bộ não claude mất đăng nhập' trên máy chưa từng cài
     Claude). Đèn do lượt chạy bật (source=run) không bị probe đè sang xanh - lỗi lúc
     chạy là bằng chứng mạnh hơn suy đoán từ file token."""
+    if on_probe:
+        try:
+            on_probe()
+        except Exception as e:  # noqa: BLE001 - a side check never touches the lights
+            print(f"[engine health] probe hook: {type(e).__name__}: {e}", file=sys.stderr)
     live = engines_in_use()
     for name in [n for n in _engines if n not in live]:
         _engines.pop(name, None)
@@ -508,8 +568,23 @@ def probe_engines() -> None:
     # (flag_engine_auth_error có mẫu "invalid api key"), giống mọi provider API khác.
     try:
         import claude_auth
-        if claude_auth.che_do() == claude_auth.API_KEY and claude_auth.api_key():
+        mode = claude_auth.che_do()
+        if mode == claude_auth.API_KEY and claude_auth.api_key():
             ok, msg = True, ""
+        elif mode == claude_auth.TOKEN and claude_auth.oauth_token():
+            # 2026-11-22: a long-lived token has no login file to read; it is good until its year is up. A token
+            # Anthropic refused before then is caught by the run itself (flag_engine_auth_error).
+            info = claude_auth.token_info()
+            ok = not info.get("expired")
+            msg = "" if ok else "Token dài hạn của Claude đã hết hạn."
+            # Anthropic ends the token after a year and only a new sign-in makes another: a week before, the owner
+            # hears it in the bell, so the bots never stop over it.
+            if ok and info.get("expires_at") and int(info.get("days_left", 999)) <= TOKEN_REMIND_DAYS \
+                    and on_claude_token_soon:
+                try:
+                    on_claude_token_soon(info)
+                except Exception as e:  # noqa: BLE001 - a missed reminder never touches the light
+                    print(f"[engine health] token reminder: {type(e).__name__}: {e}", file=sys.stderr)
         else:
             ok, msg = probe_claude_credentials()
     except Exception:
@@ -549,11 +624,15 @@ async def _loop():
     first = True
     while True:
         try:
-            probe_engines()
+            # 2026-11-13: the probe reads the sign-in files and the notice state, and the rounds below read the
+            # connection store, the token store and the smoke state. All of it ran on the event loop, and the
+            # first round starts 25 s after a restart, when the disk is busiest: GET /health/loop on the owner's
+            # VPS named this module among the five that froze the server. Now on worker threads.
+            await asyncio.to_thread(probe_engines)
             # The first round after a restart or an update is the smoke test (it pings every
             # source like a sweep, then retries and reports); the next ones are plain sweeps.
             if first:
-                await startup_smoke(_app_version())
+                await startup_smoke(await asyncio.to_thread(_app_version))
             else:
                 await sweep()
         except Exception as e:
@@ -565,7 +644,8 @@ async def _loop():
 
 def start() -> None:
     """Gọi từ startup của app. Idempotent."""
-    global _task
+    global _task, _main_loop
+    _main_loop = asyncio.get_running_loop()
     if _task is None or _task.done():
         _task = asyncio.create_task(_loop())
 
@@ -655,7 +735,7 @@ async def startup_smoke(version: str = "", pool=None, retry_after: float | None 
                "message": rec.get("message") or "", "message_en": rec.get("message_en") or ""}
               for cid, rec in results.items() if not rec.get("ok") and rec.get("kind") != "starting"]
     fingerprint = sorted(f"{f['id']}:{f['kind']}" for f in failed)
-    already = fingerprint == _last_notified()
+    already = fingerprint == await asyncio.to_thread(_last_notified)
     _smoke = {"version": version, "at": time.time(), "checked": len(conns),
               "ok": len(conns) - len(failed), "failed": failed, "notified": False}
     sent = False
@@ -686,6 +766,6 @@ async def startup_smoke(version: str = "", pool=None, retry_after: float | None 
     # report): saved while no notifier is wired yet, or after a notice that failed, that set
     # would never be reported on a later restart.
     if sent or not failed:
-        _save_notified(fingerprint)
+        await asyncio.to_thread(_save_notified, fingerprint)
     _smoke["notified"] = sent
     return last_smoke()

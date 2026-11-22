@@ -308,7 +308,7 @@
     // DOM. Không chặn ở đây thì mọi lời gọi còn sót (nút cũ, onSaved mặc định) ném TypeError
     // giữa chừng và nuốt luôn phần việc đứng sau nó.
     if (!panel) return;
-    panel.innerHTML = `<div class="empty">${esc(t("common.loading"))}</div>`;
+    panel.innerHTML = `<div class="empty pg-loading">${esc(t("common.loading"))}</div>`;
     const d = await api(`/workflows?brain=${encodeURIComponent(brain())}`);
     _wfState.wfs = d.workflows || [];
     _sel.workflow.clear();   // nạp lại trang là làm mới lựa chọn (danh sách có thể đã đổi)
@@ -655,7 +655,7 @@
     _injectStudioCss();
     const panel = document.getElementById("panel-agents");
     if (!panel) return;   // cùng lý do với loadWorkflows: trang Trợ lý riêng đã gộp vào Cộng sự
-    panel.innerHTML = `<div class="empty">${esc(t("common.loading"))}</div>`;
+    panel.innerHTML = `<div class="empty pg-loading">${esc(t("common.loading"))}</div>`;
     // Bản NHẸ: lưới thẻ chỉ hiện tên/vai/nhóm; bấm Sửa thì layAgentDay() lấy prompt.
     const d = await api(`/agents?brain=${encodeURIComponent(brain())}&prompt=0`);
     _agState.agents = d.agents || [];
@@ -721,7 +721,7 @@
     // Nói "đang tải" ngay: ở cột phải trang Cộng sự, khung này trống trơn suốt lúc chờ mạng
     // trông y như app bị treo.
     if (opts.host && opts.host.isConnected && !opts.host.childElementCount) {
-      opts.host.innerHTML = `<div class="empty">${esc(t("common.loading"))}</div>`;
+      opts.host.innerHTML = `<div class="empty pg-loading">${esc(t("common.loading"))}</div>`;
     }
     // Song song, không nối đuôi: hai lượt của form và một lượt lấy prompt cùng đi một nhịp.
     const [dsForm, day] = await Promise.all([duLieuForm(), layAgentDay(a)]);
@@ -774,6 +774,8 @@
     const REASONING = [["off", "eff.off"], ["low", "eff.low"], ["medium", "eff.medium"], ["high", "eff.high"],
                        ["xhigh", "eff.xhigh"], ["ultra", "eff.ultra"]];
     const curReason = (a && a.reasoning) || "medium";
+    const CALL_VOICES = ["juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"];
+    const selectedCallVoice = (a && a.chatgpt_voice) || "";
     const chatBtn = opts.chatButton && a && a.slug
       ? `<button type="button" class="s-btn-ghost ag-chat-btn" id="agChat">${ic("message-circle")} ${esc(t("studio.chat_private"))}</button>` : "";
     box.innerHTML = `<div class="ag-head"><h3>${esc(a ? t("studio.edit") : t("studio.create"))} Agent</h3>${chatBtn}</div>
@@ -804,6 +806,9 @@
       </div>
       ${coKetNoi && JI ? JI.body(`<div class="dim" style="font-size:12px">${esc(t("studio.model_hint"))}</div>`)
         : `<div class="dim" style="font-size:12px;margin-top:4px">${esc(coKetNoi ? t("studio.model_hint") : t("studio.model_none"))}</div>`}
+      ${a && a.system ? "" : `<label for="agCallVoice">${esc(t("studio.call_voice"))}</label>
+      <select id="agCallVoice"><option value="">${esc(t("studio.call_voice_default"))}</option>${CALL_VOICES.map(v => `<option value="${v}"${v === selectedCallVoice ? " selected" : ""}>${esc(v[0].toUpperCase() + v.slice(1))}</option>`).join("")}</select>
+      <div class="dim" style="font-size:12px;margin-top:4px">${esc(t("studio.call_voice_hint"))}</div>`}
       <label for="agReasoning">${esc(t("studio.reasoning"))}${JI ? JI.btn(t("info.more")) : ""}</label>
       <select id="agReasoning">${REASONING.map(([v, k]) => `<option value="${v}"${v === curReason ? " selected" : ""}>${esc(t(k))}</option>`).join("")}</select>
       ${infoBody(`<div class="dim" style="font-size:12px">${esc(t("studio.reasoning_hint"))}</div>`)}
@@ -904,7 +909,7 @@
     // lần là dựng lại DOM), khỏi để lại một chồng closure chết bám vào document.
     const mPick = box.querySelector("#agModelPick");
     const ngoaiKhung = (e) => {
-      if (!mPop || !mPop.isConnected) { document.removeEventListener("click", ngoaiKhung); return; }
+      if (!mPop || !mPop.isConnected) { dropPopListeners(); return; }
       // So bằng CHÍNH phần tử, không phải closest("#agModelPick"): trang Cộng sự có thể đang
       // mở form trong cột phải trong khi Studio bật thêm form trong modal, tức hai khung cùng
       // id trên một trang - so theo id là bấm vào khung này lại không đóng khung kia.
@@ -915,9 +920,15 @@
       if (!mPop.hidden && !(mPick && duong.indexOf(mPick) >= 0)) dongPop();
     };
     const escKhung = (e) => {
-      if (!mPop || !mPop.isConnected) { document.removeEventListener("keydown", escKhung); return; }
+      if (!mPop || !mPop.isConnected) { dropPopListeners(); return; }
       if (e.key === "Escape" && !mPop.hidden) { dongPop(); e.stopPropagation(); }
     };
+    // Both go together (2026-11-12): each used to leave only on its own event, so on a phone, where no key is pressed
+    // for a long while, every form opened kept its keydown listener, and through it the whole form, alive.
+    function dropPopListeners() {
+      document.removeEventListener("click", ngoaiKhung);
+      document.removeEventListener("keydown", escKhung);
+    }
     document.addEventListener("click", ngoaiKhung);
     document.addEventListener("keydown", escKhung);
     // Trạng thái chọn giữ trong Set, DOM chỉ là HÌNH CHIẾU của nó. Đây là chỗ dễ hỏng nhất của
@@ -950,6 +961,7 @@
         const saved = await api("/agents", { method: "POST", body: fd({ name, role: box.querySelector("#agRole").value,
           prompt: box.querySelector("#agPrompt").value, skills: sk, model: mName, model_provider: mProv,
           reasoning: (box.querySelector("#agReasoning") || {}).value || "medium",
+          ...(a && a.system ? {} : { chatgpt_voice: (box.querySelector("#agCallVoice") || {}).value || "" }),
           slug: a ? a.slug : "", brain: brain(), ...(avatar ? window.JavisAvatar.formFields(avatar) : {}) }) });
         if (!saved.ok) { datTrangThai(dirty ? "dirty" : ""); alert(loiLuu(saved.error)); return; }
         dirty = false;
@@ -1213,7 +1225,7 @@
   async function loadSkills() {
     _injectStudioCss();
     const panel = document.getElementById("panel-skills");
-    panel.innerHTML = `<div class="empty">${esc(t("common.loading"))}</div>`;
+    panel.innerHTML = `<div class="empty pg-loading">${esc(t("common.loading"))}</div>`;
     let d; try { d = await api(`/skills?brain=${encodeURIComponent(brain())}`); } catch (e) { panel.innerHTML = `<div class="empty">${esc(t("studio.sk_load_err"))}</div>`; return; }
     refreshStats();
     _sel.skill.clear();   // nạp lại là làm mới lựa chọn (danh sách có thể đã đổi)
@@ -1488,7 +1500,7 @@
       <section class="sk3-d-sec" id="skWhen" hidden><h5>${esc(t("studio.sk_when_h"))}</h5><ul></ul></section>
       <section class="sk3-d-sec"><h5>${esc(t("studio.sk_activity_h"))}</h5><p>${esc(used)}</p>
         <p class="sk3-path">${esc(t("studio.sk_file"))}: <code>${esc(duongDan)}</code></p></section>
-      <details class="sk3-full"><summary>${esc(t("studio.sk_full"))}</summary><div class="sk3-md" id="skMd">${esc(t("common.loading"))}</div></details>
+      <details class="sk3-full"><summary>${esc(t("studio.sk_full"))}</summary><div class="sk3-md" id="skMd"><div class="pg-loading">${esc(t("common.loading"))}</div></div></details>
       <div class="sk3-d-act"><button type="button" class="pri" id="skDEdit">${ic("pencil")} ${esc(t("common.edit"))}</button>${s.system
         ? ""
         : `<button type="button" id="skDExp" title="${esc(t("studio.export_title"))}">${ic("download")} ${esc(t("studio.sk_export_one"))}</button><button type="button" class="del" id="skDDel">${ic("trash-2")} ${esc(t("common.delete"))}</button>`}</div>`;

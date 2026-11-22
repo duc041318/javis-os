@@ -1,13 +1,15 @@
 <!-- translated-from: README.md sha256:2e10ad3d2a86 -->
 <div align="center">
 
-<img src="../../../dashboard/logo.svg" width="88" alt="Logo de Javis OS">
+<a href="https://javisos.com"><img src="../../assets/social-preview.png" width="100%" alt="Javis OS: Your AI Workforce. Never miss the best AI."></a>
 
 # Javis OS
 
-### Votre agent IA auto-hébergé, avec un cerveau interchangeable et un Second Brain qui devient plus intelligent chaque jour.
+### Votre équipe IA. Ne ratez jamais la meilleure IA.
 
-Lancez-le sur votre ordinateur portable ou sur un petit VPS. Parlez-lui à voix haute. Branchez Claude, ChatGPT, Grok, Gemini ou n'importe lequel de 12 fournisseurs, gardez tous vos outils quand vous en changez, et laissez-le travailler en arrière-plan pendant que vous dormez.
+Javis OS transforme **Claude, ChatGPT, Gemini, Grok** et les modèles de votre choix en une équipe qui travaille 24 h/24, 7 j/7 sur votre propre machine ou serveur. Chaque collègue a un rôle, partage la même mémoire et les mêmes outils, et continue de travailler en arrière-plan. Un meilleur modèle sort ? Changez et gardez tout ce que l'équipe a appris.
+
+**🌐 Site web: [javisos.com](https://javisos.com)** · Open source · Auto-hébergé · 14 fournisseurs d'IA
 
 [![GitHub stars](https://img.shields.io/github/stars/blogminhquy/javis-os?style=flat&logo=github&label=stars)](https://github.com/blogminhquy/javis-os/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](../../../LICENSE)
@@ -117,7 +119,7 @@ Ce que cela vous apporte :
 | **Travail** | Répond, puis attend | **Loops en arrière-plan, rappels et une file de tâches pilotée par l'IA** qui vous rendent compte |
 | **Interface** | Une zone de chat | Tableau de bord + graphe de connaissances + **voix mains libres** + Telegram, Slack, WhatsApp, Zalo + une CLI |
 | **Votre travail** | Reste sur les serveurs du fournisseur, dans le format du fournisseur | **De simples fichiers sur votre machine** : historique, mémoire, skills, agents et workflows vous suivent vers n'importe quel nouveau modèle |
-| **Déploiement** | Le cloud de quelqu'un d'autre | **Auto-hébergé** : [Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) en un clic, Docker, ou n'importe quel VPS |
+| **Déploiement** | Le cloud de quelqu'un d'autre | **Auto-hébergé** : [Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) en un clic, Docker, ou n'importe quel VPS |
 
 > 💡 **La philosophie : les capacités vivent dans Javis, pas dans le modèle.** Chaque cerveau reçoit la même boîte à outils via un hub de connexions partagé unique (le MCP Hub). Passer de Claude à Gemini ne vous coûte rien, sauf l'accès au shell, que seuls les moteurs CLI possèdent.
 
@@ -247,7 +249,7 @@ flowchart LR
 <details open>
 <summary><b>Option 1 : Hostinger Docker Manager (domaine + HTTPS, en un clic)</b></summary>
 
-> 🛒 **Pas encore de VPS ?** [Prenez un VPS Hostinger ici](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). Docker Manager est intégré, donc Javis s'installe en un clic. Une fois prêt, revenez aux étapes ci-dessous.
+> 🛒 **Pas encore de VPS ?** [Prenez un VPS Hostinger ici](https://www.hostinger.com?REFERRALCODE=JAVISOS). Docker Manager est intégré, donc Javis s'installe en un clic. Une fois prêt, revenez aux étapes ci-dessous.
 
 VPS Hostinger → **Docker Manager → Compose → URL** → collez le fichier Hostinger et cliquez sur **Deploy** :
 
@@ -275,7 +277,7 @@ Détails et dépannage : [DEPLOY.en.md](../../../DEPLOY.en.md).
 <details>
 <summary><b>Option 2 : Docker sur n'importe quel VPS (sans cloner)</b></summary>
 
-> 🛒 **Besoin d'un VPS ?** Un [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) convient aussi à cette option.
+> 🛒 **Besoin d'un VPS ?** Un [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) convient aussi à cette option.
 
 ```bash
 # Docker required (don't have it?  curl -fsSL https://get.docker.com | sh)
@@ -507,5 +509,6 @@ Vous ne pouvez pas faire de don ? Utiliser Javis, envoyer vos retours ou ouvrir 
 
 <div align="center">
 <br>
+<b><a href="https://javisos.com">javisos.com</a></b><br>
 Fait avec ☕ au Vietnam par <b><a href="https://minhquy.vn">Minh Quý</a></b>
 </div>

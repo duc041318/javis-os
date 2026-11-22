@@ -19,8 +19,15 @@ function check(name, cond) { console.log((cond ? "ok   " : "FAIL ") + name); if 
 check("chip text: first repo name only, +N for the rest", gh.chipText(["acme/app", "acme/lib"], 18) === "app +1");
 check("chip text: long names are cut", gh.chipText(["acme/a-very-long-repository-name"], 10).length === 10);
 check("chip text: nothing attached means no chip", gh.chipText([], 18) === "");
-check("toggle adds then removes", JSON.stringify(gh.toggle(gh.toggle([], "a/b"), "a/b")) === "[]");
-check("sameSet ignores order", gh.sameSet(["a/b", "c/d"], ["c/d", "a/b"]) && !gh.sameSet(["a/b"], ["a/b", "c/d"]));
+{
+  // 21/11/2026: the list no longer toggles a set and sends it whole; see tests/js/test_github_repo_picker.js.
+  let v = gh.splitRows([{ full_name: "a/x" }, { full_name: "a/y" }], ["a/y"], "");
+  check("chosen repos come first", v.all.map(r => r.full_name).join() === "a/y,a/x" && v.selected.length === 1);
+  v = gh.splitRows([{ full_name: "a/x" }], ["a/z"], "");
+  check("a chosen repo the list lacks stays listed so it can be removed", v.selected.length === 1 && v.selected[0].full_name === "a/z");
+  v = gh.splitRows([{ full_name: "a/x" }], ["a/z"], "x");
+  check("while searching, only what matches", v.all.length === 1 && v.all[0].full_name === "a/x");
+}
 
 // Status icons (spec 12.1)
 check("no GitHub work: no icon", gh.iconSpec({ state: "" }) === null && gh.iconSpec(null) === null);
@@ -56,12 +63,29 @@ check("no em dash in the module", js.indexOf("\u2014") === -1 && js.indexOf("\u2
     /JavisConnModal/.test(pop) && pop.includes("reposHtml(local)") && pop.includes('openChecks(b.getAttribute("data-gh-checks"), back)') && pop.includes('openMetrics(b.getAttribute("data-gh-metrics"), back)'));
 }
 
+// Owner, 06/11/2026: the repo popup takes the look of the Tasks page: card rows, a switch for auto-merge, and a "..."
+// sheet holding Checks, Numbers and Remove instead of a row of buttons.
+{
+  const row = js.slice(js.indexOf("function localRow(r)"), js.indexOf("// The repos of this brain"));
+  check("each repo is a card row with a meta line", row.includes('class="gh-rrow') && row.includes("gh-rmeta") && row.includes("gh.local_chats"));
+  check("auto-merge is a switch, its state written in the meta line",
+    row.includes('class="gh-sw" role="switch" aria-checked="') && row.includes("gh.auto_merge_off") && !row.includes('type="checkbox"'));
+  check("Checks, Numbers and Remove sit in the ... sheet, Remove in red",
+    row.includes("data-gh-menu") && /function repoSheet[\s\S]*data-gh-checks[\s\S]*data-gh-metrics[\s\S]*gh-mi danger" data-gh-remove/.test(row));
+  check("the sheet closes with Escape and on the scrim", row.includes('e.key === "Escape"') && row.includes("gh-sheet-scrim\" data-gh-close"));
+  check("the row helper does not clash with the picker's repoRow", (js.match(/function localRow\(/g) || []).length === 1);
+  const css = read("dashboard/style.css");
+  check("the dialog carries its own Tasks-page styles (tasks.css loads only on that page)",
+    /\.gh-rrow \{/.test(css) && /\.gh-sw\[aria-checked="true"\]/.test(css) && /\.gh-sheet \{/.test(css) && /\.gh-sheet-scrim \{[^}]*z-index: 210/.test(css));
+  check("new texts exist in both languages", ["gh.auto_merge_off", "gh.more", "gh.close"].every(function (k) { return vi[k] && en[k]; }));
+}
+
 // 0.368.0 (owner, 28/10/2026, after Claude Code's picker): the chip and + menu open "Change repo / Change branch";
 // the repo list has "Selected" and "Repos" sections; a branch list per repo.
 {
   const pan = js.slice(js.indexOf("function panel(box, menuApi)"), js.indexOf("// 4. Status icons"));
   check("the GitHub panel opens on the short menu once repos are attached, else on the repo list",
-    /\(held \|\| names\(\)\.length\) \? homeView\(box, menuApi\) : reposView\(box, menuApi, false\)/.test(pan));
+    /if \(!\(held \|\| names\(\)\.length\)\) reposView\(box, menuApi, false\);\s*else if \(askOnOpen\) reposView\(box, menuApi, true\);\s*else homeView\(box, menuApi\);/.test(pan));
   check("the menu offers Change repo and Change branch", pan.includes('data-gh-go="repos"') && pan.includes('data-gh-go="branch"'));
   check("the repo list splits Selected from the rest", pan.includes("gh.sec_selected") && pan.includes("gh.sec_repos"));
   check("several repos: pick the repo, then its branch", pan.includes("branchReposView") && pan.includes("branchView(box, menuApi, repos["));
@@ -75,11 +99,12 @@ check("no em dash in the module", js.indexOf("\u2014") === -1 && js.indexOf("\u2
 // 0.432.4 (owner, 01/11/2026): ticking a repo attaches it at once; no Attach button at the foot of a long list, and
 // the footer stays pinned while the list scrolls.
 {
-  const rv = js.slice(js.indexOf("function reposView(box, menuApi, canBack)"), js.indexOf("// Several repos: pick the repo first"));
+  const rv = js.slice(js.indexOf("function repoList(box, o)"), js.indexOf("// Several repos: pick the repo first"));
   check("the repo list has no Attach button any more", !rv.includes("data-apply") && !rv.includes("gh.apply_"));
-  check("a tick toggles the repo and syncs it to the chat right away", /chosen = toggle\(chosen, r\.full_name\); draw\(\); sync\(\);/.test(rv));
-  check("only one change is in flight; later ticks ride on the next request", /if \(busy\) return;/.test(rv) && /sent = list;[\s\S]*sync\(\);/.test(rv));
-  check("a refused change puts the ticks back and says why", /if \(msg\) \{ chosen = sent\.slice\(\); err\.textContent = msg; draw\(\);/.test(rv));
+  // 21/11/2026: a tap adds ONE repo and an X removes ONE, each its own request (test_github_repo_picker.js runs them).
+  check("a tap on a repo adds it to the chat right away", /run\(shown\[\+b\.getAttribute\("data-gh-i"\)\], "add", false\)/.test(rv));
+  check("only one change is in flight; later ones wait their turn", /chain = chain\.then\(function \(\) \{/.test(rv));
+  check("a refused change says why", /err\.textContent = \(d && d\.error\) \|\| tw\("gh\.err_net"\)/.test(rv));
   const css = fs.readFileSync(path.join(ROOT, "dashboard/style.css"), "utf8");
   check("the picker footer is pinned to the bottom of the + menu", /\.gh-foot \{ position: sticky; bottom: -6px;/.test(css));
 }
@@ -97,9 +122,9 @@ check("no em dash in the module", js.indexOf("\u2014") === -1 && js.indexOf("\u2
 
 // 0.438.1 (owner, 01/11/2026): a shortcut to add repos on GitHub from the chat picker, for an app sign-in.
 {
-  const rv = js.slice(js.indexOf("function reposView(box, menuApi, canBack)"), js.indexOf("// Several repos: pick the repo first"));
+  const rv = js.slice(js.indexOf("// The \"+\" row at the foot of the list"), js.indexOf("// Several repos: pick the repo first"));
   check("the picker footer offers Add repos on GitHub for an app sign-in, Connect more otherwise",
-    /addUrl \? '<a class="cp-mi gh-more-conn" data-gh-add="1" target="_blank"[^]*gh\.add_on_github[^]*: '<button[^]*gh\.connect_more/.test(rv));
+    /addUrl\s*\? '<a class="cp-mi gh-more-conn" data-gh-add="1" target="_blank"[^]*gh\.add_on_github[^]*: '<button[^]*gh\.connect_more/.test(rv));
   check("only an app sign-in gets the shortcut", /ghStatus\.source === "app" && ghStatus\.install_url/.test(js));
   check("an empty list points to the same shortcut", /gh\.none_found"\)\) \+\s*\(addUrl \? ' <a data-gh-add="1"/.test(rv));
   check("coming back to the tab after GitHub reloads the list", /if \(away\) \{ away = false; load\(\); \}/.test(rv) && rv.includes('addEventListener("visibilitychange", onBack)'));
@@ -119,6 +144,73 @@ check("no em dash in the module", js.indexOf("\u2014") === -1 && js.indexOf("\u2
   check("GitHub reloading after the Pages keeps the Pages", gh.addToConnCount("gh", 1) === 5);
   check("disconnecting GitHub takes only its own share off", gh.addToConnCount("gh", 0) === 4 && cnt.textContent === "4 accounts");
   delete global.document; delete global.window;
+}
+
+// Owner, 08/11/2026: cross review is the person's call. A per-repo switch (off by default) with a reviewer picker, and on
+// the PR panel Review now, then Fix them / Skip and merge on the findings.
+{
+  const sheet = js.slice(js.indexOf("function repoSheet(name)"), js.indexOf("// The repos of this brain"));
+  check("the ... sheet has a Cross review item", sheet.includes("data-gh-review") && sheet.includes("gh.review"));
+  const dlg = js.slice(js.indexOf("async function openReview("), js.indexOf("// Local check commands"));
+  check("the review dialog has a switch and a reviewer picker, the chat's model first",
+    dlg.includes('role="switch"') && dlg.includes('data-f="prov"') && js.includes("gh.review_default") && dlg.includes('"/github/local/review"'));
+  const det = js.slice(js.indexOf("function detailHtml(d)"), js.indexOf("function openDetail(id)"));
+  check("Review now only on an open, unmerged PR that is not already being reviewed",
+    /canReview = !!r\.pr_number && r\.integ !== "merged" && !r\.reviewing && !r\.merging/.test(det) && det.includes("data-rv-now"));
+  check("findings come with Fix them and Skip and merge, and hide the plain Merge button",
+    det.includes("data-rv-fix") && det.includes("data-rv-skip") && det.includes("canMerge && !found.length"));
+  const od = js.slice(js.indexOf("function openDetail(id)"), js.indexOf("function init()"));
+  check("the panel follows a running review", /r\.merging \|\| r\.reviewing/.test(od));
+  check("the buttons call the review routes", od.includes('"/review"') && od.includes('"/review/fix"') && od.includes('"/review/skip"'));
+  check("review texts exist in both languages", ["gh.review", "gh.review_how", "gh.review_now", "gh.review_fix", "gh.review_skip",
+    "gh.reviewing", "gh.review_fixing", "gh.review_started", "gh.review_on_meta"].every(function (k) { return vi[k] && en[k]; }));
+}
+
+// Owner, 09/11/2026: check for git before connecting GitHub, and install it first when the machine has none.
+{
+  check("git step: an answer with git is ready", gh.gitPhase({ ok: true, has_git: true, install: "idle" }) === "ready");
+  check("git step: a running install keeps polling",
+    gh.gitPhase({ ok: true, has_git: false, install: "installing" }) === "installing" &&
+    gh.gitPhase({ ok: true, has_git: false, install: "installing", wait_user: true }) === "wait_user");
+  check("git step: a failed install shows retry", gh.gitPhase({ ok: true, has_git: false, install: "failed", can_install: true }) === "failed");
+  check("git step: no way to install here shows the manual command", gh.gitPhase({ ok: true, has_git: false, install: "idle", can_install: false }) === "manual");
+  check("git step: a network error is its own phase", gh.gitPhase(null) === "error" && gh.gitPhase({ ok: false }) === "error");
+  const of = js.slice(js.indexOf("function openForm(st)"), js.indexOf("async function setupGit"));
+  check("Connect goes through the git step when the machine has no git, then opens the sign-in form",
+    /st\.has_git === false\) \{ setupGit\(function \(g\) \{ connectForm\(st, g\); \}\)/.test(of) && of.includes("connectForm(st);"));
+  const sg = js.slice(js.indexOf("async function setupGit"), js.indexOf("function connectForm"));
+  check("the git step asks the server to install, then polls GET /github/git",
+    sg.includes('api("/github/git/install", {})') && sg.includes('api("/github/git")') && /setTimeout\(res, 2500\)/.test(sg));
+  check("the git step stops polling once the dialog is closed or replaced", (sg.match(/if \(!open\(\)\) return;/g) || []).length >= 3);
+  check("a failure offers Try again, the manual command and a way on", sg.includes('data-f="retry"') && sg.includes("g.manual") &&
+    sg.includes('data-f="skip"') && sg.includes("then(null)"));
+  check("the installing line uses the shared loading look", sg.includes('class="pg-loading"'));
+  const card = js.slice(js.indexOf("function cardHtml"), js.indexOf("async function loadCard"));
+  check("the card says Connect installs git first; a connected card gets an Install git button",
+    card.includes('"gh.no_git_auto"') && card.includes("data-gh-git") && js.includes('cardHost.querySelector("[data-gh-git]")'));
+  const gitKeys = ["gh.no_git", "gh.no_git_auto", "gh.git_install", "gh.git_head", "gh.git_checking", "gh.git_installing",
+    "gh.git_wait_apple", "gh.git_bg", "gh.git_ok", "gh.git_failed", "gh.git_manual", "gh.git_cmd", "gh.git_retry",
+    "gh.git_recheck", "gh.git_page", "gh.git_skip"];
+  check("git step texts exist in both languages", gitKeys.every(k => vi[k] && en[k]));
+  check("git step texts keep the {v} slot in both languages", vi["gh.git_ok"].includes("{v}") && en["gh.git_ok"].includes("{v}"));
+  check("the manual-install line names the button actually shown", vi["gh.git_cmd"].includes("{btn}") && en["gh.git_cmd"].includes("{btn}") &&
+    sg.includes('tw("gh.git_cmd", { btn: again })') && sg.includes("esc(again)"));
+  check("git step texts have no em or en dash", gitKeys.every(k => !/[\u2013\u2014]/.test(vi[k] + en[k])));
+}
+
+// Owner, 21/11/2026: "sắp xếp lại khung giống của Claude". The repo chip sits in the row under the composer card
+// (#cpCtx), after a pinned folder; with both pinned a phone shows both as icons only (.is-two).
+{
+  const rc = js.slice(js.indexOf("function renderChip()"), js.indexOf("var chipIcon = null;"));
+  check("the repo chip lives in #cpCtx under the card, not in the card's button row",
+    rc.includes('getElementById("cpCtx")') && !rc.includes("cpChips") && !rc.includes("ctxStrip") && !rc.includes("limitBtn"));
+  check("it goes last in that row, after a pinned folder", rc.includes("host.appendChild(chip)"));
+  check("the row hides while empty and marks folder plus repos as .is-two",
+    rc.includes("syncCtx(host)") && /function syncCtx\(host\) \{\s*host\.hidden = !host\.children\.length;\s*host\.classList\.toggle\("is-two", host\.children\.length > 1\);/.test(js));
+  check("#cpCtx sits under the card, before the model, Effort and usage chips, hidden at first",
+    /<div class="cp-under" id="cpUnder">\s*<div class="cp-ctx" id="cpCtx" hidden><\/div>\s*<div class="cp-chips" id="cpChips">/.test(html));
+  check("no strip above the card any more", !html.includes('id="ctxStrip"') && !consoleJs.includes('"ctxStrip"'));
+  check("room for the full repo name", js.includes("chipText(list, narrow() ? 28 : 44)"));
 }
 
 const keys = Array.from(new Set((js.match(/tw\("(gh\.[a-z_]+)"/g) || []).map(m => m.slice(4, -1))));

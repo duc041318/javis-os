@@ -29,7 +29,26 @@ from pathlib import Path
 import httpx
 
 import mcp_orphans
+import tool_images
 import winproc
+
+
+def _owner_tz_env(own_env) -> dict:
+    """`TZ` for a local MCP server: the timezone the owner picked in Settings (0.443.0).
+
+    A POS or chat MCP that works out "today" by itself reads the process clock, and on a VPS that is UTC, so "orders
+    today" asked at 6am in Vietnam returned yesterday's. Handing it the owner's timezone makes the server's own idea
+    of a day match Javis's. A connector that sets its own `TZ` keeps it. Not on Windows: its C runtime reads `TZ` in
+    the POSIX "EST5EDT" form and would misread an IANA name, which is worse than the machine's local time.
+    """
+    if os.name == "nt" or "TZ" in (own_env or {}):
+        return {}
+    try:
+        import localefmt
+        name = localefmt.valid_tz(localefmt.ten_tz())
+    except Exception:       # noqa: BLE001 - a missing setting must never stop an MCP from starting
+        return {}
+    return {"TZ": name} if name else {}
 
 PROTOCOL = "2025-06-18"
 # _IDLE_TTL PHẢI LỚN HƠN connect_health.HEALTH_INTERVAL (600). Khi hai số bằng nhau,
@@ -38,10 +57,23 @@ PROTOCOL = "2025-06-18"
 # session ấm: một tiến trình sống lâu thay vì đẻ mới mỗi 10 phút. Vụ VPS Hostinger
 # 15/08: 100 tiến trình mcp-google-sheets, ăn 6,9 GB RAM.
 _IDLE_TTL = 900          # đóng session không dùng > 15 phút
+# A tools/list answer is reused this long on the same live session (2026-11-09). The hub keeps one tool list per mode,
+# plugin set, bot or coding session, and each of those refreshed every 60 s by asking EVERY server for its whole tool
+# list again and parsing it on the event loop: /health/loop showed `mcp_client _rpc < list_tools` 6 times in half an
+# hour, up to 1.37 s. A server's tools change when its process or config changes, both of which give a new session,
+# or when it says so (`notifications/tools/list_changed`). The health check and the Test button still ask for real.
+_TOOLS_TTL = 600
 _DOWN_TTL = 60           # nguồn vừa khởi động hỏng: trả lỗi ngay trong chừng này giây (SessionPool.call_tool)
-_INTERNAL = {"botcake": "botcake_mcp", "substack": "substack_mcp"}   # transport internal → tên module
+_INTERNAL = {"botcake": "botcake_mcp", "substack": "substack_mcp",   # transport internal → tên module
+             "http_api": "http_api_mcp"}
 
 _DIAL_SONG_SONG = 8      # số connection dò tool CÙNG LÚC (đừng để npx nổ ra 30 tiến trình)
+# The start-up warm pass opens fewer sessions at once than a chat turn's dial (2026-11-13). Nobody waits for that
+# pass, and it runs while the server is still starting: eight `npx` / `uvx` processes starting together, each a Node
+# or Python runtime plus a package install when its cache is cold, took a small VPS's disk and memory exactly when
+# the server had its first requests to answer (owner: "right after an update the hub is flooded and the server
+# drops"). JAVIS_MCP_WARM_PARALLEL overrides it.
+_WARM_SONG_SONG = "3"
 _DIAL_TRAN = "20"        # giây - trần dò tool CHO MỖI connection (0 = không giới hạn)
 _WARM_TRAN = "180"       # giây - trần cho vòng LÀM NÓNG lúc khởi động (xem tran_warm)
 # Seconds the MCP handshake of a stdio server may take, measured by the session itself (not by
@@ -97,7 +129,12 @@ def _format_result(res):
     texts = []
     for c in (result.get("content") or []):
         if isinstance(c, dict):
-            texts.append(c.get("text", "") if c.get("type") == "text" else json.dumps(c, ensure_ascii=False))
+            if c.get("type") == "text":
+                texts.append(c.get("text", ""))
+            else:
+                # An image during a model's call goes into the brain and shows in the chat (tool_images.py).
+                note = tool_images.note_for(c)
+                texts.append(note if note is not None else json.dumps(c, ensure_ascii=False))
     out = "\n".join(t for t in texts if t)
     if result.get("isError"):
         return "ERROR: " + (out or "tool error")
@@ -271,6 +308,29 @@ class McpHttpSession:
 # ============================================================
 # stdio - subprocess NDJSON (Windows-first)
 # ============================================================
+def npx_node_argv(resolved) -> list | None:
+    """`npx.cmd` -> `[node.exe, npx-cli.js]` of the same Node install, so Windows never routes npx through cmd.exe.
+
+    Why (#898, item 2): `cmd.exe /c "C:\\Program Files\\nodejs\\npx.cmd" --user-data-dir "C:\\My Javis\\x"` loses its
+    quotes: when the command line after /c starts with a quote, cmd strips the first and the last one, and the
+    connector died with "'C:\\Program' is not recognized". The default Node install lives in "Program Files", so
+    any argument with a space broke. cmd also expands `% ^ & |` in arguments. zalo_cli.npx_command does the same.
+    None when `resolved` is not npx.cmd or the npm CLI is not where Node ships it: the caller keeps cmd.exe.
+    """
+    p = Path(str(resolved))
+    if p.name.lower() not in ("npx.cmd", "npx.bat"):
+        return None
+    candidates = [p.parent / "node.exe"]
+    found = shutil.which("node")
+    if found:
+        candidates.append(Path(found))
+    for node in candidates:
+        cli = node.parent / "node_modules" / "npm" / "bin" / "npx-cli.js"
+        if node.is_file() and cli.is_file():
+            return [str(node), str(cli)]
+    return None
+
+
 class McpStdioSession:
     def __init__(self, command, args=None, env=None, label="", key=""):
         self.command = command
@@ -283,6 +343,7 @@ class McpStdioSession:
         self.label = label or command
         self.proc = None
         self._id = 0
+        self.tools_changed = False    # the server sent notifications/tools/list_changed since the last tools/list
         self._lock = asyncio.Lock()   # NDJSON tuần tự - serialize request/response
         # 50 dòng: traceback Python lồng nhau (uvx crash lúc import) dễ vượt 20 dòng,
         # mà dòng NGUYÊN NHÂN nằm cuối cùng - thiếu chỗ chứa là mất đúng dòng đó.
@@ -310,6 +371,9 @@ class McpStdioSession:
         resolved = shutil.which(self.command, path=search) or self.command
         # CreateProcess không chạy .cmd/.bat trực tiếp (npx trên Windows là npx.cmd)
         if str(resolved).lower().endswith((".cmd", ".bat")):
+            direct = npx_node_argv(resolved)
+            if direct:
+                return direct + self.args
             return ["cmd.exe", "/c", resolved] + self.args
         return [resolved] + self.args
 
@@ -322,6 +386,14 @@ class McpStdioSession:
                 self._stderr.append(line.decode("utf-8", "replace").rstrip())
         except Exception:
             pass
+        finally:
+            # The pipe closed: the process ended (or was closed by us). Whoever keeps state per process is told now
+            # instead of finding out at its next call (2026-11-10: the Zalo read loop restarts javis-zalo at once).
+            for fn in list(STDIO_EXIT_LISTENERS):
+                try:
+                    fn(self.key)
+                except Exception as e:      # noqa: BLE001 - a listener must never break the session
+                    print(f"[mcp stdio exit] listener: {type(e).__name__}: {e}", file=sys.stderr)
 
     def alive(self):
         return self.proc is not None and self.proc.returncode is None
@@ -358,6 +430,9 @@ class McpStdioSession:
                 await asyncio.to_thread(mcp_orphans.reap_same_home, self.single_socket_home())
             except Exception as e:      # noqa: BLE001
                 print(f"[mcp orphans] {type(e).__name__}: {e}", file=sys.stderr)
+        env = dict(os.environ)
+        env.update(_owner_tz_env(self.env))
+        env.update(self.env)
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -365,8 +440,6 @@ class McpStdioSession:
             # Nhóm tiến trình RIÊNG cho cả cây con - xem docstring _kill_tree (vụ 15/08:
             # uvx bị kill nhưng server thật thành mồ côi, 96 tiến trình ăn hết RAM VPS).
             kwargs["start_new_session"] = True
-        env = dict(os.environ)
-        env.update(self.env)
         self.proc = await asyncio.create_subprocess_exec(
             *self._argv(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, env=env, limit=self._STREAM_LIMIT, **kwargs)
@@ -435,6 +508,8 @@ class McpStdioSession:
                 continue   # noise (log npx...) → bỏ qua
             if obj.get("id") == msg["id"]:
                 return obj
+            if obj.get("method") == "notifications/tools/list_changed":
+                self.tools_changed = True   # the pool's cached tool list is stale (SessionPool.cached_tools)
             # notification/request từ server → bỏ qua (Javis không hỗ trợ sampling)
 
     async def ensure_init(self):
@@ -517,6 +592,7 @@ class McpStdioSession:
     async def list_tools(self):
         await self.ensure_init()
         async with self._lock:
+            self.tools_changed = False   # a list_changed read during this request sets it again
             res = await self._rpc("tools/list", timeout=60)
         return ((res or {}).get("result") or {}).get("tools", []) or []
 
@@ -594,6 +670,10 @@ def _spec_hash(spec):
     return hash(core)
 
 
+# Callables told when a stdio MCP process ends, each called with the session key (the connection id). Plain
+# functions, called on the event loop; they must return fast and not raise.
+STDIO_EXIT_LISTENERS: list = []
+
 # Số hiệu phiên MCP, tăng dần và KHÔNG bao giờ tái dùng (khác `id(obj)`, bị tái dùng sau khi GC).
 _EPOCH = itertools.count(1)
 
@@ -608,13 +688,44 @@ class SessionPool:
         # a session whose handshake failed under a waiter, and the new one must not read as a first
         # start. Cleared by the next successful tools/list.
         self._init_errors = {}
+        # The event loop the sessions run on, learned at each `_get`. A session dropped from a worker thread is
+        # closed there (see `_close_later`).
+        self._loop = None
+        self._closing = set()   # close tasks in flight: the loop only keeps a weak reference to a task
 
     def _close_later(self, obj):
+        """Close a session the pool just dropped, without waiting for it.
+
+        Field reports 19-20/11/2026: two Zalo accounts in two brains, and signing in the second one cut the first one
+        off for good ("another session of this account keeps taking the connection"). The QR sign-in saves its
+        connection from a worker thread (`zalo_login._reader`), and `mcp_hub.invalidate_cache` dropped every session
+        from there. With no running loop in that thread this method used to do nothing, so the first account's
+        `javis-zalo mcp start` kept running outside the pool while the read loop started a second one on the same
+        HOME: two sessions of one account evicting each other. Windows and macOS never reaped the orphan
+        (`mcp_orphans.reap_same_home` needs /proc). Now the close runs on the sessions' own loop, and with no loop
+        known the process tree is killed right here."""
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(obj.close())
+            here = asyncio.get_running_loop()
         except RuntimeError:
-            pass   # không có event loop (test sync) → GC tự dọn
+            here = None
+        home = self._loop
+        if here is not None and (home is None or home is here or home.is_closed()):
+            t = here.create_task(obj.close())
+            self._closing.add(t)
+            t.add_done_callback(self._closing.discard)
+            return
+        if home is not None and not home.is_closed() and home.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(obj.close(), home)
+                return
+            except RuntimeError:
+                pass        # the loop shut down between the check and the call: kill below
+        kill = getattr(obj, "_kill_tree", None)
+        if callable(kill) and getattr(obj, "proc", None) is not None:
+            try:
+                kill()
+            except Exception as e:      # noqa: BLE001 - closing must never raise into the caller
+                print(f"[mcp_client] close from a thread: {type(e).__name__}: {e}", file=sys.stderr)
 
     def _sweep(self):
         now = time.time()
@@ -640,6 +751,10 @@ class SessionPool:
         return McpHttpSession(spec.get("url", ""), spec.get("headers"))
 
     def _get(self, spec):
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         self._sweep()
         key = spec.get("key") or _spec_hash(spec)
         h = _spec_hash(spec)
@@ -697,6 +812,25 @@ class SessionPool:
         ent = self._sessions.get(spec.get("key") or _spec_hash(spec))
         return bool(ent and ent.get("ban"))
 
+    def cached_tools(self, spec):
+        """The last tools/list answer of the live session for this spec while it is recent, else None.
+
+        None when there is no session, it was replaced or marked stale, its config changed, its process died, it
+        said its tools changed, or the answer is older than _TOOLS_TTL. A hit counts as use of the session, as the
+        real tools/list it replaces did, so the idle sweep keeps treating discovery as activity."""
+        ent = self._sessions.get(spec.get("key") or _spec_hash(spec))
+        if not ent or ent.get("stale") or ent["hash"] != _spec_hash(spec):
+            return None
+        tools = ent.get("tools")
+        if not tools or time.time() - ent.get("tools_at", 0) > _TOOLS_TTL:
+            return None
+        obj = ent["obj"]
+        alive = getattr(obj, "alive", None)
+        if getattr(obj, "tools_changed", False) or (callable(alive) and not alive()):
+            return None
+        ent["last"] = time.time()
+        return tools
+
     def tool_da_biet(self, spec):
         """Danh sách tool của lần dò gần nhất trên phiên này (None nếu chưa dò được lần nào)."""
         ent = self._sessions.get(spec.get("key") or _spec_hash(spec))
@@ -708,6 +842,11 @@ class SessionPool:
         A discovery or health check that gives up on it must leave it running: closing it kills
         `npx`/`uvx` in the middle of an install. See McpStdioSession.ensure_init."""
         return self.is_starting_key(spec.get("key") or _spec_hash(spec))
+
+    def holds_spec(self, spec) -> bool:
+        """A session is open for this spec's key, with this very spec, and not marked stale."""
+        ent = self._sessions.get(spec.get("key") or _spec_hash(spec))
+        return bool(ent and not ent.get("stale") and ent["hash"] == _spec_hash(spec))
 
     def is_starting_key(self, key) -> bool:
         """`is_starting` by pool key (the connection id), for callers that have no spec."""
@@ -842,7 +981,13 @@ class SessionPool:
                 raise                      # no new token (refresh token revoked): sign in again
             return await run(again)
 
-    async def list_tools(self, spec):
+    async def list_tools(self, spec, fresh=False):
+        """Tool list of the server behind `spec`. Reuses the live session's recent answer (`cached_tools`) unless
+        `fresh`: a health check or the Test button must reach the server, not a copy."""
+        if not fresh:
+            cached = self.cached_tools(spec)
+            if cached is not None:
+                return cached
         tools = await self._with_oauth(
             spec, lambda sp: self._retry(sp, lambda s: s.list_tools(), idempotent=True))
         # Dò được là nguồn đã sống lại (nút Kiểm tra, vòng quét sức khoẻ): bỏ dấu "vừa hỏng" ngay.
@@ -852,6 +997,7 @@ class SessionPool:
         ent = self._sessions.get(spec.get("key") or _spec_hash(spec))
         if ent is not None and tools:
             ent["tools"] = tools
+            ent["tools_at"] = time.time()
         return tools
 
     async def call_tool(self, spec, tool, arguments):
@@ -1030,6 +1176,15 @@ def tran_warm():
     return v if v > 0 else None
 
 
+def warm_parallel() -> int:
+    """How many connections the start-up warm pass opens at the same time (see `_WARM_SONG_SONG`)."""
+    try:
+        v = int(os.getenv("JAVIS_MCP_WARM_PARALLEL", _WARM_SONG_SONG))
+    except (TypeError, ValueError):
+        v = int(_WARM_SONG_SONG)
+    return max(1, min(v, _DIAL_SONG_SONG))
+
+
 async def warm_pool(conns):
     """Mở sẵn phiên MCP cho từng connection. Trả (id đã nóng, id còn nguội). Không bao giờ raise.
 
@@ -1044,7 +1199,7 @@ async def warm_pool(conns):
     phiên chat, dù kết nối chẳng hỏng gì.
     """
     tran = tran_warm()
-    sem = asyncio.Semaphore(_DIAL_SONG_SONG)
+    sem = asyncio.Semaphore(warm_parallel())
     nong, con_lanh = [], []
 
     async def _mo(conn):
@@ -1199,6 +1354,14 @@ async def call_route(route, fn, arguments):
     """Gọi 1 tool theo fn. Entry: {"call"} (hub bọc sẵn) | {"spec","tool"} (pool) | {"server","tool"} (legacy)."""
     ent = route.get(fn)
     if not ent:
+        lazy = route.get("javis_run_tool")
+        if lazy and lazy.get("call") and fn not in ("javis_run_tool", "javis_search_tools"):
+            # 2026-11-19: with the hub's lazy tier on, most tools (javis_team, javis_task...) sit behind
+            # javis_search_tools. The prompt names them, so a model calls them by name, and that answered
+            # "tool không tồn tại" although the tool is there. Hand the call to javis_run_tool: it dispatches
+            # through the full guarded route (same permission, audit, owner-only filter), and a name that
+            # really is missing still gets its hint to search first.
+            return await lazy["call"]({"name": fn, "args": arguments or {}})
         return f"ERROR: tool '{fn}' không tồn tại"
     try:
         if ent.get("call"):

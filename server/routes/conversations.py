@@ -12,6 +12,8 @@ Không nhận `import main` - mọi thứ cần từ main đi qua `deps`.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import mimetypes
 import time
 import sys
@@ -20,7 +22,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Form, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 import channel_accounts
 import channels
@@ -31,6 +34,8 @@ import localefmt
 import routes.channels as channels_routes
 
 router = APIRouter()
+# Streamed "A.I. reply" turns still running: kept here so a page that leaves does not let the task be collected.
+_AI_REPLY_JOBS: set = set()
 
 
 @dataclass
@@ -50,6 +55,9 @@ class ConversationsDeps:
     drop_pending: Callable = None
     # `manual_meta(conv, last) -> meta`: the turn meta for a stored conversation, to record a sent draft as the bot's words.
     manual_meta: Callable = None
+    # `learn_owner(conv, msgs, sent, instruction, draft) -> {"learned", "path", "reason"}` (2026-11-19): a draft the
+    # owner ordered or rewrote, once sent, joins the Agent's knowledge (`chatbot_runtime.learn_from_owner`). Blocking.
+    learn_owner: Callable = None
 
 
 # Ảnh và file khách gửi chỉ được phát từ hai thư mục mà các kênh tự tải về: `inbox/` (Telegram, Zalo Bot, Slack, WhatsApp,
@@ -62,59 +70,109 @@ _DUOI_XEM_THANG = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".
 _DEPS: "ConversationsDeps" = None   # type: ignore
 
 
+# After the owner leaves a group, its platform posts "X left the group" there a moment later. That notice (and anything
+# else of the same minutes) must not reopen the chat the leave just removed from Javis.
+LEAVE_QUIET_S = 120
+
+
 def _404(msg: str = ""):
     msg = msg or localefmt.chu("không có hội thoại nào id đó", "no conversation with that id")
     return JSONResponse({"ok": False, "error": msg}, status_code=404)
 
 
+def _tk_goc(c: dict) -> str:
+    key = str(c.get("channel_account_id") or "")
+    return key.split(":", 1)[1] if ":" in key else key
+
+
+async def _gui_tin(c: dict, txt: str, tieng_vong: bool = False, reply_to: Optional[dict] = None):
+    """Gửi một tin chữ vào cuộc chat qua năng lực `gui` của kênh. Trả (ok, lỗi). Dùng chung cho chủ gõ tay và cho lượt
+    nhờ bot trả lời (0.65.5), để hai đường không lệch nhau ở cách dựng tài khoản gửi.
+
+    `tieng_vong=True`: trên Zalo cá nhân phải nhớ câu vừa gửi TRƯỚC khi gửi, y như `Transport._gui`, không thì vòng đọc thấy nó
+    quay về như tin của chính chủ (bot tưởng chủ vừa nhắn tay nên im cả quãng) hoặc như tin của một khách (bot tự trả lời chính
+    mình trong nhóm). Câu CHỦ gõ ở Hộp thư cũng bật cờ này (0.108.0): Javis đã tự ghi câu đó, và từ javis-zalo 1.3.0 tin của
+    chính tài khoản quay về vòng đọc kèm `isSelf`, nên không nhớ thì Hộp thư hiện câu chủ gõ HAI lần.
+
+    `reply_to` (tin khách bot đang trả lời): trong nhóm Zalo cá nhân, câu của bot tag đúng người gửi tin đó, y như bot tự trả lời."""
+    kenh = str(c.get("channel") or "")
+    raw = _tk_goc(c)
+    if tieng_vong and kenh == "zalo_personal":
+        try:
+            import zalo_personal_channel as zc
+            zc.ghi_da_gui(raw, str(c.get("external_chat_id") or ""), txt)
+        except Exception:      # noqa: BLE001 - không nhớ được tiếng vọng thì vẫn gửi, tệ nhất là một dòng trùng trong Hộp thư
+            pass
+    s = channels.spec(kenh)
+    if not s:
+        return False, localefmt.chu(f"kênh '{kenh}' không có trong sổ đăng ký",
+                                    f"channel '{kenh}' is not in the registry")
+    tk = {"id": raw, "channel": kenh}
+    if s.kind == "bot":
+        a = channel_accounts.get_account(raw) or {}
+        tk.update({k: a.get(k) for k in ("label", "external_id")})
+        tk["token"] = channel_accounts.get_token(raw)
+    extra = {}
+    if tieng_vong and kenh == "zalo_personal" and reply_to and str(c.get("chat_type") or "") == "group":
+        extra["mention"] = {"uid": reply_to.get("sender_id"), "name": reply_to.get("sender_name")}
+    kq = await channels.gui(kenh, tk, str(c.get("external_chat_id") or ""), txt, str(c.get("chat_type") or "private"), **extra)
+    if tieng_vong and kenh == "zalo_personal" and kq and kq[0]:
+        # Hộp thư vừa trả lời chat này: tiếng vọng của câu này bị lọc ở vòng đọc nên không tính là chủ nhắn tay,
+        # phải tự báo kẻo 10 phút sau bot trả lời lại tin khách đã có người đáp (0.136.0).
+        try:
+            import zalo_personal_channel as zc
+            zc.bo_cho_chu(raw, str(c.get("external_chat_id") or ""))
+        except Exception:      # noqa: BLE001
+            pass
+    return kq
+
+
+async def owner_reply(conv_id: int, text: str, sender_name: str = "Bạn", via: str = "",
+                      take_over: bool = True) -> dict:
+    """Send `text` into conversation `conv_id` as the owner, on whatever channel it lives (Messenger, Instagram,
+    Telegram, Zalo...), the same path as typing in the inbox. Records it as a `human` message and takes the chat over
+    from its bot. `via` marks who sent it (`"tool"` when an engine called `inbox_reply`). `take_over=False` (the
+    `inbox_reply` tool) leaves the bot running: the owner asked Javis to pass on one message, not to mute the bot for
+    that customer. Returns a dict with `ok`."""
+    c = conversations.chi_tiet(int(conv_id or 0))
+    if not c:
+        return {"ok": False, "code": "not_found",
+                "error": localefmt.chu("không có hội thoại nào id đó", "no conversation with that id")}
+    txt = str(text or "").strip()
+    if not txt:
+        return {"ok": False, "code": "empty", "error": localefmt.chu("tin rỗng", "empty message")}
+    if len(txt) > conversations.MAX_CHU:
+        return {"ok": False, "code": "too_long",
+                "error": localefmt.chu(f"tin dài quá {conversations.MAX_CHU} ký tự",
+                                       f"message longer than {conversations.MAX_CHU} characters")}
+    kenh = str(c.get("channel") or "")
+    ok, loi = await _gui_tin(c, txt, tieng_vong=True)
+    if not ok:
+        return {"ok": False, "code": "send_failed", "error": loi or localefmt.chu("không gửi được", "could not send")}
+    meta = {"tu_javis": True}
+    if via:
+        meta["via"] = via
+    r = conversations.ghi_su_kien({
+        "channel": kenh, "account_id": _tk_goc(c), "account_name": c.get("account_name") or "",
+        "bot_id": c.get("bot_id") or "",
+        "external_chat_id": c.get("external_chat_id"), "chat_type": c.get("chat_type"),
+        "chat_title": c.get("title") if c.get("chat_type") == "group" else "",
+        "sender_type": "human", "sender_name": sender_name, "message_type": "text", "text": txt,
+        "metadata": meta,
+    })
+    tiep_quan = False
+    if take_over and c.get("bot_id") and str(c.get("mode") or "ai") == "ai":
+        conversations.dat_che_do(c["id"], "human")
+        tiep_quan = True
+    # The owner answered by hand: an A.I. draft still waiting is no longer needed (Chatbot v5).
+    conversations.clear_draft(c["id"])
+    return {"ok": True, "message_id": r.get("message_id"), "tiep_quan": tiep_quan,
+            "conversation": conversations.chi_tiet(c["id"])}
+
+
 def register(app, deps: ConversationsDeps):
     global _DEPS
     _DEPS = deps
-
-    def _tk_goc(c: dict) -> str:
-        key = str(c.get("channel_account_id") or "")
-        return key.split(":", 1)[1] if ":" in key else key
-
-    async def _gui_tin(c: dict, txt: str, tieng_vong: bool = False, reply_to: Optional[dict] = None):
-        """Gửi một tin chữ vào cuộc chat qua năng lực `gui` của kênh. Trả (ok, lỗi). Dùng chung cho chủ gõ tay và cho lượt
-        nhờ bot trả lời (0.65.5), để hai đường không lệch nhau ở cách dựng tài khoản gửi.
-
-        `tieng_vong=True`: trên Zalo cá nhân phải nhớ câu vừa gửi TRƯỚC khi gửi, y như `Transport._gui`, không thì vòng đọc thấy nó
-        quay về như tin của chính chủ (bot tưởng chủ vừa nhắn tay nên im cả quãng) hoặc như tin của một khách (bot tự trả lời chính
-        mình trong nhóm). Câu CHỦ gõ ở Hộp thư cũng bật cờ này (0.108.0): Javis đã tự ghi câu đó, và từ javis-zalo 1.3.0 tin của
-        chính tài khoản quay về vòng đọc kèm `isSelf`, nên không nhớ thì Hộp thư hiện câu chủ gõ HAI lần.
-
-        `reply_to` (tin khách bot đang trả lời): trong nhóm Zalo cá nhân, câu của bot tag đúng người gửi tin đó, y như bot tự trả lời."""
-        kenh = str(c.get("channel") or "")
-        raw = _tk_goc(c)
-        if tieng_vong and kenh == "zalo_personal":
-            try:
-                import zalo_personal_channel as zc
-                zc.ghi_da_gui(raw, str(c.get("external_chat_id") or ""), txt)
-            except Exception:      # noqa: BLE001 - không nhớ được tiếng vọng thì vẫn gửi, tệ nhất là một dòng trùng trong Hộp thư
-                pass
-        s = channels.spec(kenh)
-        if not s:
-            return False, localefmt.chu(f"kênh '{kenh}' không có trong sổ đăng ký",
-                                        f"channel '{kenh}' is not in the registry")
-        tk = {"id": raw, "channel": kenh}
-        if s.kind == "bot":
-            a = channel_accounts.get_account(raw) or {}
-            tk.update({k: a.get(k) for k in ("label", "external_id")})
-            tk["token"] = channel_accounts.get_token(raw)
-        extra = {}
-        if tieng_vong and kenh == "zalo_personal" and reply_to and str(c.get("chat_type") or "") == "group":
-            extra["mention"] = {"uid": reply_to.get("sender_id"), "name": reply_to.get("sender_name")}
-        kq = await channels.gui(kenh, tk, str(c.get("external_chat_id") or ""), txt, str(c.get("chat_type") or "private"), **extra)
-        if tieng_vong and kenh == "zalo_personal" and kq and kq[0]:
-            # Hộp thư vừa trả lời chat này: tiếng vọng của câu này bị lọc ở vòng đọc nên không tính là chủ nhắn tay,
-            # phải tự báo kẻo 10 phút sau bot trả lời lại tin khách đã có người đáp (0.136.0).
-            try:
-                import zalo_personal_channel as zc
-                zc.bo_cho_chu(raw, str(c.get("external_chat_id") or ""))
-            except Exception:      # noqa: BLE001
-                pass
-        return kq
 
     def _hesitant() -> list:
         """Nhóm bot vừa cân nhắc nói rồi im trong 24 giờ qua (kho bộ phán xử). Kho hỏng hay chưa có thì rỗng: bộ lọc
@@ -216,7 +274,8 @@ def register(app, deps: ConversationsDeps):
                                  status: str = "", chat_type: str = "", tag: int = 0, has_contact: int = 0,
                                  sort: str = "", account_ids: str = "", who: str = "", tags_any: str = "",
                                  tags_none: str = "", date_from: str = Query("", alias="from"),
-                                 date_to: str = Query("", alias="to"), last_by: str = "", pinned: int = 0):
+                                 date_to: str = Query("", alias="to"), last_by: str = "", pinned: int = 0,
+                                 brain: str = ""):
         """Danh sách hội thoại mới nhất trước, kèm vài con số đầu trang (cùng bộ lọc).
 
         0.65.3: thêm `status` (unread | need_reply | human) và `chat_type` (group | private); mỗi hàng có `bot_name`;
@@ -235,13 +294,41 @@ def register(app, deps: ConversationsDeps):
 
         2026-10-25 (row menu): hidden conversations stay out of the list unless `status=hidden` asks for exactly them;
         a search (`q`) finds them too, so a customer the owner hid can always be looked up. `facets.status.hidden`
-        counts them."""
+        counts them.
+
+        #1243: `brain` leaves out the conversations of channel accounts assigned to another brain, in the list, the
+        counts and the facets, by the same rule as the Channels tab (`channel_accounts.keys_of_other_brains`). Without
+        it, every brain's conversations come back, as before (internal callers and "all brains")."""
+        # The store work runs in a worker thread (owner, 2026-11-07: the Chatbot page loaded slowly): this list is asked
+        # every 5 seconds, and done on the event loop it held up every other request of the server while it counted.
+        others = channel_accounts.keys_of_other_brains(brain) if str(brain or "").strip() else []
+        rows = await run_in_threadpool(_list_rows, channel, bot_id, account_id, q, mode, limit, offset, status, chat_type,
+                                       tag, has_contact, sort, account_ids, who, tags_any, tags_none, date_from, date_to,
+                                       last_by, pinned, others)
+        items, who_counts, total, hesitant, extra, ctx = rows
+        if offset > 0:
+            return {"ok": True, "items": items}
+        phone_lookup = None
+        if q and conversations.chuan_hoa_sdt(q) and channel in ("", "zalo_personal") \
+                and (not account_id or account_id.startswith("zalo_personal:")):
+            items, phone_lookup = await _tim_sdt_tren_zalo(items, q, dict(
+                channel=channel, bot_id=bot_id, account_id=account_id, q=q, mode=mode, limit=limit,
+                status=status, chat_type=chat_type, hesitant=hesitant, **extra))
+            await run_in_threadpool(_attach_state, items, ctx)
+        head = await run_in_threadpool(_first_page_extras, items, hesitant, bot_id, channel, account_id, others)
+        return {"ok": True, "items": items, "who_counts": who_counts, "total": total, **head, "phone_lookup": phone_lookup}
+
+    def _list_rows(channel, bot_id, account_id, q, mode, limit, offset, status, chat_type, tag, has_contact, sort,
+                   account_ids, who, tags_any, tags_none, date_from, date_to, last_by, pinned, others=()) -> tuple:
+        """The blocking part of GET /conversations: `(items, who_counts, total, hesitant, extra, ctx)`. From the second
+        page on the rows already carry `bot_name` and `need_reply`."""
         hesitant = _hesitant()
         hidden = "only" if status == "hidden" else ("" if q.strip() else "exclude")
         since, until = _day_range(date_from, date_to)
         extra = dict(tag=tag, has_contact=bool(has_contact), sort=sort, hidden=hidden,
                      account_ids=_ids_param(account_ids), tags_any=_ids_param(tags_any), tags_none=_ids_param(tags_none),
-                     since=since, until=until, last_by=last_by, pinned=bool(pinned))
+                     since=since, until=until, last_by=last_by, pinned=bool(pinned),
+                     exclude_account_ids=list(others or []))
         ctx = _StateCtx(hesitant)
         who = who if who in inbox_state.WHO else ""
         who_counts, total = None, None
@@ -262,7 +349,9 @@ def register(app, deps: ConversationsDeps):
             narrowed = bool(channel or bot_id or account_id or q or status or chat_type or tag or has_contact
                             or base["account_ids"] or base["tags_any"] or base["tags_none"] or since or until
                             or base["last_by"] or pinned)
-            every = conversations.state_rows(hesitant=hesitant, hidden="exclude") if narrowed else light
+            every = (conversations.state_rows(hesitant=hesitant, hidden="exclude",
+                                              exclude_account_ids=base["exclude_account_ids"])
+                     if narrowed else light)
             by_acc, you_total = {}, 0
             for r in every:
                 if ctx.of(r)["who"] == "you":
@@ -288,25 +377,21 @@ def register(app, deps: ConversationsDeps):
             for it in items:
                 it["bot_name"] = _ten_bot(str(it.get("bot_id") or ""))
                 it["need_reply"] = conversations.can_tra_loi(it, hesitant)
-            return {"ok": True, "items": items}
-        phone_lookup = None
-        if q and conversations.chuan_hoa_sdt(q) and channel in ("", "zalo_personal") \
-                and (not account_id or account_id.startswith("zalo_personal:")):
-            items, phone_lookup = await _tim_sdt_tren_zalo(items, q, dict(
-                channel=channel, bot_id=bot_id, account_id=account_id, q=q, mode=mode, limit=limit,
-                status=status, chat_type=chat_type, hesitant=hesitant, **extra))
-            _attach_state(items, ctx)
-        facets = conversations.dem_bo_loc(hesitant)
+        return items, who_counts, total, hesitant, extra, ctx
+
+    def _first_page_extras(items: list, hesitant, bot_id: str, channel: str, account_id: str, others=()) -> dict:
+        """What only the first page carries (counts, filter options, tags, channels); also names each row's bot."""
+        facets = conversations.dem_bo_loc(hesitant, exclude_account_ids=list(others or []))
         ten = {bid: _ten_bot(bid) for bid in facets["bots"] if bid}
         for it in items:
             it["bot_name"] = ten.get(str(it.get("bot_id") or "")) or _ten_bot(str(it.get("bot_id") or ""))
             it["need_reply"] = conversations.can_tra_loi(it, hesitant)
-        return {"ok": True, "items": items, "who_counts": who_counts, "total": total,
-                "stats": conversations.thong_ke(bot_id=bot_id, channel=channel, account_id=account_id),
+        return {"stats": conversations.thong_ke(bot_id=bot_id, channel=channel, account_id=account_id,
+                                                exclude_account_ids=list(others or [])),
                 "facets": facets,
                 "bots": [{"id": bid, "name": ten[bid], **facets["bots"][bid]} for bid in ten],
                 "tags": conversations.list_tags(),
-                "channels": channels.cho_giao_dien(), "phone_lookup": phone_lookup}
+                "channels": channels.cho_giao_dien()}
 
     async def _tim_sdt_tren_zalo(items: list, q: str, loc: dict) -> tuple:
         """0.216.0: ô tìm kiếm là một số điện thoại đầy đủ mà chưa khách nào trong hòm thư mang số đó: hỏi Zalo của các
@@ -346,10 +431,14 @@ def register(app, deps: ConversationsDeps):
             lt = time.localtime()
             midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
             since, until = midnight - (n - 1) * 86400, now
+        # Counted in a worker thread: a month of a busy inbox takes a while, and the rest of the server must not wait on it.
+        return await run_in_threadpool(_insights, since, until, n, account)
+
+    def _insights(since: float, until: float, n: int, account: str) -> dict:
         accounts = conversations.stats_accounts()
         account = account if any(a["id"] == account for a in accounts) else ""
-        cur = conversations.insights(since, until, account)
-        prev = conversations.insights(since - n * 86400, since, account)
+        cur = conversations.insights_cached(since, until, account)
+        prev = conversations.insights_cached(since - n * 86400, since, account)
         ctx = _StateCtx(_hesitant())
         you = sum(1 for r in conversations.state_rows(hesitant=ctx.hesitant, hidden="exclude", account_ids=[account] if account else None)
                   if ctx.of(r)["who"] == "you")
@@ -417,11 +506,16 @@ def register(app, deps: ConversationsDeps):
         return {"ok": True, "conversation": d} if d else _404()
 
     @router.get("/conversations/{conv_id}/messages")
-    async def conversations_messages(conv_id: int, limit: int = 100, before: int = 0, after: int = 0):
+    async def conversations_messages(conv_id: int, limit: int = 100, before: int = 0, after: int = 0, read: int = 0):
         """Tin của một hội thoại, cũ trước mới sau.
 
         Mặc định lấy `limit` tin MỚI NHẤT; `before=<id>` lấy các tin cũ hơn id đó (kéo lên để xem thêm); `after=<id>` (0.65.11) chỉ lấy tin MỚI
-        hơn id đó, dành cho nhịp làm mới 5 giây. `has_more` cho biết còn tin cũ hơn tin đầu của phần trả về hay không."""
+        hơn id đó, dành cho nhịp làm mới 5 giây. `has_more` cho biết còn tin cũ hơn tin đầu của phần trả về hay không.
+
+        `read=1`: mark the conversation read first, as POST /read does, so opening a chat is one round trip and the state
+        returned (who handles it, unread count) already reflects the open."""
+        if read and not conversations.danh_dau_da_doc(conv_id):
+            return _404()
         d = conversations.chi_tiet(conv_id)
         if not d:
             return _404()
@@ -430,6 +524,9 @@ def register(app, deps: ConversationsDeps):
         msgs = conversations.tin_nhan(conv_id, limit=limit, before_id=before, after_id=after)
         d["bot_name"] = _ten_bot(str(d.get("bot_id") or ""))
         bot_id = str(d.get("bot_id") or "")
+        # The agent's own icon, so its messages carry it (owner, 2026-11-22). A message keeps the icon it was sent with
+        # (`metadata.bot_icon`); this covers older messages written before that field existed.
+        d["bot_icon"] = str((chatbot_store.get_bot(bot_id) or {}).get("icon") or "") if bot_id else ""
         # Lý do bot im gắn với tin khách CUỐI của cuộc chat, không phải cuối phần trả về: nhịp chỉ hỏi tin mới có thể trả rỗng, và
         # kéo lên xem tin cũ thì phần trả về không chứa tin cuối.
         cuoi = msgs if (not moi and not before) else conversations.tin_nhan(conv_id, limit=1)
@@ -476,40 +573,197 @@ def register(app, deps: ConversationsDeps):
         `human`): người vừa nhắn tay mà bot chen vào câu sau là khách đọc hai giọng một lúc.
         Trả `tiep_quan: true` để giao diện nói ra điều đó.
         """
+        r = await owner_reply(conv_id, text)
+        if r.get("ok"):
+            return r
+        return JSONResponse(r, status_code=404 if r.get("code") == "not_found" else 400)
+
+    def _private_target(msgs: list, wanted: str = "") -> tuple:
+        """The comment a private message answers (0.446.0): `wanted` when it is one of the customer's comments in this
+        thread, else the newest customer comment that has not had one yet. Returns (comment, all_used)."""
+        used = {str((m.get("metadata") or {}).get("private_reply_to") or "") for m in msgs if m.get("sender_type") == "human"}
+        mine = [m for m in msgs if m.get("sender_type") == "customer" and str(m.get("external_message_id") or "")]
+        if wanted:
+            hit = [m for m in mine if str(m.get("external_message_id")) == wanted]
+            return (hit[-1] if hit else None), False
+        free = [m for m in mine if str(m.get("external_message_id")) not in used]
+        return (free[-1] if free else None), bool(mine)
+
+    @router.post("/conversations/{conv_id}/private-reply")
+    async def conversations_private_reply(conv_id: int, text: str = Form(...), comment_id: str = Form("")):
+        """Message a Facebook or Instagram commenter privately from their comment thread (0.446.0, Meta's Private
+        Replies; Instagram from 0.447.0).
+
+        The message lands in the person's Messenger (or Instagram) inbox from the Page. Meta allows ONE per comment, within 7 days of
+        it; once the person answers, it is an ordinary Messenger chat with the Page. The message is recorded twice: in
+        the comment thread (marked private, so the owner sees what was sent and which comment got it) and in the
+        Messenger chat it opens, which the person's answer then joins. That chat is taken over like any chat the owner
+        writes in by hand, so the bot does not cut in on the owner's own conversation."""
         c = conversations.chi_tiet(conv_id)
         if not c:
             return _404()
+        chat = str(c.get("external_chat_id") or "")
+        if c.get("channel") != "messenger" or not chat.startswith(("cmt:", "igc:")):
+            return JSONResponse({"ok": False, "code": "not_comment", "error": localefmt.chu(
+                "Chỉ nhắn riêng được từ một hội thoại bình luận Facebook hoặc Instagram",
+                "Only a Facebook or Instagram comment thread can send a private message")}, status_code=400)
+        instagram = chat.startswith("igc:")
         txt = str(text or "").strip()
         if not txt:
             return JSONResponse({"ok": False, "error": localefmt.chu("tin rỗng", "empty message")}, status_code=400)
-        if len(txt) > conversations.MAX_CHU:
-            return JSONResponse({"ok": False, "error": localefmt.chu(f"tin dài quá {conversations.MAX_CHU} ký tự",
-                                                                   f"message longer than {conversations.MAX_CHU} characters")}, status_code=400)
-        kenh = str(c.get("channel") or "")
-        ok, loi = await _gui_tin(c, txt, tieng_vong=True)
-        if not ok:
-            return JSONResponse({"ok": False, "error": loi or localefmt.chu("không gửi được", "could not send")},
-                                status_code=400)
+        msgs = conversations.tin_nhan(conv_id, limit=200)
+        target, all_used = _private_target(msgs, str(comment_id or "").strip())
+        if not target:
+            return JSONResponse({"ok": False, "code": "already_sent" if all_used else "no_comment", "error": localefmt.chu(
+                "Mọi bình luận trong hội thoại này đã được nhắn riêng. Messenger chỉ cho nhắn riêng một lần mỗi bình luận; "
+                "khách trả lời là tiếp tục được trong hội thoại Messenger." if all_used else "Không tìm thấy bình luận nào của khách",
+                "Every comment in this thread already got its private message. Messenger allows one per comment; once the "
+                "person answers, carry on in the Messenger chat." if all_used else "No comment from the customer found")},
+                status_code=409 if all_used else 400)
         raw = _tk_goc(c)
-        r = conversations.ghi_su_kien({
-            "channel": kenh, "account_id": raw, "account_name": c.get("account_name") or "",
-            "bot_id": c.get("bot_id") or "",
-            "external_chat_id": c.get("external_chat_id"), "chat_type": c.get("chat_type"),
-            "chat_title": c.get("title") if c.get("chat_type") == "group" else "",
-            "sender_type": "human", "sender_name": "Bạn", "message_type": "text", "text": txt,
-            "metadata": {"tu_javis": True},
-        })
-        tiep_quan = False
-        if c.get("bot_id") and str(c.get("mode") or "ai") == "ai":
-            conversations.dat_che_do(conv_id, "human")
-            tiep_quan = True
-        # The owner answered by hand: an A.I. draft still waiting is no longer needed (Chatbot v5).
-        conversations.clear_draft(conv_id)
-        return {"ok": True, "message_id": r.get("message_id"), "tiep_quan": tiep_quan,
+        import messenger_bot
+        bot = messenger_bot.MessengerBot(channel_accounts.get_token(raw), "", None, giau_trang_thai=True)
+        cid = str(target.get("external_message_id"))
+        r = await bot.private_reply(cid, txt)
+        if not r.get("ok"):
+            return JSONResponse({"ok": False, "code": "send_failed", "error": r.get("error") or localefmt.chu(
+                "không gửi được", "could not send")}, status_code=400)
+        base = {"channel": "messenger", "account_id": raw, "account_name": c.get("account_name") or "",
+                "bot_id": c.get("bot_id") or "", "sender_type": "human", "sender_name": "Bạn", "message_type": "text",
+                "text": txt}
+        conversations.ghi_su_kien({**base, "external_chat_id": chat, "chat_type": c.get("chat_type") or "private",
+                                   "metadata": {"tu_javis": True, "private_reply_to": cid}})
+        dm_id = 0
+        psid = r.get("recipient_id") or ""
+        if psid and instagram:
+            # The Instagram chat it opens carries the same `ig:` id the webhook gives the person's answer (0.447.0).
+            psid = "ig:" + psid
+        if psid:
+            who = str(c.get("customer_name") or target.get("sender_name") or "")
+            d = conversations.ghi_su_kien({**base, "external_chat_id": psid, "chat_type": "private", "chat_title": who,
+                                           "external_message_id": r.get("message_id") or "",
+                                           "metadata": {"tu_javis": True, "from_comment": cid}}, dem_chua_doc=False)
+            dm_id = int(d.get("conversation_id") or 0)
+            if dm_id and c.get("bot_id"):
+                dm = conversations.chi_tiet(dm_id) or {}
+                if str(dm.get("mode") or "ai") == "ai":
+                    conversations.dat_che_do(dm_id, "human")
+        return {"ok": True, "comment_id": cid, "dm_conversation_id": dm_id,
                 "conversation": conversations.chi_tiet(conv_id)}
 
+    # ---- Profile, block, delete (0.447.0; what each platform allows is in `conversation_actions`) ----
+    @router.get("/conversations/{conv_id}/profile")
+    async def conversations_profile(conv_id: int):
+        import conversation_actions as ca
+        c = conversations.chi_tiet(conv_id)
+        if not c:
+            return _404()
+        r = await ca.profile(c)
+        return r if r.get("ok") else JSONResponse(r, status_code=400)
+
+    @router.post("/conversations/{conv_id}/block")
+    async def conversations_block(conv_id: int):
+        """Block on the platform where it allows it (Messenger, a Zalo personal chat), else in Javis only. Either way
+        the bot stays quiet here, the chat leaves the inbox and new messages from it stay out of sight."""
+        import conversation_actions as ca
+        c = conversations.chi_tiet(conv_id)
+        if not c:
+            return _404()
+        r = await ca.block(c)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        # Remember who answered before, so Unblock gives the chat back as it was.
+        conversations._set_meta_key(conv_id, "blocked_prev_mode", str(c.get("mode") or "ai"))
+        conversations.dat_che_do(conv_id, "human")
+        conversations._set_meta_key(conv_id, "blocked", True)
+        conversations.set_hidden(conv_id, True)
+        return {"ok": True, "remote": bool(r.get("remote")), "conversation": conversations.chi_tiet(conv_id)}
+
+    @router.post("/conversations/{conv_id}/unblock")
+    async def conversations_unblock(conv_id: int):
+        import conversation_actions as ca
+        c = conversations.chi_tiet(conv_id)
+        if not c:
+            return _404()
+        r = await ca.unblock(c)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        meta = c.get("metadata") or {}
+        prev = str(meta.get("blocked_prev_mode") or "")
+        if prev and prev != "human":
+            conversations.dat_che_do(conv_id, prev)
+        conversations._set_meta_key(conv_id, "blocked", None)
+        conversations._set_meta_key(conv_id, "blocked_prev_mode", None)
+        conversations.set_hidden(conv_id, False)
+        return {"ok": True, "remote": bool(r.get("remote")), "conversation": conversations.chi_tiet(conv_id)}
+
+    @router.post("/conversations/{conv_id}/leave")
+    async def conversations_leave(conv_id: int):
+        """Leave the group on its platform (a Zalo group), then remove the chat from Javis for good (owner, 2026-11-21:
+        "rời khỏi một nhóm thì tự động xoá luôn đoạn chat đấy trên database của Javis"; before that it stayed, marked
+        and hidden). When the platform refuses, nothing is deleted here either."""
+        import conversation_actions as ca
+        c = conversations.chi_tiet(conv_id)
+        if not c:
+            return _404()
+        r = await ca.leave(c)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        conversations.delete_conversation(conv_id, quiet_s=LEAVE_QUIET_S)
+        return {"ok": True, "deleted": True}
+
+    @router.post("/conversations/{conv_id}/delete")
+    async def conversations_delete(conv_id: int):
+        """Delete on the platform where it allows it (a comment, a Zalo conversation), then from the inbox. When the
+        platform refuses, nothing is deleted here either."""
+        import conversation_actions as ca
+        c = conversations.chi_tiet(conv_id)
+        if not c:
+            return _404()
+        r = await ca.delete_remote(c)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        conversations.delete_conversation(conv_id)
+        return {"ok": True, "remote": bool(r.get("remote"))}
+
     @router.post("/conversations/{conv_id}/ai-reply")
-    async def conversations_ai_reply(conv_id: int, mode: str = Form("send"), instruction: str = Form("")):
+    async def conversations_ai_reply(conv_id: int, mode: str = Form("send"), instruction: str = Form(""),
+                                     stream: str = Form("")):
+        """See `_ai_reply`. `stream=1` (the inbox, 2026-11-18): a `text/event-stream` of `{"type": "stage", "stage":
+        code}` lines while the A.I. works, then one `{"type": "done", "status": <http status>, "body": <the JSON
+        answer>}`. A draft takes many seconds; without the stages the owner stared at a still button and wondered
+        whether it had broken. The work is never cancelled when the page leaves: the draft is still saved."""
+        if str(stream).strip() not in ("1", "true"):
+            status, body = await _ai_reply(conv_id, mode, instruction, None)
+            return body if status == 200 else JSONResponse(body, status_code=status)
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def progress(code):
+            await queue.put({"type": "stage", "stage": str(code or "")})
+
+        async def run():
+            try:
+                status, body = await _ai_reply(conv_id, mode, instruction, progress)
+            except Exception as e:      # noqa: BLE001 - the error must reach the page, not hang it
+                status, body = 500, {"ok": False, "code": "engine", "error": f"{type(e).__name__}: {str(e)[:200]}"}
+            await queue.put({"type": "done", "status": status, "body": body})
+            await queue.put(None)
+
+        job = asyncio.create_task(run())
+        _AI_REPLY_JOBS.add(job)
+        job.add_done_callback(_AI_REPLY_JOBS.discard)
+
+        async def events():
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield "data: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    async def _ai_reply(conv_id: int, mode: str, instruction: str, progress) -> tuple:
         """Chủ nhờ BOT trả lời ngay từ Hộp thư (0.65.5). `mode=send`: bot trả lời tin khách cuối và câu đó được gửi luôn; cuộc chat
         vẫn ở chế độ Tự động. `mode=draft`: bot chỉ soạn, trả chữ về để đổ vào ô nhập, không gửi và không để lại dấu vết.
 
@@ -521,51 +775,53 @@ def register(app, deps: ConversationsDeps):
         if str(instruction or "").strip():
             mode = "draft"
         if mode not in ("send", "draft"):
-            return JSONResponse({"ok": False, "code": "bad_mode", "error": localefmt.chu("mode phải là send hoặc draft",
-                                                                                         "mode must be send or draft")}, status_code=400)
+            return 400, {"ok": False, "code": "bad_mode", "error": localefmt.chu("mode phải là send hoặc draft",
+                                                                                         "mode must be send or draft")}
         if _DEPS.manual_answer is None:
-            return JSONResponse({"ok": False, "code": "unavailable", "error": localefmt.chu("Chưa nối bot vào Hộp thư",
-                                                                                            "Bots are not wired to the Inbox yet")}, status_code=503)
+            return 503, {"ok": False, "code": "unavailable", "error": localefmt.chu("Chưa nối bot vào Hộp thư",
+                                                                                            "Bots are not wired to the Inbox yet")}
         c = conversations.chi_tiet(conv_id)
         if not c:
-            return _404()
+            return 404, {"ok": False, "error": localefmt.chu("không có hội thoại nào id đó", "no conversation with that id")}
         bot_id = str(c.get("bot_id") or "")
         if not bot_id:
-            return JSONResponse({"ok": False, "code": "no_bot", "error": localefmt.chu("Cuộc chat này không có bot trực",
-                                                                                           "No bot is on duty in this chat")}, status_code=400)
+            return 400, {"ok": False, "code": "no_bot", "error": localefmt.chu("Cuộc chat này không có bot trực",
+                                                                                           "No bot is on duty in this chat")}
         msgs = conversations.tin_nhan(conv_id, limit=30)
         send = mode == "send"
         if send:
             # Tin cuối phải là của khách: bot đã đáp (hay bạn đã đáp) rồi thì "trả lời giúp" là nói lần hai.
             if not msgs or msgs[-1].get("sender_type") != "customer":
-                return JSONResponse({"ok": False, "code": "already_answered", "error": localefmt.chu("Tin cuối không phải của khách",
-                                                                                                         "The last message is not from the customer")}, status_code=409)
+                return 409, {"ok": False, "code": "already_answered", "error": localefmt.chu("Tin cuối không phải của khách",
+                                                                                                         "The last message is not from the customer")}
             if str(c.get("mode") or "ai") != "ai":
-                return JSONResponse({"ok": False, "code": "human", "error": localefmt.chu("Bạn đang tiếp quản cuộc chat này",
-                                                                                              "You have taken over this chat")}, status_code=409)
+                return 409, {"ok": False, "code": "human", "error": localefmt.chu("Bạn đang tiếp quản cuộc chat này",
+                                                                                              "You have taken over this chat")}
             if not (_DEPS.bot_status(bot_id) or {}).get("running"):
-                return JSONResponse({"ok": False, "code": "bot_off", "error": localefmt.chu("Bot đang tắt", "The bot is off")}, status_code=409)
+                return 409, {"ok": False, "code": "bot_off", "error": localefmt.chu("Bot đang tắt", "The bot is off")}
         lenh = str(instruction or "").strip()
-        r = await (_DEPS.manual_answer(c, msgs, not send, lenh) if lenh else _DEPS.manual_answer(c, msgs, not send))
+        # `progress` only when the page streams: a caller (or a stand-in) without it keeps the old call.
+        kw = {"progress": progress} if progress else {}
+        r = await (_DEPS.manual_answer(c, msgs, not send, lenh, **kw) if lenh else _DEPS.manual_answer(c, msgs, not send, **kw))
         if not r.get("ok"):
             status = 409 if r.get("code") == "busy" else 400 if r.get("code") in ("no_bot", "no_message") else 502
-            return JSONResponse({"ok": False, "code": r.get("code") or "engine", "error": r.get("error") or localefmt.chu("Bot không soạn được", "The bot could not draft a reply")},
-                                status_code=status)
+            return status, {"ok": False, "code": r.get("code") or "engine", "error": r.get("error") or localefmt.chu("Bot không soạn được", "The bot could not draft a reply")}
         if r.get("silent"):
-            return {"ok": True, "silent": True, "text": ""}
+            return 200, {"ok": True, "silent": True, "text": ""}
         if not send:
             # Kept as the chat's waiting draft (Chatbot v5), so it survives a reload and is sent or dropped through
             # /draft like a draft the bot wrote in "drafts" mode.
             conversations.save_draft(conv_id, r["text"], conversations.last_customer_message_id(conv_id), lenh)
-            return {"ok": True, "silent": False, "text": r["text"], "draft": True,
+            return 200, {"ok": True, "silent": False, "text": r["text"], "draft": True,
                     "conversation": _detail_with_state(conv_id)}
+        if progress:
+            await progress("send")
         ok, loi = await _gui_tin(c, r["text"], tieng_vong=True, reply_to=msgs[-1])
         if not ok:
             # Không gửi được thì trả chữ đã soạn để chủ dán vào ô nhập gửi tay, khỏi mất công soạn lại.
-            return JSONResponse({"ok": False, "code": "send_failed", "error": loi or localefmt.chu("không gửi được", "could not send"), "text": r["text"]},
-                                status_code=400)
+            return 400, {"ok": False, "code": "send_failed", "error": loi or localefmt.chu("không gửi được", "could not send"), "text": r["text"]}
         done = _DEPS.manual_done(c, msgs, r["text"], r["meta"]) if _DEPS.manual_done else {}
-        return {"ok": True, "silent": False, "text": r["text"], "taught": bool((done or {}).get("taught")),
+        return 200, {"ok": True, "silent": False, "text": r["text"], "taught": bool((done or {}).get("taught")),
                 "conversation": conversations.chi_tiet(conv_id)}
 
     def _detail_with_state(conv_id: int) -> Optional[dict]:
@@ -630,9 +886,12 @@ def register(app, deps: ConversationsDeps):
         return {"ok": True, "conversation": _detail_with_state(conv_id)}
 
     @router.post("/conversations/{conv_id}/draft")
-    async def conversations_draft(conv_id: int, action: str = Form(...), text: str = Form("")):
+    async def conversations_draft(conv_id: int, action: str = Form(...), text: str = Form(""), learn: str = Form("")):
         """The A.I.'s waiting draft (Chatbot v5): `action=send` sends `text` (the owner may have edited it) as the bot's
-        reply and records it in the inbox as the bot's words; `action=discard` drops it. Both clear the stored draft."""
+        reply and records it in the inbox as the bot's words; `action=discard` drops it. Both clear the stored draft.
+
+        `learn=1` (the ticked "Bot học câu này", 2026-11-19): when the draft carried the owner's order or the owner
+        rewrote it, the sent reply joins the Agent's knowledge; the answer says `learned`."""
         c = conversations.chi_tiet(conv_id)
         if not c:
             return _404()
@@ -669,8 +928,17 @@ def register(app, deps: ConversationsDeps):
                 "sender_type": "ai", "sender_name": "Bot", "message_type": "text", "text": txt,
                 "metadata": {"tu_javis": True, "draft": True},
             })
+        learned = False
+        if str(learn).strip().lower() in ("1", "true", "on") and c.get("bot_id") and _DEPS.learn_owner:
+            dr = conversations.draft_of(c) or {}
+            try:
+                res = await asyncio.to_thread(_DEPS.learn_owner, c, msgs, txt, str(dr.get("instruction") or ""),
+                                              str(dr.get("text") or ""))
+                learned = bool((res or {}).get("learned"))
+            except Exception:      # noqa: BLE001 - the message went out; learning is extra
+                learned = False
         conversations.clear_draft(conv_id)
-        return {"ok": True, "conversation": _detail_with_state(conv_id)}
+        return {"ok": True, "learned": learned, "conversation": _detail_with_state(conv_id)}
 
     def _goc_media(c: dict) -> list:
         """Các thư mục được phép phát media của hội thoại này: inbox/ và attachments/ trong brain của bot trực nó, và

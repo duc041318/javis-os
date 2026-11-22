@@ -4,6 +4,12 @@
 // module này render nội dung: + Hội thoại mới, tìm kiếm, danh sách nhóm theo thời gian,
 // đổi tên/xoá, highlight phiên đang mở. Mở phiên qua window.JavisSessions (app.js).
 // (Thay panel trượt bên phải cũ - nút "Lịch sử" góc phải giờ mở thẳng workspace.)
+//
+// 2026-11-09 (owner, design approved as an HTML mock-up): the four icons on each row (pin, move to project, rename,
+// delete) fold into one "..." menu, the same menu as the bot inbox rows (conversations.js, classes ht-rmenu/ht-rm-*):
+// a dropdown on a wide screen, a bottom sheet on a phone; right click or a long press opens it too. It adds share,
+// export as .md, mark as unread and ARCHIVE. Archived chats leave the list but keep every message; the "Archived"
+// row pinned at the bottom of the column opens them. "Xem thêm" is gone: the list loads more by itself at its end.
 // ============================================================
 (function () {
   "use strict";
@@ -16,6 +22,65 @@
   function esc(s) { return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
   function brain() { try { return (window.JavisSessions && window.JavisSessions.brain()) || "brain"; } catch (e) { return "brain"; } }
   function currentId() { try { return (window.JavisSessions && window.JavisSessions.current()) || null; } catch (e) { return null; } }
+
+  // 0.491.0: unread chats. The server marks a chat unread when Javis answered after the owner last looked at it; the
+  // chat open on a visible screen counts as read, so its row never shows the dot and the server is told.
+  function chatOnScreen() {
+    if (document.visibilityState && document.visibilityState !== "visible") return false;
+    var area = document.getElementById("chatArea");
+    return !!(area && area.getClientRects().length);
+  }
+  // 2026-11-20 (owner): "a chat still working, already read, keeps the folder dot on; it should show only once it has
+  // finished and is unread". A running chat shows its spinner, not a dot, and the chat on screen is being read, so
+  // both are left out of every unread count the server makes (the `skip` query of /projects and the rail).
+  function isRunning(sid) { return !!(sid && window.JavisRunning && window.JavisRunning.has(sid)); }
+  // 2026-11-20 (owner: "thêm nút đánh dấu chưa đọc thì sẽ hiện lại các phần chấm đỏ, dễ kiểm soát những việc chưa hoàn
+  // thành hơn"): "Mark as unread" also works on the chat open on screen. That chat is kept unread while it stays open,
+  // so its dot shows at once, and is read again only once the owner opens another chat and comes back, or a new turn
+  // starts in it.
+  var heldUnread = null;
+  function isHeldUnread(sid) {
+    if (!heldUnread) return false;
+    if (heldUnread !== currentId() || isRunning(heldUnread)) { heldUnread = null; return false; }
+    return sid === heldUnread;
+  }
+  function unreadSkipIds() {
+    var ids = [];
+    if (window.JavisRunning) window.JavisRunning.forEach(function (id) { if (id && ids.length < 50) ids.push(String(id)); });
+    var cur = currentId();
+    if (cur && chatOnScreen() && !isHeldUnread(cur) && ids.indexOf(cur) < 0) ids.push(cur);
+    return ids;
+  }
+  function unreadSkipQuery() {
+    var ids = unreadSkipIds();
+    return ids.length ? "&skip=" + encodeURIComponent(ids.join(",")) : "";
+  }
+  // One timer per chat: a quick switch from chat A to chat B must still report A as read.
+  var readTimers = {};
+  function markRead(sid) {
+    if (!sid || readTimers[sid]) return;
+    // Several events fire for one turn; they collapse into one request.
+    readTimers[sid] = setTimeout(function () {
+      delete readTimers[sid];
+      try { fetch("/sessions/" + encodeURIComponent(sid) + "/read", { method: "POST" }).catch(function () {}); } catch (e) {}
+    }, 400);
+  }
+  function markCurrentRead() {
+    var sid = currentId();
+    if (sid && chatOnScreen() && !isHeldUnread(sid)) { markRead(sid); clearDot(sid); }
+  }
+  // Drop the dot of one chat from the rows on screen and from the cached list, without reloading.
+  function clearDot(sid) {
+    if (cached && cached.items) cached.items.forEach(function (x) { if (x.id === sid) x.unread = false; });
+    if (!listEl) return;
+    var rows = listEl.querySelectorAll(".cside-item[data-sid]");
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute("data-sid") !== sid) continue;
+      rows[i].classList.remove("has-unread");
+      var dot = rows[i].querySelector(".ci-unread");
+      if (dot && dot.parentNode) dot.parentNode.removeChild(dot);
+    }
+  }
 
   function fmtT(ts) {
     try {
@@ -73,6 +138,8 @@
   var PROJ_KEY = "javis.chatside.project";
   var projects = [];      // [{id,name,icon,session_count}] của brain đang xem
   var projBar = null;
+  var ungroupedUnread = 0; // unread chats in no project (/projects ungrouped_unread), the dot on "Chưa xếp nhóm"
+  var projectRefreshTimer = null, projectRequest = 0;
 
   function projKey() { return PROJ_KEY + "." + brain(); }
   function curProject() {
@@ -87,6 +154,43 @@
   function projById(id) {
     for (var i = 0; i < projects.length; i++) if (projects[i].id === id) return projects[i];
     return null;
+  }
+  // The selected project's unread chats already have dots in the history. Only other projects need a folder alert.
+  function projectNeedsAttention(p) {
+    return p.id !== curProject() && Number(p.unread_count) > 0;
+  }
+  // 2026-11-20 (owner): chats in no project light "Chưa xếp nhóm" the same way, so they are easy to spot.
+  function ungroupedNeedsAttention() {
+    return curProject() !== "none" && ungroupedUnread > 0;
+  }
+  function anyNeedsAttention() {
+    return ungroupedNeedsAttention() || projects.some(projectNeedsAttention);
+  }
+  function rowNeedsAttention(id) {
+    if (id === "none") return ungroupedNeedsAttention();
+    var p = projById(id);
+    return !!(p && projectNeedsAttention(p));
+  }
+  function projectUnreadHtml(unread) {
+    var label = esc(window.t("sess.proj_unread"));
+    return '<span class="cs-proj-unread" role="img" title="' + label + '" aria-label="' + label + '"' +
+      (unread ? '' : ' hidden') + '></span>';
+  }
+  function updateProjectUnread() {
+    if (projBar) {
+      var dot = projBar.querySelector(".cs-proj-unread");
+      if (dot) dot.hidden = !anyNeedsAttention();
+    }
+    // Update an open picker in place so a reply or a read in another tab never closes it or steals focus.
+    if (menuEl) menuEl.querySelectorAll("[data-unread-project]").forEach(function (row) {
+      var dot = row.querySelector(".cs-proj-unread");
+      if (dot) dot.hidden = !rowNeedsAttention(row.getAttribute("data-unread-project"));
+    });
+  }
+  function refreshProjects() {
+    if (!projBar || kenhLoc) return;
+    clearTimeout(projectRefreshTimer);
+    projectRefreshTimer = setTimeout(function () { loadProjects(); }, 150);
   }
   // Nhãn project trả về HTML (icon là thẻ <svg>, không phải ký tự) nên phần CHỮ phải tự
   // escape ở đây - tên project do người dùng gõ.
@@ -111,16 +215,39 @@
   }
 
   async function loadProjects() {
+    var requestedBrain = brain(), request = ++projectRequest;
+    var previousLabel = projLabelHtml();
     try {
-      var d = await (await fetch("/projects?brain=" + encodeURIComponent(brain()))).json();
+      var d = await (await fetch("/projects?brain=" + encodeURIComponent(requestedBrain) + unreadSkipQuery())).json();
+      if (request !== projectRequest || requestedBrain !== brain()) return;
       projects = d.projects || [];
-    } catch (e) { projects = []; }
+      ungroupedUnread = Number(d.ungrouped_unread) || 0;
+    } catch (e) { return; }
     // Project đang mở vừa bị xoá (ở tab khác, hoặc brain khác) → về "Tất cả". Không có nhát
     // này thì danh sách rỗng trơn mà người dùng không hiểu vì sao.
     var cur = curProject();
     if (cur && cur !== "none" && !projById(cur)) setCurProject("");
-    renderProjBar();
+    // Most refreshes change only unread counts. Keep the selector node, its keyboard focus and the menu anchor.
+    if (previousLabel !== projLabelHtml() || (projBar && !projBar.querySelector(".cs-proj-cur"))) renderProjBar();
     renderProjChip();
+    fillProjTags();
+    updateProjectUnread();
+  }
+
+  // 2026-11-09: each chat row carries a small folder tag with its project's name, so the owner sees which group a
+  // chat belongs to without opening it. The row is drawn before /projects may have answered, so the tag is a
+  // placeholder keyed by project id that this fills in (and refills after a rename, a new icon or a delete).
+  function projTagHtml(pid) {
+    var p = projById(pid);
+    return p ? projIcon(p) + '<span class="ci-proj-name">' + esc(p.name || "") + '</span>' : "";
+  }
+  function fillProjTags() {
+    if (!listEl) return;
+    listEl.querySelectorAll(".ci-proj[data-pid]").forEach(function (tag) {
+      var p = projById(tag.getAttribute("data-pid"));
+      tag.innerHTML = projTagHtml(tag.getAttribute("data-pid"));
+      tag.title = p ? window.t("sess.proj_tag_title", { ten: p.name || "" }) : "";
+    });
   }
 
   function renderProjBar() {
@@ -129,6 +256,7 @@
     projBar.innerHTML =
       '<button class="cs-proj-cur" type="button" title="' + esc(window.t("sess.proj_pick_title")) + '">' +
         '<span class="cs-proj-name">' + projLabelHtml() + '</span>' +
+        projectUnreadHtml(anyNeedsAttention()) +
         '<span class="cs-proj-caret">' + ic("chevron-down") + '</span>' +
       '</button>' +
       (cur ? '<button class="cs-proj-x" type="button" title="' + esc(window.t("sess.proj_clear_title")) + '">' + ic("x") + '</button>' : '') +
@@ -152,7 +280,9 @@
     var cur = curProject();
     var rows = [
       { label: window.t("sess.proj_all"), icon: "layers", on: !cur, run: function () { chonProject(""); } },
-      { label: window.t("sess.proj_none"), icon: "circle", on: cur === "none", run: function () { chonProject("none"); } },
+      // projectId "none" puts the unread dot on this row too; no real project id is ever "none" (ids are uuid hex).
+      { label: window.t("sess.proj_none"), icon: "circle", on: cur === "none", projectId: "none",
+        unread: ungroupedNeedsAttention(), run: function () { chonProject("none"); } },
     ];
     if (projects.length) rows.push({ sep: true });
     projects.forEach(function (p) {
@@ -161,6 +291,8 @@
         icon: p.icon || "folder",
         right: String(p.session_count || 0),
         on: cur === p.id,
+        projectId: p.id,
+        unread: projectNeedsAttention(p),
         run: function () { chonProject(p.id); },
         pinIcon: p.pinned ? "pin" : "",
         // MỘT nút ba chấm thay cho bốn icon hiện-khi-rê-chuột (chủ repo yêu cầu 01/09). Ba
@@ -176,7 +308,37 @@
     });
     rows.push({ sep: true });
     rows.push({ label: window.t("sess.proj_new"), run: function () { newProject(); } });
+    // 0.454.0: drag the projects into the owner's own order (reorder-dialog.js), like the brain picker.
+    if (projects.length > 1 && window.JavisReorder) {
+      rows.push({ label: window.t("reorder.menu_projects"), icon: "arrow-up-down", run: function () { reorderProjects(); } });
+    }
     openMenu(anchor, rows);
+  }
+
+  function reorderProjects() {
+    var R = window.JavisReorder, b = brain();
+    R.open({ title: window.t("reorder.title_projects"),
+      items: projects.map(function (p) { return { id: p.id, label: p.name, icon: p.icon || "folder" }; }),
+      save: function (ids) {
+        return R.post("/projects/order", { brain: b, order: JSON.stringify(ids) }).then(function (res) {
+          if (!res.ok) return (res.d && res.d.error) || window.t("reorder.save_err");
+          return Promise.resolve(loadProjects()).then(function () { return ""; });
+        });
+      } });
+  }
+
+  // 0.454.0: drag the pinned chats into the owner's own order. `pins` are the pinned rows shown in the list.
+  function reorderPins(pins) {
+    var R = window.JavisReorder;
+    R.open({ title: window.t("reorder.title_pins"),
+      items: pins.map(function (s) { return { id: s.id, label: s.title || s.preview || window.t("sess.untitled"), icon: "pin" }; }),
+      save: function (ids) {
+        return R.post("/sessions/pin-order", { order: JSON.stringify(ids) }).then(function (res) {
+          if (!res.ok) return (res.d && res.d.error) || window.t("reorder.save_err");
+          cached = null;
+          return Promise.resolve(loadList()).then(function () { return ""; });
+        });
+      } });
   }
 
   /** Hộp chức năng của MỘT project. Đi sâu vào cùng một popover (có hàng quay lại) chứ không
@@ -278,10 +440,12 @@
   var pdEl = null;                 // node ngăn kéo, dựng MỘT lần rồi gắn vào body
   var pdLuuTimer = null;
   var pdOnboard = false;           // banner chào chỉ hiện ngay sau khi tạo project
-  var pdFormFile = false, pdFileMode = "search", pdFormLink = false;
+  // pdFileMode: "search" (a file of the brain), "upload" (from this device) or "link" (paste an address). Files, folders
+  // and links share ONE list and ONE add form since 2026-11-13 (owner: gom File & Link vào 1 chỗ).
+  var pdFormFile = false, pdFileMode = "search";
   // "project" = khung của project | "cuoc" = của cuộc trò chuyện | "agent" = của MỘT trợ lý
   var pdCheDo = "project";
-  var phienProj = { sid: "", pid: "", title: "" };     // cache "phiên đang mở thuộc project nào"
+  var phienProj = { sid: "", pid: "", title: "", archived: false };     // cache "phiên đang mở thuộc project nào"
 
   function pdT(k, bien) { return (window.t ? window.t(k, bien) : k); }
 
@@ -294,23 +458,24 @@
     // project đang lọc, nên chip báo trước điều đó là đúng chứ không phải đoán.
     if (!sid) return locThat;
     if (phienProj.sid === sid) return phienProj.pid;
-    var pid = "", title = "";
+    var pid = "", title = "", archived = false;
     try {
       var r = await fetch("/sessions/" + encodeURIComponent(sid) + "/meta");
       if (r.ok) {
         var d = await r.json();
         pid = (d && d.project_id) || "";
         title = (d && d.title) || "";
+        archived = !!(d && d.archived);
       } else {
         // 404 = id đã mint ở client nhưng chưa gửi tin nào, hàng trong DB chưa tồn tại.
         pid = locThat;
       }
     } catch (e) { return locThat; }   // mạng hỏng: đừng ghi cache một câu trả lời sai
-    phienProj = { sid: sid, pid: pid, title: title };
+    phienProj = { sid: sid, pid: pid, title: title, archived: archived };
     return pid;
   }
 
-  function quenPhienProj() { phienProj = { sid: "", pid: "", title: "" }; }
+  function quenPhienProj() { phienProj = { sid: "", pid: "", title: "", archived: false }; }
 
   // ── Conversation title (0.251.0) ─────────────────────────────────────────────
   // The open conversation's name, next to the collapse button on the Chat and Code pages. It
@@ -381,8 +546,16 @@
                '<span class="pc-dot"></span>' +
              '</button>';
     }
+    // 2026-11-09: the chat on screen is archived. Say it in the title bar, with the way back to the list.
+    var sidNay = currentId();
+    if (sidNay && phienProj.sid === sidNay && phienProj.archived) {
+      html = '<button class="cs-arch-chip" type="button" title="' + esc(pdT("sess.arch_back")) + '">' + ic("archive") +
+        '<span>' + esc(pdT("sess.arch_chip")) + '</span><b>' + esc(pdT("sess.arch_back")) + '</b></button>' + html;
+    }
     hosts.forEach(function (h) {
       h.innerHTML = html;
+      var ab = h.querySelector(".cs-arch-chip");
+      if (ab) ab.onclick = function () { luuTru({ id: sidNay }, false); };
       var b = h.querySelector(".proj-chip");
       if (b) b.onclick = function () { openProjDrawer(pid); };
       var c = h.querySelector(".cts-btn:not(.cts-share)");
@@ -420,8 +593,8 @@
     if (!r.ok || !d.ok) throw new Error((d && d.error) || pdT("cts.share_fail"));
     return d;
   }
-  async function moChiaSeHoiThoai(nut) {
-    var sid = currentId();
+  async function moChiaSeHoiThoai(nut, sidMenu) {
+    var sid = sidMenu || currentId();
     if (!sid) return;
     dongChiaSe();
     var pop = el('<div class="cts-share-pop" role="dialog" aria-label="' + esc(pdT("cts.share_head")) + '">' +
@@ -503,8 +676,10 @@
             '<button class="pd-hbtn pd-ren" type="button"></button>' +
             '<button class="pd-hbtn pd-x" type="button"></button>' +
           '</div>' +
-          '<div class="pd-scope" hidden></div>' +
+          // 2026-11-16: the tabs sit ABOVE the scope switch. "Of the assistant / only this chat" is a choice inside the
+          // Documents tab; the Learned tab belongs to the assistant alone and hides the switch.
           '<div class="pd-tabs"></div>' +
+          '<div class="pd-scope" hidden></div>' +
           '<div class="pd-body"></div>' +
         '</div>' +
       '</div>');
@@ -585,6 +760,9 @@
 
   function pdLaCuoc() { return pdCheDo === "cuoc"; }
   function pdLaAgent() { return pdCheDo === "agent"; }
+  /** 2026-11-15: a project and an assistant also list GitHub repos, which every chat of theirs gets on its own branch.
+   *  A plain chat picks its repos in the composer (github-connect.js), so its drawer has no repo part. */
+  function pdCoRepo() { return pdCheDo === "project" || pdCheDo === "agent"; }
   function pdDuLieu() { return pdLaCuoc() ? cuocTS : pdLaAgent() ? agentTS : projChiTiet; }
 
   /** Gốc URL của thứ đang mở. Ba chế độ có ba bộ route giống hệt nhau về hình dạng
@@ -626,18 +804,28 @@
 
   function tabsHienTai() {
     var p = pdDuLieu() || {};
-    var tabFile = { k: "files", ico: "file-text", nhan: pdT("proj.tab_files"), n: (p.files || []).length };
-    var tabLink = { k: "links", ico: "link", nhan: pdT("proj.tab_links"), n: (p.links || []).length };
+    // Files, folders and links in ONE tab (owner 13/11/2026: "gom File & Link vào 1 chỗ để tiết kiệm diện tích"); each
+    // row's icon tells them apart.
+    var tabDocs = { k: "files", ico: "files", nhan: pdT("proj.tab_docs"),
+                    n: (p.files || []).length + (p.links || []).length + (pdCoRepo() ? (p.repos || []).length : 0) };
     // Hướng dẫn chỉ có ở project. Trợ lý đã có system prompt riêng trong trình sửa của nó,
     // bày thêm một ô hướng dẫn ở đây là hai chỗ nói cùng một việc.
-    if (pdLaCuoc() || pdLaAgent()) return [tabFile, tabLink];
-    return [{ k: "instr", ico: "scroll-text", nhan: pdT("proj.tab_instr"), n: 0 }, tabFile, tabLink];
+    // 2026-11-16 (owner): an assistant also has a Learned tab, what it learnt while working. Opened from the Cộng sự
+    // page it stays there on both scopes: the lessons belong to the assistant, whichever documents scope is showing.
+    if (laHocTroLy()) return [tabDocs, { k: "learned", ico: "brain", nhan: pdT("proj.tab_learned"), n: soBaiHoc() }];
+    if (pdLaCuoc() || pdLaAgent()) return [tabDocs];
+    // 2026-11-13: what Javis learnt about the project while working in it. Right after the instructions: both are
+    // context that rides on every turn, one written by the owner and one mostly by Javis.
+    var tabLearned = { k: "learned", ico: "brain", nhan: pdT("proj.tab_learned"), n: (p.notes || []).length };
+    return [{ k: "instr", ico: "scroll-text", nhan: pdT("proj.tab_instr"), n: 0 }, tabLearned, tabDocs];
   }
 
   function veThanhTab() {
     var ds = tabsHienTai();
     if (ds.map(function (t) { return t.k; }).indexOf(projTab) < 0) projTab = ds[0].k;
     var host = pdEl.querySelector(".pd-tabs");
+    // A chat and an assistant have only the documents tab: a bar with one tab is a row of space that says nothing.
+    host.style.display = ds.length > 1 ? "" : "none";
     host.innerHTML = ds.map(function (t) {
       return '<button class="pd-tab' + (t.k === projTab ? " on" : "") + '" data-tab="' + t.k +
              '" type="button">' + ic(t.ico) + " " + esc(t.nhan) +
@@ -654,10 +842,11 @@
     pdDung();
     if (!giuCongSu) pdCongSu = null;
     pdCheDo = "cuoc";
+    resetListViews();       // a new drawer starts on page one, with no search left over
     pdOnboard = false;
     // Reset y như openProjDrawer: form tìm/tải còn mở từ lần trước là mở khung ra đã thấy
     // một ô nhập lạ, không rõ nó thuộc về cái gì.
-    pdFormFile = false; pdFormLink = false; pdFileMode = "search";
+    pdFormFile = false; pdFileMode = "search";
     pdEl.classList.add("on");
     document.body.classList.add("pd-open");
     cuocTS = { files: [], links: [], dangTai: true };
@@ -693,14 +882,16 @@
     pdDung();
     if (!giuCongSu) pdCongSu = null;
     pdCheDo = "agent";
+    resetListViews();       // a new drawer starts on page one, with no search left over
     pdOnboard = false;
-    pdFormFile = false; pdFormLink = false; pdFileMode = "search";
+    pdFormFile = false; pdFileMode = "search";
     // Trợ lý không có tab Hướng dẫn, mà projTab có thể còn đứng ở "instr" từ lần mở project
     // trước. veThanhTab() tự nắn lại, nhưng nắn SAU khi veDrawer đã vẽ thân theo tab cũ.
     projTab = "files";
     pdEl.classList.add("on");
     document.body.classList.add("pd-open");
     agentTS = { slug: slug, name: ten || slug, files: [], links: [], dangTai: true };
+    napHocVaVe(slug);
     veDrawer();
     await napAgentTS(slug, ten);
     veDrawer();
@@ -713,7 +904,7 @@
       var d = await (await fetch("/agents/" + encodeURIComponent(slug) + "/assets?brain=" +
                                  encodeURIComponent(brain()))).json();
       agentTS = (d && d.ok)
-        ? { slug: slug, name: d.name || co.name, files: d.files || [], links: d.links || [] }
+        ? { slug: slug, name: d.name || co.name, files: d.files || [], links: d.links || [], repos: d.repos || [] }
         : { slug: slug, name: co.name, files: [], links: [], loi: true };
     } catch (e) { agentTS = { slug: slug, name: co.name, files: [], links: [], loi: true }; }
   }
@@ -751,6 +942,9 @@
   async function openTaiLieuCongSu(slug, ten, phamVi) {
     if (!slug) return;
     pdCongSu = { slug: slug, name: ten || slug };
+    projTab = "files";        // the button opens on the documents; a tab left over from a project must not win
+    if (!agentHoc || agentHoc.slug !== slug) agentHoc = null;
+    napHocVaVe(slug);
     var pv = phamVi || phamViDaNho();
     if (pv === "cuoc" && !currentId()) pv = "agent";   // chưa có cuộc thì chưa có chỗ gắn
     // Nạp phạm vi KIA song song để công tắc hiện đúng số ngay từ đầu.
@@ -778,7 +972,7 @@
     if (!pdEl) return;
     var host = pdEl.querySelector(".pd-scope");
     if (!host) return;
-    if (!pdCongSu || !(pdLaAgent() || pdLaCuoc())) { host.hidden = true; host.innerHTML = ""; return; }
+    if (!pdCongSu || !(pdLaAgent() || pdLaCuoc()) || projTab === "learned") { host.hidden = true; host.innerHTML = ""; return; }
     host.hidden = false;
     var coCuoc = !!currentId();
     var nut = function (pv, ico, nhan, phu, n, tat) {
@@ -806,7 +1000,8 @@
     pdDung();
     pdCheDo = "project";
     pdCongSu = null;      // project không có công tắc phạm vi của trang Cộng sự
-    pdFormFile = false; pdFormLink = false; pdFileMode = "search";
+    resetListViews();       // a new drawer starts on page one, with no search left over
+    pdFormFile = false; pdFileMode = "search";
     pdEl.classList.add("on");
     document.body.classList.add("pd-open");
     projChiTiet = { id: id, name: (projById(id) || {}).name || "", icon: (projById(id) || {}).icon || "", files: [], links: [], instructions: "", dangTai: true };
@@ -836,9 +1031,10 @@
 
   function showProjTab(tab) {
     xaLuuHuongDan();              // rời tab cũng là rời ô nhập
-    projTab = (tab === "files" || tab === "links") ? tab
+    // "links" was its own tab before 2026-11-13; it is the documents tab now.
+    projTab = (tab === "files" || tab === "links") ? "files" : tab === "learned" ? "learned"
             : (pdCheDo === "cuoc" ? "files" : "instr");
-    pdFormFile = false; pdFormLink = false;
+    pdFormFile = false;
     veDrawer();
   }
 
@@ -857,26 +1053,27 @@
     if (pdCongSu) pdEl.querySelector(".pd-ico").innerHTML = ic("bot");
     pdEl.querySelector(".pd-name").textContent = pdCongSu ? pdCongSu.name
       : laCuoc ? pdT("cts.title") : (p.name || "");
-    veThanhPhamVi();
     // Đổi tên chỉ có nghĩa với project. Cuộc trò chuyện đổi tên ở cột trái, trợ lý đổi tên
     // trong trình sửa của nó; bày lại ở đây là hai chỗ làm cùng một việc.
     pdEl.querySelector(".pd-ren").style.display = (laCuoc || pdLaAgent()) ? "none" : "";
     veThanhTab();
+    veThanhPhamVi();          // after the tab bar: it settles projTab, and the Learned tab hides the switch
     veNutGhimPhien();
     var body = pdEl.querySelector(".pd-body");
-    if (p.dangTai) { body.innerHTML = '<div class="pd-empty">' + esc(pdT("proj.loading")) + "…</div>"; return; }
+    if (projTab === "learned" && laHocTroLy()) { body.innerHTML = paneHocTroLy(); wireHocTroLy(); return; }
+    if (p.dangTai) { body.innerHTML = '<div class="pd-empty pg-loading">' + esc(pdT("proj.loading")) + "…</div>"; return; }
     if (p.loi) { body.innerHTML = '<div class="pd-empty">' + esc(pdT(pdK("err_load"))) + "</div>"; return; }
     body.innerHTML =
       (pdOnboard
         ? '<div class="pd-onboard">' + ic("sparkles") + "<span>" + esc(pdT("proj.onboard")) + "</span>" +
           '<button class="pd-ob-x" type="button">' + esc(pdT("proj.onboard_close")) + "</button></div>"
         : "") +
-      (projTab === "instr" ? paneHuongDan(p) : projTab === "files" ? paneFile(p) : paneLink(p));
+      (projTab === "learned" ? paneLearned(p) : projTab === "instr" ? paneHuongDan(p) : paneFile(p));
     var obx = body.querySelector(".pd-ob-x");
     if (obx) obx.onclick = function () { pdOnboard = false; veDrawer(); };
     if (projTab === "instr") noiHuongDan();
-    else if (projTab === "files") noiFile();
-    else noiLink();
+    else if (projTab === "learned") wireLearned();
+    else noiFile();
   }
 
   // Nút ghim ở đầu ngăn kéo ghim HỘI THOẠI đang mở lên đầu danh sách - đó là chức năng ghim
@@ -969,6 +1166,444 @@
     }
   }
 
+  // ── Long lists in the drawer: search and pages (2026-11-19) ─────────────────
+  // Owner, 19/11/2026: "thêm phân trang giúp anh ở tài liệu và đã học nếu mà nó quá nhiều, hiển thị đẹp hơn". A project
+  // worked in for a while holds dozens of learned notes and documents, and the drawer became one long scroll. House rule
+  // for a long list (docs/dev/design-style.md, section 5): 20 rows a page, with a search box. The box shows from
+  // LIST_FIND_MIN rows up; the page buttons only when there is more than one page. Search ignores Vietnamese marks, so
+  // "su that" finds "sự thật".
+  var LIST_PAGE = 20;
+  var LIST_FIND_MIN = 10;
+  var listState = {};
+  function listView(key) { return listState[key] || (listState[key] = { page: 0, q: "", kind: "" }); }
+  function resetListViews() { listState = {}; }
+
+  /** Which rows page `page` shows out of `total`, the page pulled back into range (a removal can empty the last one). */
+  function pageSlice(total, page, size) {
+    size = size || LIST_PAGE;
+    var pages = Math.max(1, Math.ceil(total / size));
+    var p = Math.min(Math.max(0, page || 0), pages - 1);
+    return { page: p, pages: pages, from: p * size, to: Math.min(total, (p + 1) * size) };
+  }
+  function foldText(s) {
+    var v = String(s == null ? "" : s).toLowerCase();
+    try { v = v.normalize("NFD").replace(/[̀-ͯ]/g, ""); } catch (e) {}
+    return v.replace(/\u0111/g, "d");
+  }
+  /** Every word of the query appears somewhere in the row's text. */
+  function matchesQuery(q, parts) {
+    var words = foldText(q).trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return true;
+    var hay = foldText((parts || []).join(" "));
+    return words.every(function (w) { return hay.indexOf(w) >= 0; });
+  }
+
+  function pagerHtml(sl) {
+    if (sl.pages <= 1) return "";
+    return '<div class="pd-pager">' +
+      '<button class="pd-pg" type="button" data-step="-1" title="' + esc(pdT("proj.page_prev")) + '" aria-label="' +
+        esc(pdT("proj.page_prev")) + '"' + (sl.page > 0 ? "" : " disabled") + ">" + ic("chevron-left") + "</button>" +
+      '<span class="pd-pg-n">' + esc(pdT("proj.page_of", { page: sl.page + 1, pages: sl.pages })) + "</span>" +
+      '<button class="pd-pg" type="button" data-step="1" title="' + esc(pdT("proj.page_next")) + '" aria-label="' +
+        esc(pdT("proj.page_next")) + '"' + (sl.page < sl.pages - 1 ? "" : " disabled") + ">" + ic("chevron-right") + "</button>" +
+      "</div>";
+  }
+  function findShown(key, total) { return total >= LIST_FIND_MIN || !!listView(key).q; }
+  function findHtml(key, total, placeholder) {
+    return '<label class="pd-find"' + (findShown(key, total) ? "" : " hidden") + ">" + ic("search") +
+      '<input class="pd-find-in" type="search" enterkeyhint="search" value="' + esc(listView(key).q) + '" placeholder="' +
+        esc(placeholder) + '" aria-label="' + esc(placeholder) + '"></label>';
+  }
+  /** The row above a list: the search box (when the list is long) and the add button. The add button sits up here,
+   *  not under the list, so adding never means scrolling past twenty rows first. */
+  function listToolsHtml(find, add) { return '<div class="pd-ltools">' + find + add + "</div>"; }
+  /** Show or hide the search box after a redraw: an add or a removal can cross the LIST_FIND_MIN line. */
+  function syncFind(pane, key, total) {
+    var box = pane && pane.querySelector(".pd-find");
+    if (box) box.hidden = !findShown(key, total);
+  }
+  function wireListTools(pane, key, redraw) {
+    var inp = pane.querySelector(".pd-find-in");
+    if (inp) inp.oninput = function () { var v = listView(key); v.q = inp.value; v.page = 0; redraw(); };
+    pane.querySelectorAll(".pd-pg").forEach(function (b) {
+      b.onclick = function () {
+        listView(key).page += Number(b.dataset.step) || 0;
+        redraw();
+        var body = pdEl && pdEl.querySelector(".pd-body");
+        if (body) body.scrollTop = 0;
+      };
+    });
+  }
+  function noMatchHtml() { return '<div class="pd-empty">' + esc(pdT("proj.find_none")) + "</div>"; }
+
+  /** The one roomy box for writing or fixing a short text (text-edit-dialog.js). Falls back to prompt() only if the
+   *  script did not load, so editing never disappears. */
+  function editText(o) {
+    var E = window.JavisTextEdit;
+    if (E && E.open) return E.open(o);
+    var text = prompt(o.title, o.value || "");
+    if (text == null) return Promise.resolve(false);
+    return Promise.resolve(o.save(text.trim(), o.kind || "")).then(function (err) {
+      if (err) alert(err);
+      return !err;
+    });
+  }
+  function errText(prefix, r) { return pdT(prefix) + ((r && r.error) ? ": " + r.error : ""); }
+
+  // ── Tab "Đã học" (2026-11-13) ────────────────────────────────────────────────
+  // What Javis learnt about the project while working in it: short notes (a fact, a settled decision, a term).
+  // Javis writes most of them itself (tool javis_project); here the owner reads, edits, removes and adds. A note the
+  // owner writes or edits becomes theirs: listed first and never dropped to make room.
+  // 2026-11-19: 20 notes a page with a search box and a filter by kind; the text shows up to four lines and a tap opens
+  // it whole in the edit box; adding and editing use that same box instead of an inline form and prompt().
+  var NOTE_KINDS = ["fact", "decision", "term"];
+  // Whole dictionary keys, never a key built from a prefix: a key the source does not spell out cannot be checked
+  // against vi.json and en.json.
+  var NOTE_KIND_KEY = { fact: "proj.kind_fact", decision: "proj.kind_decision", term: "proj.kind_term" };
+  var PROJ_NOTE_MAX = 300;
+  var ASSET_DESC_MAX = 200;   // sessions.PROJECT_ASSET_NOTE_MAX and agent_assets.DESCRIPTION_MAX
+
+  function noteKinds() {
+    return NOTE_KINDS.map(function (k) { return { value: k, label: pdT(NOTE_KIND_KEY[k]) }; });
+  }
+  function noteKindOf(n) { return NOTE_KINDS.indexOf(n.kind) >= 0 ? n.kind : "fact"; }
+  function sortedNotes(p) {
+    return ((p || {}).notes || []).slice().sort(function (a, b) {
+      if ((a.source === "owner") !== (b.source === "owner")) return a.source === "owner" ? -1 : 1;
+      return (b.created_at || 0) - (a.created_at || 0);
+    });
+  }
+
+  /** One learned row, shared by the project notes and the assistant lessons: the text (tap to open it whole in the
+   *  edit box), a meta line, a pencil and an x. */
+  function learnedRowHtml(id, textHtml, metaHtml, editTitle, removeTitle) {
+    return '<div class="pd-nrow" data-id="' + esc(id) + '">' +
+        '<span class="pd-nbody" title="' + esc(editTitle) + '">' +
+          '<span class="pd-ntext">' + textHtml + "</span>" +
+          '<span class="pd-nmeta">' + metaHtml + "</span>" +
+        "</span>" +
+        '<button class="pd-row-act pd-nedit" type="button" title="' + esc(editTitle) + '" aria-label="' + esc(editTitle) + '">' +
+          ic("pencil") + "</button>" +
+        '<button class="pd-row-act pd-go pd-ndel" type="button" title="' + esc(removeTitle) + '" aria-label="' +
+          esc(removeTitle) + '">' + ic("x") + "</button>" +
+      "</div>";
+  }
+
+  /** The kind chips above the notes: All, then each kind with its count. Only when the notes hold two kinds or more. */
+  function noteChipsHtml(notes) {
+    var v = listView("learned");
+    var counts = {};
+    notes.forEach(function (n) { var k = noteKindOf(n); counts[k] = (counts[k] || 0) + 1; });
+    var used = NOTE_KINDS.filter(function (k) { return counts[k]; });
+    if (used.length < 2 && !v.kind) return "";
+    var chip = function (k, label, n) {
+      var on = (v.kind || "") === k;
+      return '<button class="pd-chip' + (on ? " on" : "") + (k ? " k-" + k : "") + '" type="button" data-kind="' + k +
+        '" aria-pressed="' + on + '">' + esc(label) + ' <span class="pd-chip-n">' + n + "</span></button>";
+    };
+    return '<div class="pd-chips" role="group">' + chip("", pdT("proj.kind_all"), notes.length) +
+      used.map(function (k) { return chip(k, pdT(NOTE_KIND_KEY[k]), counts[k]); }).join("") + "</div>";
+  }
+
+  function noteRowsHtml(p) {
+    var notes = sortedNotes(p);
+    if (!notes.length) return '<div class="pd-empty">' + esc(pdT("proj.learned_empty")) + "</div>";
+    var v = listView("learned");
+    if (v.kind && !notes.some(function (n) { return noteKindOf(n) === v.kind; })) v.kind = "";
+    var shown = notes.filter(function (n) {
+      return (!v.kind || noteKindOf(n) === v.kind) && matchesQuery(v.q, [n.text]);
+    });
+    var sl = pageSlice(shown.length, v.page);
+    v.page = sl.page;
+    return noteChipsHtml(notes) +
+      (shown.length ? shown.slice(sl.from, sl.to).map(function (n) {
+        var kind = noteKindOf(n);
+        return learnedRowHtml(n.id, esc(n.text),
+          '<span class="pd-ntag k-' + kind + '">' + esc(pdT(NOTE_KIND_KEY[kind])) + "</span>" +
+          '<span class="pd-nsrc' + (n.source === "owner" ? " own" : "") + '">' +
+            esc(pdT(n.source === "owner" ? "proj.src_owner" : "proj.src_javis")) + "</span>",
+          pdT("proj.note_edit"), pdT("proj.note_remove"));
+      }).join("") : noMatchHtml()) +
+      pagerHtml(sl);
+  }
+
+  function paneLearned(p) {
+    var info = window.JavisInfo;
+    var explain = esc(pdT("proj.learned_info"));
+    return '<div class="pd-pane" data-pane="learned">' +
+      '<div class="pd-learn-head"><span class="pd-hint">' + esc(pdT("proj.learned_hint")) + "</span>" +
+        (info ? info.btn(pdT("info.more")) : "") + "</div>" +
+      (info ? info.body(explain) : '<div class="pd-note">' + ic("info") + "<span>" + explain + "</span></div>") +
+      listToolsHtml(findHtml("learned", (p.notes || []).length, pdT("proj.find_notes")),
+        '<button class="pd-add pd-nadd" type="button">' + ic("plus") + " " + esc(pdT("proj.note_add")) + "</button>") +
+      '<div class="pd-list">' + noteRowsHtml(p) + "</div>" +
+      '<div class="pd-fmsg pd-nmsg" role="status" hidden></div>' +
+      "</div>";
+  }
+
+  function noteMsg(text) {
+    var box = pdEl && pdEl.querySelector(".pd-nmsg");
+    if (!box) return;
+    box.hidden = !text;
+    box.className = "pd-fmsg pd-nmsg" + (text ? " loi" : "");
+    box.textContent = text || "";
+  }
+
+  /** Redraw only the list, its tools and the tab counts, from what is already loaded: the search box keeps its focus. */
+  function redrawLearned() {
+    var pane = pdEl && pdEl.querySelector('[data-pane="learned"]');
+    var box = pane && pane.querySelector(".pd-list");
+    if (!box) { veDrawer(); return; }
+    if (laHocTroLy()) {
+      var h = hocHienTai();
+      if (!h || h.loi) { veDrawer(); return; }
+      box.innerHTML = hocRowsHtml(h);
+      syncFind(pane, "learned", h.lessons.length);
+      wireHocRows(pane);
+    } else {
+      if (!projChiTiet) { veDrawer(); return; }
+      box.innerHTML = noteRowsHtml(projChiTiet);
+      syncFind(pane, "learned", (projChiTiet.notes || []).length);
+      wireNoteRows(pane);
+    }
+    wireListTools(box, "learned", redrawLearned);
+    veSoTab();
+  }
+
+  /** Reload the project, then redraw the list. */
+  async function reloadNotes() {
+    await napProjChiTiet((projChiTiet || {}).id || "");
+    redrawLearned();
+  }
+
+  function wireNoteRows(pane) {
+    var notes = (projChiTiet || {}).notes || [];
+    pane.querySelectorAll(".pd-nrow").forEach(function (row) {
+      var n = notes.filter(function (x) { return x.id === row.dataset.id; })[0];
+      if (!n) return;
+      row.querySelector(".pd-nbody").onclick = function () { editNote(n); };
+      row.querySelector(".pd-nedit").onclick = function () { editNote(n); };
+      row.querySelector(".pd-ndel").onclick = function () { removeNote(n); };
+    });
+    pane.querySelectorAll(".pd-chip").forEach(function (b) {
+      b.onclick = function () { var v = listView("learned"); v.kind = b.dataset.kind || ""; v.page = 0; redrawLearned(); };
+    });
+  }
+
+  function wireLearned() {
+    var pane = pdEl.querySelector('[data-pane="learned"]');
+    if (!pane) return;
+    wireNoteRows(pane);
+    wireListTools(pane, "learned", redrawLearned);
+    pane.querySelector(".pd-nadd").onclick = function () { addNote(); };
+  }
+
+  function noteUrl(suffix) {
+    return "/projects/" + encodeURIComponent((projChiTiet || {}).id || "") + "/notes" + (suffix || "");
+  }
+
+  async function addNote() {
+    var v = listView("learned");
+    var saved = await editText({
+      title: pdT("proj.note_add"), value: "", max: PROJ_NOTE_MAX, placeholder: pdT("proj.note_ph"),
+      kinds: noteKinds(), kind: v.kind || "fact", kindLabel: pdT("proj.note_kind"), saveLabel: pdT("proj.add"),
+      save: async function (text, kind) {
+        var r = await post(noteUrl(""), { text: text, kind: kind || "fact" });
+        return r && r.ok ? "" : errText("proj.err_note", r);
+      },
+    });
+    if (!saved) return;
+    // The new note is the owner's, so it sits at the top of the list: show page one, with no search hiding it.
+    v.page = 0; v.q = "";
+    var inp = pdEl && pdEl.querySelector('[data-pane="learned"] .pd-find-in');
+    if (inp) inp.value = "";
+    noteMsg("");
+    await reloadNotes();
+  }
+
+  async function editNote(n) {
+    var saved = await editText({
+      title: pdT("proj.note_edit"), value: n.text || "", max: PROJ_NOTE_MAX, placeholder: pdT("proj.note_ph"),
+      kinds: noteKinds(), kind: noteKindOf(n), kindLabel: pdT("proj.note_kind"),
+      save: async function (text, kind) {
+        var fields = { text: text };
+        if (kind && kind !== noteKindOf(n)) fields.kind = kind;
+        var r = await post(noteUrl("/" + encodeURIComponent(n.id) + "/update"), fields);
+        return r && r.ok ? "" : errText("proj.err_note", r);
+      },
+    });
+    if (!saved) return;
+    noteMsg("");
+    await reloadNotes();
+  }
+
+  async function removeNote(n) {
+    if (!confirm(pdT("proj.confirm_remove_note"))) return;
+    await post(noteUrl("/" + encodeURIComponent(n.id) + "/delete"), {});
+    await reloadNotes();
+  }
+
+  // ── Tab "Đã học" of an ASSISTANT (2026-11-16) ─────────────────────────────────
+  // Owner, 16/11/2026: bring the project's self-learning into the Cộng sự page. An assistant already learns lessons on
+  // its own (JAVIS_LESSON); this tab shows the ones it uses and lets the owner edit, remove and add, like the project
+  // tab above. The server reads the same store the prompt reads (server/agent_learned.py), so the list is what the
+  // assistant really uses. No scopes to pick and no promote button: that is what the owner removed in 0.190.0.
+  // 2026-11-19: same pages, search and edit box as the project tab.
+  var agentHoc = null;       // {slug, lessons, loi} of the assistant whose Learned tab is showing
+  var hocDangNap = null;     // {slug, p}: one load per assistant at a time
+  var AGENT_LESSON_MAX = 300;
+  var HOC_WHERE_KEY = { all: "ags.where_all", dm: "ags.where_dm", team: "ags.where_team" };
+  var HOC_SRC_KEY = { owner: "ags.src_owner", learnt: "ags.src_learnt", legacy: "ags.src_legacy" };
+
+  /** The drawer is about an assistant: its own drawer, or a chat of it opened from the Cộng sự page. */
+  function laHocTroLy() { return pdLaAgent() || (pdLaCuoc() && !!pdCongSu); }
+  function slugHoc() { return pdLaAgent() ? ((agentTS || {}).slug || "") : pdCongSu ? pdCongSu.slug : ""; }
+  function hocHienTai() { return agentHoc && agentHoc.slug === slugHoc() ? agentHoc : null; }
+  function soBaiHoc() { var h = hocHienTai(); return h && !h.loi ? h.lessons.length : 0; }
+
+  function napHoc(slug) {
+    if (hocDangNap && hocDangNap.slug === slug) return hocDangNap.p;
+    var p = (async function () {
+      var out;
+      try {
+        var d = await (await fetch("/agents/" + encodeURIComponent(slug) + "/learned?brain=" +
+                                   encodeURIComponent(brain()))).json();
+        out = (d && d.ok) ? { slug: slug, lessons: d.lessons || [] } : { slug: slug, lessons: [], loi: true };
+      } catch (e) { out = { slug: slug, lessons: [], loi: true }; }
+      agentHoc = out;
+      if (hocDangNap && hocDangNap.p === p) hocDangNap = null;
+    })();
+    hocDangNap = { slug: slug, p: p };
+    return p;
+  }
+
+  /** Load the lessons in the background; then the tab count, and the list when the tab is open, follow. */
+  function napHocVaVe(slug) {
+    if (!slug) return;
+    napHoc(slug).then(function () {
+      if (!pdEl || slugHoc() !== slug || !laHocTroLy()) return;
+      if (projTab === "learned") veDrawer(); else veSoTab();
+    });
+  }
+
+  function hocRowsHtml(h) {
+    if (!h.lessons.length) return '<div class="pd-empty">' + esc(pdT("ags.learned_empty")) + "</div>";
+    var v = listView("learned");
+    var shown = h.lessons.filter(function (n) { return matchesQuery(v.q, [n.text]); });
+    var sl = pageSlice(shown.length, v.page);
+    v.page = sl.page;
+    if (!shown.length) return noMatchHtml();
+    return shown.slice(sl.from, sl.to).map(function (n) {
+      var meta = '<span class="pd-nsrc' + (n.source === "owner" ? " own" : "") + '">' +
+        esc(pdT(HOC_SRC_KEY[n.source] || "ags.src_learnt")) + "</span>" +
+        (n.source === "legacy" ? "" : '<span class="pd-nsrc">' + esc(pdT(HOC_WHERE_KEY[n.where] || "ags.where_all")) + "</span>");
+      return learnedRowHtml(n.id, esc(n.text), meta, pdT("ags.lesson_edit"), pdT("ags.lesson_remove"));
+    }).join("") + pagerHtml(sl);
+  }
+
+  function paneHocTroLy() {
+    var h = hocHienTai();
+    if (!h) return '<div class="pd-empty pg-loading">' + esc(pdT("proj.loading")) + "…</div>";
+    if (h.loi) return '<div class="pd-empty">' + esc(pdT("ags.err_learned")) + "</div>";
+    var info = window.JavisInfo;
+    var explain = esc(pdT("ags.learned_info"));
+    return '<div class="pd-pane" data-pane="learned">' +
+      '<div class="pd-learn-head"><span class="pd-hint">' + esc(pdT("ags.learned_hint")) + "</span>" +
+        (info ? info.btn(pdT("info.more")) : "") + "</div>" +
+      (info ? info.body(explain) : '<div class="pd-note">' + ic("info") + "<span>" + explain + "</span></div>") +
+      listToolsHtml(findHtml("learned", h.lessons.length, pdT("proj.find_notes")),
+        '<button class="pd-add pd-nadd" type="button">' + ic("plus") + " " + esc(pdT("ags.lesson_add")) + "</button>") +
+      '<div class="pd-list">' + hocRowsHtml(h) + "</div>" +
+      '<div class="pd-fmsg pd-nmsg" role="status" hidden></div>' +
+      "</div>";
+  }
+
+  function wireHocRows(pane) {
+    var h = hocHienTai();
+    if (!h) return;
+    pane.querySelectorAll(".pd-nrow").forEach(function (row) {
+      var n = h.lessons.filter(function (x) { return x.id === row.dataset.id; })[0];
+      if (!n) return;
+      row.querySelector(".pd-nbody").onclick = function () { suaBaiHoc(n); };
+      row.querySelector(".pd-nedit").onclick = function () { suaBaiHoc(n); };
+      row.querySelector(".pd-ndel").onclick = function () { xoaBaiHoc(n); };
+    });
+  }
+
+  function wireHocTroLy() {
+    var pane = pdEl.querySelector('[data-pane="learned"]');
+    if (!pane) return;
+    wireHocRows(pane);
+    wireListTools(pane, "learned", redrawLearned);
+    pane.querySelector(".pd-nadd").onclick = function () { themBaiHoc(); };
+  }
+
+  function hocUrl(suffix) { return "/agents/" + encodeURIComponent(slugHoc()) + "/learned" + (suffix || ""); }
+  function hocLoi(r) { noteMsg(errText("ags.err_lesson", r)); }
+
+  /** Reload, then redraw only the list and the tab count. */
+  async function napLaiHoc() {
+    await napHoc(slugHoc());
+    redrawLearned();
+  }
+
+  async function themBaiHoc() {
+    var saved = await editText({
+      title: pdT("ags.lesson_add"), value: "", max: AGENT_LESSON_MAX, placeholder: pdT("ags.lesson_ph"),
+      saveLabel: pdT("proj.add"),
+      save: async function (text) {
+        var r = await post(hocUrl(""), { text: text, brain: brain() });
+        return r && r.ok ? "" : errText("ags.err_lesson", r);
+      },
+    });
+    if (!saved) return;
+    var v = listView("learned");
+    v.page = 0; v.q = "";
+    var inp = pdEl && pdEl.querySelector('[data-pane="learned"] .pd-find-in');
+    if (inp) inp.value = "";
+    noteMsg("");
+    await napLaiHoc();
+  }
+
+  async function suaBaiHoc(n) {
+    var saved = await editText({
+      title: pdT("ags.lesson_edit"), value: n.text || "", max: AGENT_LESSON_MAX, placeholder: pdT("ags.lesson_ph"),
+      save: async function (text) {
+        var r = await post(hocUrl("/" + encodeURIComponent(n.id) + "/update"), { text: text, brain: brain() });
+        return r && r.ok ? "" : errText("ags.err_lesson", r);
+      },
+    });
+    if (!saved) return;
+    noteMsg("");
+    await napLaiHoc();
+  }
+
+  async function xoaBaiHoc(n) {
+    if (!confirm(pdT("ags.confirm_remove_lesson"))) return;
+    var r = await post(hocUrl("/" + encodeURIComponent(n.id) + "/delete"), { brain: brain() });
+    if (!r || !r.ok) { hocLoi(r); return; }
+    await napLaiHoc();
+  }
+
+  /** One line saying what an attached file or link holds. Javis writes it when it attaches or reads the document;
+   *  the owner can write or fix it here, in the same edit box as a note. Empty removes it. A project and an assistant
+   *  keep one; a plain chat does not. */
+  async function editAssetDescription(m, isFile) {
+    var saved = await editText({
+      title: pdT("proj.desc_edit"), value: m.description || "", max: ASSET_DESC_MAX, placeholder: pdT("proj.desc_ph"),
+      hint: m.label || m.name || m.url || m.path || "", allowEmpty: true,
+      save: async function (text) {
+        // pdApi() + "/describe": /projects/<id>/describe or /agents/<slug>/assets/describe (pdPost adds the brain).
+        var r = await pdPost("/describe", { kind: isFile ? "file" : "link", ref: isFile ? m.path : m.url,
+                                           description: text });
+        return r && r.ok ? "" : errText("proj.err_desc", r);
+      },
+    });
+    if (!saved) return;
+    await napLaiChiTiet();
+    veLaiDanhSach();
+  }
+
   // ── Tab File ─────────────────────────────────────────────────────────────────
   // Trả về TÊN icon, không phải chuỗi <svg>: chỗ gọi lo dữ liệu, chỗ vẽ mới gọi ic().
   function icoFile(ten) {
@@ -977,6 +1612,11 @@
     if (["md", "txt", "csv", "json", "yaml", "yml", "log"].indexOf(e) >= 0) return "file-text";
     return "file";
   }
+
+  // 2026-11-12 (owner: "chọn được cả thư mục"): a row whose stored path ends in "/" is a whole folder. The server
+  // marks the rows of a chat with `dir`; project and agent rows come back as stored, so the slash is read here.
+  function isFolderRow(f) { return !!(f && (f.dir || /\/$/.test(String(f.path || "")))); }
+  function folderPath(p) { return String(p == null ? "" : p).replace(/\/+$/, "") + "/"; }
 
   /** Nút CHÉP ĐƯỜNG DẪN của một hàng. Có ở MỌI hàng, kể cả hàng tự dò và hàng file đã mất:
    *  chủ dự án hay cần đúng chuỗi đường dẫn để dán sang chỗ khác làm tiếp, và với file đã đổi
@@ -1006,7 +1646,8 @@
         nutSao(o) +
       "</div>";
     }
-    return '<div class="pd-row' + (o.mat ? " mat" : "") + '" data-id="' + esc(o.id) + '">' +
+    return '<div class="pd-row' + (o.mat ? " mat" : "") + '" data-id="' + esc(o.id) + '" data-kind="' +
+        (o.kind === "link" ? "link" : "file") + '">' +
         '<span class="pd-row-ico">' + ic(o.icon) + "</span>" +
         // File: cả khối tên+đường dẫn là NÚT mở. Bấm vào tên một tài liệu mà không mở được nó
         // ra đọc là phản xạ bị phụ - danh sách này chính là chỗ người ta đi tìm tài liệu.
@@ -1014,12 +1655,17 @@
         // <button> là HTML sai và trình duyệt nuốt mất cú bấm vào link.
         (o.moDuoc
           ? '<button class="pd-row-body mo-duoc" type="button" title="' +
-              esc(pdT("proj.open_file")) + '">'
+              esc(o.moTitle || pdT("proj.open_file")) + '">'
           : '<span class="pd-row-body">') +
           '<span class="pd-row-name">' + esc(o.ten) + "</span>" +
           '<span class="pd-row-sub">' + (o.subHtml || esc(o.sub || "")) + "</span>" +
+          (o.desc ? '<span class="pd-row-desc">' + esc(o.desc) + "</span>" : "") +
         (o.moDuoc ? "</button>" : "</span>") +
         nutSao(o) +
+        (o.descEditable
+          ? '<button class="pd-row-act pd-desc' + (o.desc ? " on" : "") + '" type="button" title="' +
+              esc(pdT("proj.desc_edit")) + '">' + ic("pencil") + "</button>"
+          : "") +
         '<button class="pd-row-act pd-ghim' + (o.pinned ? " on" : "") + '" type="button" title="' +
           esc(o.pinned ? pdT("proj.pin_off") : o.ghimTitle) + '">' + ic("pin") + "</button>" +
         '<button class="pd-row-act pd-go" type="button" title="' + esc(pdT(pdK("remove"))) + '">' +
@@ -1038,6 +1684,7 @@
    *  dưới khung chat (app.js reopenPinnedNote): trình sửa đính -> khung sửa bung giữa màn
    *  (điện thoại) -> trang Tệp tin. */
   function moFile(f) {
+    if (isFolderRow(f)) { openFolderRow(f); return; }
     var ten = f.name || String(f.path || "").split("/").pop();
     closeProjDrawer();          // trình sửa hiện ra SAU ngăn kéo, không đóng thì che mất
     try {
@@ -1047,45 +1694,190 @@
     if (typeof window.JavisOpenFiles === "function") window.JavisOpenFiles(f.path);
   }
 
+  /** A folder row opens on the Files page. That page takes a path relative to the BRAIN root, while project and agent
+   *  rows are stored relative to the browse ceiling, which may sit above the brain (localhost): the brain's own
+   *  prefix (`home` of /files/list) is taken off first. Chat rows already carry `brain_path`. */
+  async function openFolderRow(f) {
+    var duong = String(f.brain_path || f.path || "");
+    closeProjDrawer();
+    if (!f.brain_path) {
+      try {
+        var d = await (await fetch("/files/list?brain=" + encodeURIComponent(brain()))).json();
+        var home = d && d.home ? String(d.home).replace(/\/+$/, "") + "/" : "";
+        if (home && duong.indexOf(home) === 0) duong = duong.slice(home.length);
+      } catch (e) {}
+    }
+    if (typeof window.JavisOpenFiles === "function") window.JavisOpenFiles(folderPath(duong));
+  }
+
+  function linkAnchor(l) {
+    return '<a href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">' + esc(l.url) + "</a>";
+  }
+
+  /** Files, folders and links in ONE list (owner 13/11/2026: "gom File & Link vào 1 chỗ để tiết kiệm diện tích ... chỉ
+   *  cần có biểu tượng riêng để phân biệt file, link, folder"). Pinned rows first, then the rest, files before links
+   *  inside each group; in a chat, what Javis spotted in the messages comes last. */
   function dsFileHtml(p) {
-    var fs = p.files || [];
+    var fs = p.files || [], ls = p.links || [];
     var laCuoc = pdLaCuoc();
-    // Chế độ cuộc: file người dùng GẮN TAY (có id) đứng trên, file Javis tự dò ra đứng dưới.
-    // Thứ mình chủ động gắn vào thì phải nằm chỗ mắt nhìn trước, và chỉ nó mới có nút.
-    var tuDong = laCuoc ? fs.filter(function (f) { return !f.manual; }) : [];
-    var tay = laCuoc ? fs.filter(function (f) { return f.manual; }) : fs;
-    var ghim = tay.filter(function (f) { return f.pinned; });
-    var thuong = tay.filter(function (f) { return !f.pinned; });
-    var ve = function (f) {
+    // A one-line description (what the document holds) reaches the prompt of a project and of an assistant, so only
+    // there can it be written. A plain chat keeps none.
+    var descOk = pdCheDo === "project" || pdCheDo === "agent";
+    // Chế độ cuộc: thứ người dùng GẮN TAY (có id) đứng trên, thứ Javis tự dò ra đứng dưới.
+    var tay = function (x) { return !laCuoc || x.manual; };
+    var veFile = function (f) {
       // Ở chế độ cuộc, file đã dời/đổi tên vẫn ở lại danh sách - chỉ mờ đi và nói rõ. Im lặng
       // bỏ đi thì người dùng tưởng thao tác gắn của mình bị nuốt.
       var con = !laCuoc || f.exists !== false;
-      return hangMuc({ id: f.id, ten: f.label || f.name || f.path,
+      var dir = isFolderRow(f);
+      return hangMuc({ id: f.id, kind: "file", ten: f.label || f.name || f.path,
                        sub: con ? (laCuoc ? (f.brain_path || f.path) : f.path) : pdT("cts.file_gone"),
                        // Chép đường dẫn TRONG BRAIN (brain_path), không phải đường dẫn tuyệt
-                       // đối trên máy chủ: đó mới là chuỗi mọi nơi khác của Javis nhận vào
-                       // (chat, wikilink, tool đọc file).
+                       // đối trên máy chủ: đó mới là chuỗi mọi nơi khác của Javis nhận vào.
                        sao: f.brain_path || f.path,
-                       icon: f.image ? "image" : icoFile(f.name || f.path), pinned: !!f.pinned,
-                       ghimTitle: pdT("proj.pin_on"), moDuoc: con, xoaDuoc: con, mat: !con });
+                       // A folder: its own icon, a pin that loads its file list, and NO "delete from the brain"
+                       // button: one tap here must never remove a whole folder from disk.
+                       icon: dir ? "folder" : f.image ? "image" : icoFile(f.name || f.path), pinned: !!f.pinned,
+                       ghimTitle: pdT(dir ? "proj.pin_on_dir" : "proj.pin_on"),
+                       moTitle: dir ? pdT("proj.open_dir") : "",
+                       desc: f.description || "", descEditable: descOk,
+                       moDuoc: con, xoaDuoc: con && !dir, mat: !con });
     };
-    var veTuDong = function (f) {
+    var veLink = function (l) {
+      return hangMuc({ id: l.id, kind: "link", ten: l.label || l.url, icon: "link", pinned: !!l.pinned,
+                       ghimTitle: pdT("proj.pin_link_on"), subHtml: linkAnchor(l),
+                       desc: l.description || "", descEditable: descOk,
+                       sao: l.url, saoTitle: pdT("common.copy_link") });
+    };
+    var veTuDongFile = function (f) {
       return hangMuc({ tuDong: true, duong: f.path, ten: f.label || f.name,
                        sub: f.exists ? f.brain_path : pdT("cts.file_gone"),
                        sao: f.brain_path || f.path,
                        icon: f.image ? "image" : icoFile(f.name),
                        moDuoc: !!f.exists, mat: !f.exists });
     };
-    if (!fs.length) return '<div class="pd-empty">' + esc(pdT(pdK("files_empty"))) + "</div>";
-    var ds = "";
-    if (ghim.length) ds += nhomHtml(pdT("proj.pinned_group")) + ghim.map(ve).join("");
-    if (thuong.length) ds += (ghim.length || laCuoc
-      ? nhomHtml(pdT(laCuoc ? "cts.added_group" : "proj.other_group")) : "") + thuong.map(ve).join("");
-    if (tuDong.length) ds += nhomHtml(pdT("cts.auto_group")) + tuDong.map(veTuDong).join("");
-    return ds;
+    var veTuDongLink = function (l) {
+      return hangMuc({ tuDong: true, icon: "link", tenHtml: linkAnchor(l),
+                       sub: l.vai === "user" ? pdT("cts.from_you") : pdT("cts.from_javis"),
+                       sao: l.url, saoTitle: pdT("common.copy_link") });
+    };
+    var v = listView("files");
+    var repoHtml = dsRepoHtml(p);
+    if (!fs.length && !ls.length) return repoHtml || '<div class="pd-empty">' + esc(pdT(pdK("files_empty"))) + "</div>";
+    // Every row in display order, each with the group it sits in. The search and the page cut this ONE list, and a
+    // group's title is drawn again at the top of a page that starts inside it, so page two still says what it shows.
+    var fileWords = function (f) { return [f.label, f.name, f.path, f.brain_path, f.description]; };
+    var linkWords = function (l) { return [l.label, l.url, l.description]; };
+    var hang = fs.filter(tay).map(function (f) {
+      return { id: f.id, pinned: !!f.pinned, words: fileWords(f), html: function () { return veFile(f); } };
+    }).concat(ls.filter(tay).map(function (l) {
+      return { id: l.id, pinned: !!l.pinned, words: linkWords(l), html: function () { return veLink(l); } };
+    }));
+    var ghim = hang.filter(function (h) { return h.pinned; });
+    var thuong = hang.filter(function (h) { return !h.pinned; });
+    var nhomThuong = ghim.length || laCuoc ? pdT(laCuoc ? "cts.added_group" : "proj.other_group") : "";
+    var all = ghim.map(function (h) { h.group = pdT("proj.pinned_group"); return h; })
+      .concat(thuong.map(function (h) { h.group = nhomThuong; return h; }))
+      .concat(fs.filter(function (f) { return !tay(f); }).map(function (f) {
+        return { group: pdT("cts.auto_group"), words: fileWords(f), html: function () { return veTuDongFile(f); } };
+      }))
+      .concat(ls.filter(function (l) { return !tay(l); }).map(function (l) {
+        return { group: pdT("cts.auto_group"), words: linkWords(l), html: function () { return veTuDongLink(l); } };
+      }));
+    var shown = all.filter(function (h) { return matchesQuery(v.q, h.words); });
+    fileOrder = shown.map(function (h) { return h.id || ""; });
+    var sl = pageSlice(shown.length, v.page);
+    v.page = sl.page;
+    if (!shown.length) return repoHtml || noMatchHtml();
+    var ds = "", nhom = null;
+    shown.slice(sl.from, sl.to).forEach(function (h) {
+      if (h.group !== nhom) { nhom = h.group; if (nhom) ds += nhomHtml(nhom); }
+      ds += h.html();
+    });
+    return (sl.page === 0 ? repoHtml : "") + ds + pagerHtml(sl);
+  }
+
+  /** Ids of the document rows the search lets through, in display order: nhayHang turns to the page of a row. */
+  var fileOrder = [];
+  function fileCount(p) {
+    p = p || {};
+    return (p.files || []).length + (p.links || []).length;
   }
 
   function nhomHtml(nhan) { return '<div class="pd-group">' + esc(nhan) + "</div>"; }
+
+  // ── GitHub repos of a project or an assistant (2026-11-15) ───────────────────
+  // Owner: "ở chức năng project cũng có khả năng thêm repo để dễ dàng tạo các dự án code, hoặc cả trong tài liệu của
+  // agent". The list sits on top of the documents; each chat of the project (or with the assistant) gets every repo
+  // on its next turn, on the chat's own branch (server: github_repos.seed_session). The picker is the Team chat's one
+  // (team-github.js), saving to `<pdApi()>/repos` instead of a chat.
+  function repoLogo() {
+    var G = window.JavisGithubRepos;
+    return G && G.logo ? G.logo : ic("git-branch");
+  }
+  function repoNames(p) { return ((p || {}).repos || []).map(function (r) { return r.full_name; }).filter(Boolean); }
+
+  function dsRepoHtml(p) {
+    // The documents search also filters the repos, so a query never leaves an unrelated repo on top.
+    var q = listView("files").q;
+    var names = (pdCoRepo() ? repoNames(p) : []).filter(function (n) { return matchesQuery(q, [n]); });
+    if (!names.length) return "";
+    return nhomHtml(pdT("proj.repos_group")) + names.map(function (n) {
+      var parts = String(n).split("/");
+      return '<div class="pd-row pd-repo-row" data-kind="repo" data-repo="' + esc(n) + '">' +
+        '<span class="pd-row-ico">' + repoLogo() + "</span>" +
+        '<span class="pd-row-body"><span class="pd-row-name">' + esc(parts[1] || n) + "</span>" +
+          '<span class="pd-row-sub">' + esc(parts[0]) + "</span></span>" +
+        '<button class="pd-row-act pd-go pd-repo-x" type="button" title="' + esc(pdT(pdK("repo_remove"))) + '">' +
+          ic("x") + "</button></div>";
+    }).join("");
+  }
+
+  /** Save the repo list of the project or assistant on screen. Returns the server's answer. */
+  async function luuRepos(names) {
+    var r = await pdPost("/repos", { repos: (names || []).join(",") });
+    // post() answers {error} on a network failure and a 404 has no `ok`: both are failures for the picker, which
+    // only treats `ok === false` as one.
+    if (!r || !r.ok) return { ok: false, error: (r && r.error) || "" };
+    var p = pdDuLieu();
+    if (p) p.repos = r.repos || [];
+    return r;
+  }
+
+  function noiRepo(pane) {
+    pane.querySelectorAll(".pd-repo-x").forEach(function (b) {
+      b.onclick = async function () {
+        var row = b.closest(".pd-repo-row"), n = row && row.dataset.repo;
+        if (!n) return;
+        b.disabled = true;
+        var r = await luuRepos(repoNames(pdDuLieu()).filter(function (x) { return x !== n; }));
+        if (!r || !r.ok) { b.disabled = false; alert(pdT("proj.err_repo") + ((r && r.error) ? ": " + r.error : "")); return; }
+        // The picker, when open, keeps its own ticks: redraw it so the repo just removed is unticked there too.
+        veDrawer();
+      };
+    });
+  }
+
+  async function moRepoPicker(pane) {
+    var box = pane.querySelector(".pd-repo-box");
+    if (!box) return;
+    // team-github.js rides in the lazy "teams" group (nap-cham.js): the chat page may not have it yet.
+    if (!window.JavisTeamGithub && window.JavisNapCham) {
+      box.innerHTML = '<div class="pd-empty pg-loading">' + esc(pdT("proj.loading")) + "…</div>";
+      try { await window.JavisNapCham.cho("teams"); } catch (e) {}
+    }
+    if (!box.isConnected) return;
+    if (!window.JavisTeamGithub) { box.innerHTML = '<div class="pd-empty">' + esc(pdT("proj.err_repo")) + "</div>"; return; }
+    window.JavisTeamGithub.panel(box, {
+      brain: brain,
+      current: function () { return repoNames(pdDuLieu()); },
+      save: luuRepos,
+      // Only the list above and the tab count: redrawing the whole drawer would rebuild the picker under the finger.
+      changed: function () { veLaiDanhSach(); },
+      close: function () { pdFormFile = false; veDrawer(); },
+      connections: function () { try { window.Alpine.store("nav").go("mcp"); } catch (e) { location.hash = "#p=mcp"; } },
+    });
+  }
 
   /** Có hàng nào GHIM được không (tức là có nút ghim để mà giải thích)? Chế độ cuộc lúc chưa
    *  gắn gì thì chưa có, và bày sẵn chú thích ghim ở đó là hai đoạn chữ nhỏ chồng nhau ngay
@@ -1100,9 +1892,10 @@
     // form tìm kiếm dựng lại từ đầu: mất chữ đã gõ, mất kết quả, muốn thêm file thứ hai phải
     // gõ lại từ đầu - đúng lỗi chủ repo báo 01/09.
     return '<div class="pd-pane" data-pane="files">' +
-      '<div class="pd-list">' + dsFileHtml(p) + "</div>" +
-      '<button class="pd-add" type="button">' + ic("plus") + " " + esc(pdT("proj.add_file")) + "</button>" +
+      listToolsHtml(findHtml("files", fileCount(p), pdT("proj.find_docs")),
+        '<button class="pd-add" type="button">' + ic("plus") + " " + esc(pdT("proj.add_doc")) + "</button>") +
       (pdFormFile ? formFile() : "") +
+      '<div class="pd-list">' + dsFileHtml(p) + "</div>" +
       (coGhimDuoc(p)
         ? '<div class="pd-note">' + ic("info") + "<span>" + esc(pdT(pdK("pin_note"))) + "</span></div>"
         : "") +
@@ -1114,21 +1907,19 @@
   function veLaiDanhSach() {
     var p = pdDuLieu();
     if (!pdEl || !p) return;
-    var pane = pdEl.querySelector('[data-pane="files"], [data-pane="links"]');
+    var pane = pdEl.querySelector('[data-pane="files"]');
     var box = pane && pane.querySelector(".pd-list");
     if (!box) { veDrawer(); return; }
-    var laFile = pane.dataset.pane === "files";
-    box.innerHTML = laFile ? dsFileHtml(p) : dsLinkHtml(p);
-    noiHang(pane, laFile);
+    box.innerHTML = dsFileHtml(p);
+    syncFind(pane, "files", fileCount(p));
+    noiHang(pane);
+    wireListTools(box, "files", veLaiDanhSach);
     veSoTab();
   }
 
   function veSoTab() {
-    var p = pdDuLieu() || {};
-    // Chỉ project có tab Hướng dẫn đứng đầu, nên bảng đếm phải lệch đi một ô cho khớp thứ
-    // tự tab (xem tabsHienTai).
-    var dem = (pdLaCuoc() || pdLaAgent()) ? [(p.files || []).length, (p.links || []).length]
-                                          : ["", (p.files || []).length, (p.links || []).length];
+    // The counts come from the tab list itself (tabsHienTai), so a new tab cannot shift them out of place.
+    var dem = tabsHienTai().map(function (t) { return t.n || ""; });
     pdEl.querySelectorAll(".pd-tab").forEach(function (b, i) {
       var n = b.querySelector(".pd-tab-n");
       if (!dem[i]) { if (n) n.remove(); return; }
@@ -1138,9 +1929,12 @@
   }
 
   /** Gắn hành vi cho từng hàng trong danh sách. Dùng chung cho lần vẽ đầu và mọi lần vẽ lại. */
-  function noiHang(pane, laFile) {
+  function noiHang(pane) {
     var p = pdDuLieu() || {};
+    noiRepo(pane);
     pane.querySelectorAll(".pd-row").forEach(function (row) {
+      if (row.dataset.kind === "repo") return;       // wired by noiRepo
+      var laFile = row.dataset.kind !== "link";
       // Nút chép nối TRƯỚC nhánh rẽ bên dưới: hàng tự dò cũng có nút này, mà nhánh đó thoát
       // sớm nên nối sau là hàng tự dò có nút bấm không ăn.
       var sao = row.querySelector(".pd-sao");
@@ -1159,6 +1953,8 @@
       if (!m) return;
       var moBtn = row.querySelector(".pd-row-body.mo-duoc");
       if (moBtn) moBtn.onclick = function () { moFile(m); };
+      var descBtn = row.querySelector(".pd-desc");
+      if (descBtn) descBtn.onclick = function () { editAssetDescription(m, laFile); };
       row.querySelector(".pd-ghim").onclick = function () { laFile ? ghimFile(m) : ghimLink(m); };
       row.querySelector(".pd-go").onclick = function () { laFile ? goFile(m) : goLink(m); };
       var xoa = row.querySelector(".pd-xoa");
@@ -1168,15 +1964,33 @@
 
   function formFile() {
     return '<div class="pd-form">' +
-      '<div class="pd-modes">' +
+      '<div class="pd-modes' + (pdCoRepo() ? " four" : "") + '">' +
         '<button class="pd-mode' + (pdFileMode === "search" ? " on" : "") + '" data-mode="search" type="button">' +
           ic("search") + " " + esc(pdT("proj.mode_search")) + "</button>" +
         '<button class="pd-mode' + (pdFileMode === "upload" ? " on" : "") + '" data-mode="upload" type="button">' +
           ic("upload-cloud") + " " + esc(pdT("proj.mode_upload")) + "</button>" +
+        '<button class="pd-mode' + (pdFileMode === "link" ? " on" : "") + '" data-mode="link" type="button">' +
+          ic("link") + " " + esc(pdT("proj.mode_link")) + "</button>" +
+        (pdCoRepo()
+          ? '<button class="pd-mode' + (pdFileMode === "repo" ? " on" : "") + '" data-mode="repo" type="button">' +
+              repoLogo() + " " + esc(pdT("proj.mode_repo")) + "</button>"
+          : "") +
       "</div>" +
-      (pdFileMode === "search"
+      (pdFileMode === "repo" && pdCoRepo()
+        ? '<div class="pd-repo-box"></div>' +
+          '<div class="pd-note pd-up-note">' + ic("info") + "<span>" + esc(pdT(pdK("repo_note"))) + "</span></div>"
+        : pdFileMode === "search"
         ? '<input class="pd-in pd-fsearch" placeholder="' + esc(pdT("proj.search_ph")) + '">' +
           '<div class="pd-results"><div class="pd-empty">' + esc(pdT("proj.search_hint")) + "</div></div>"
+        : pdFileMode === "link"
+        ? '<input class="pd-in pd-lurl" placeholder="' + esc(pdT("proj.link_url_ph")) + '">' +
+          '<input class="pd-in pd-llabel" placeholder="' + esc(pdT("proj.link_label_ph")) + '">' +
+          '<div class="pd-fmsg" role="status" hidden></div>' +
+          '<div class="pd-frow">' +
+            '<button class="pd-ok" type="button">' + esc(pdT("proj.add")) + "</button>" +
+            '<button class="pd-huy" type="button">' + esc(pdT("proj.cancel")) + "</button>" +
+          "</div>" +
+          '<div class="pd-note pd-up-note">' + ic("info") + "<span>" + esc(pdT("proj.link_note")) + "</span></div>"
         : '<input type="file" class="pd-file" multiple hidden>' +
           '<button class="pd-drop" type="button">' + ic("upload-cloud") + " " + esc(pdT("proj.dropzone")) + "</button>" +
           '<div class="pd-note pd-up-note">' + ic("info") + "<span>" + esc(pdT("proj.upload_dest")) + "</span></div>") +
@@ -1187,10 +2001,13 @@
     var pane = pdEl.querySelector('[data-pane="files"]');
     if (!pane) return;
     pane.querySelector(".pd-add").onclick = function () { pdFormFile = !pdFormFile; veDrawer(); };
-    noiHang(pane, true);
+    noiHang(pane);
+    wireListTools(pane, "files", veLaiDanhSach);
     pane.querySelectorAll(".pd-mode").forEach(function (b) {
       b.onclick = function () { pdFileMode = b.dataset.mode; veDrawer(); };
     });
+    if (pdFormFile && pdFileMode === "repo" && pdCoRepo()) moRepoPicker(pane);
+    noiFormLink(pane);
     var o = pane.querySelector(".pd-fsearch");
     if (o) {
       o.focus();
@@ -1221,15 +2038,19 @@
     box.innerHTML = '<div class="pd-empty">' + esc(pdT("proj.searching")) + "…</div>";
     var items = [];
     try {
+      // include_dirs (2026-11-12): folders whose name matches are offered too, so a whole folder can be added.
       var d = await (await fetch("/files/search?brain=" + encodeURIComponent(brain()) +
-                                 "&mode=name&limit=20&q=" + encodeURIComponent(q))).json();
+                                 "&mode=name&include_dirs=true&limit=20&q=" + encodeURIComponent(q))).json();
       items = d.items || [];
     } catch (e) {}
     if (!items.length) { box.innerHTML = '<div class="pd-empty">' + esc(pdT("proj.search_none")) + "</div>"; return; }
     box.innerHTML = items.map(function (it) {
-      return '<div class="pd-res" data-path="' + esc(it.path) + '" data-name="' + esc(it.name) + '">' +
-        '<span class="pd-res-ico">' + ic(icoFile(it.name)) + "</span>" +
-        '<span class="pd-res-n"><b>' + esc(it.name) + "</b><i>" + esc(it.path) + "</i></span>" +
+      // A folder goes by its path with a trailing "/": the same spelling the server stores, so the Add / Remove
+      // button below finds the row again.
+      var dir = it.type === "dir", duong = dir ? folderPath(it.path) : it.path;
+      return '<div class="pd-res" data-path="' + esc(duong) + '" data-name="' + esc(it.name) + '">' +
+        '<span class="pd-res-ico">' + ic(dir ? "folder" : icoFile(it.name)) + "</span>" +
+        '<span class="pd-res-n"><b>' + esc(it.name) + "</b><i>" + esc(duong) + "</i></span>" +
         '<button class="pd-res-add" type="button"></button></div>';
     }).join("");
     veNutKetQua();
@@ -1360,64 +2181,15 @@
     veLaiDanhSach();
   }
 
-  // ── Tab Link ─────────────────────────────────────────────────────────────────
-  function dsLinkHtml(p) {
-    var ls = p.links || [];
-    var laCuoc = pdLaCuoc();
-    var tuDong = laCuoc ? ls.filter(function (l) { return !l.manual; }) : [];
-    var tay = laCuoc ? ls.filter(function (l) { return l.manual; }) : ls;
-    var aHtml = function (l) {
-      return '<a href="' + esc(l.url) + '" target="_blank" rel="noopener noreferrer">' +
-             esc(l.url) + "</a>";
-    };
-    var ve = function (l) {
-      return hangMuc({ id: l.id, ten: l.label || l.url, icon: "link", pinned: !!l.pinned,
-                       ghimTitle: pdT("proj.pin_link_on"), subHtml: aHtml(l),
-                       sao: l.url, saoTitle: pdT("common.copy_link") });
-    };
-    var veTuDong = function (l) {
-      return hangMuc({ tuDong: true, icon: "link", tenHtml: aHtml(l),
-                       sub: l.vai === "user" ? pdT("cts.from_you") : pdT("cts.from_javis"),
-                       sao: l.url, saoTitle: pdT("common.copy_link") });
-    };
-    if (!ls.length) return '<div class="pd-empty">' + esc(pdT(pdK("links_empty"))) + "</div>";
-    var ds = "";
-    if (tay.length) ds += (laCuoc ? nhomHtml(pdT("cts.added_group")) : "") + tay.map(ve).join("");
-    if (tuDong.length) ds += nhomHtml(pdT("cts.auto_links_group")) + tuDong.map(veTuDong).join("");
-    return ds;
-  }
-
-  function paneLink(p) {
-    return '<div class="pd-pane" data-pane="links">' +
-      '<div class="pd-list">' + dsLinkHtml(p) + "</div>" +
-      '<button class="pd-add" type="button">' + ic("plus") + " " + esc(pdT("proj.add_link")) + "</button>" +
-      (pdFormLink
-        ? '<div class="pd-form">' +
-            '<input class="pd-in pd-lurl" placeholder="' + esc(pdT("proj.link_url_ph")) + '">' +
-            '<input class="pd-in pd-llabel" placeholder="' + esc(pdT("proj.link_label_ph")) + '">' +
-            '<div class="pd-fmsg" role="status" hidden></div>' +
-            '<div class="pd-frow">' +
-              '<button class="pd-ok" type="button">' + esc(pdT("proj.add")) + "</button>" +
-              '<button class="pd-huy" type="button">' + esc(pdT("proj.cancel")) + "</button>" +
-            "</div></div>"
-        : "") +
-      '<div class="pd-note">' + ic("info") + "<span>" + esc(pdT("proj.link_note")) + "</span></div>" +
-      ghiChuCuoi() +
-      "</div>";
-  }
-
-  function noiLink() {
-    var pane = pdEl.querySelector('[data-pane="links"]');
-    if (!pane) return;
-    pane.querySelector(".pd-add").onclick = function () { pdFormLink = !pdFormLink; veDrawer(); };
-    noiHang(pane, false);
+  // ── Link: one of the three ways into the documents list (2026-11-13) ─────────────
+  function noiFormLink(pane) {
     var u = pane.querySelector(".pd-lurl");
     if (!u) return;
     u.focus();
     var lb = pane.querySelector(".pd-llabel");
     var them = function () { themLink(u.value, lb.value); };
     pane.querySelector(".pd-ok").onclick = them;
-    pane.querySelector(".pd-huy").onclick = function () { pdFormLink = false; veDrawer(); };
+    pane.querySelector(".pd-huy").onclick = function () { pdFormFile = false; veDrawer(); };
     [u, lb].forEach(function (o) {
       o.onkeydown = function (e) { if (e.key === "Enter") { e.preventDefault(); them(); } };
       o.oninput = function () { baoFormLink(""); };
@@ -1428,7 +2200,7 @@
    *  đều không hiện gì hoặc chỉ một hộp alert: bấm "Thêm" thấy ô URL trống trơn, danh sách
    *  y nguyên, người dùng tưởng nút hỏng (chủ repo báo 25/10). */
   function baoFormLink(chu, loi) {
-    var m = pdEl && pdEl.querySelector('[data-pane="links"] .pd-fmsg');
+    var m = pdEl && pdEl.querySelector('[data-pane="files"] .pd-fmsg');
     if (!m) return;
     m.textContent = chu || "";
     m.hidden = !chu;
@@ -1444,7 +2216,22 @@
   }
 
   function nhayHang(id) {
-    var row = pdEl && pdEl.querySelector('[data-pane="links"] .pd-row[data-id="' + id + '"]');
+    var row = pdEl && pdEl.querySelector('[data-pane="files"] .pd-row[data-id="' + id + '"]');
+    if (!row && id) {
+      // The row sits on another page, or the search hides it: clear the search, turn to its page, then light it up.
+      var v = listView("files");
+      if (fileOrder.indexOf(id) < 0 && v.q) {
+        v.q = "";
+        var inp = pdEl.querySelector('[data-pane="files"] .pd-find-in');
+        if (inp) inp.value = "";
+        veLaiDanhSach();
+      }
+      var at = fileOrder.indexOf(id);
+      if (at < 0) return;
+      v.page = Math.floor(at / LIST_PAGE);
+      veLaiDanhSach();
+      row = pdEl.querySelector('[data-pane="files"] .pd-row[data-id="' + id + '"]');
+    }
     if (!row) return;
     row.classList.remove("nhay");
     void row.offsetWidth;          // khởi động lại animation khi bấm lần nữa
@@ -1454,7 +2241,7 @@
 
   async function themLink(url, nhan) {
     var u = chuanHoaUrl((url || "").trim());
-    var pane = pdEl && pdEl.querySelector('[data-pane="links"]');
+    var pane = pdEl && pdEl.querySelector('[data-pane="files"]');
     var o = pane && pane.querySelector(".pd-lurl");
     if (!u) { baoFormLink(pdT("proj.link_need_url"), true); if (o) o.focus(); return; }
     var co = ((pdDuLieu() || {}).links || []).filter(function (l) { return l.manual !== false && l.url === u; })[0];
@@ -1470,7 +2257,7 @@
     // Giữ form và dọn ô trống thay vì đóng lại: dán link thứ hai là chuyện thường, cùng lý do
     // với ô tìm file. Con trỏ về ô URL để dán tiếp là xong.
     veLaiDanhSach();
-    var pane = pdEl.querySelector('[data-pane="links"]');
+    var pane = pdEl.querySelector('[data-pane="files"]');
     var u = pane && pane.querySelector(".pd-lurl");
     var lb = pane && pane.querySelector(".pd-llabel");
     if (u) { u.value = ""; u.focus(); }
@@ -1517,7 +2304,8 @@
       if (r.sep) { menuEl.appendChild(el('<div class="cs-menu-sep"></div>')); return; }
       // r.icon là TÊN icon Lucide, đi qua iconHtml (thẻ <svg>); r.label là chữ nên phải escape.
       var iHtml = r.icon ? iconHtml(r.icon) : "";
-      var row = el('<div class="cs-menu-row' + (r.on ? " on" : "") + '">' +
+      var row = el('<div class="cs-menu-row' + (r.on ? " on" : "") + '"' +
+        (r.projectId ? ' data-unread-project="' + esc(r.projectId) + '"' : '') + '>' +
         '<button class="cs-menu-main" type="button">' +
         (iHtml ? '<span class="cs-menu-ico">' + iHtml + '</span>' : '') +
         '<span class="cs-menu-lbl' + (r.wrap ? " nhieu-dong" : "") + '">' + esc(r.label) + '</span>' +
@@ -1525,6 +2313,7 @@
         // chuột). Ghim mà chỉ thấy được lúc rê chuột thì nhìn danh sách không biết vì sao
         // thứ tự lại như vậy.
         (r.pinIcon ? '<span class="cs-menu-pin">' + ic(r.pinIcon) + '</span>' : '') +
+        (r.projectId ? projectUnreadHtml(r.unread) : '') +
         (r.right ? '<span class="cs-menu-right">' + esc(r.right) + '</span>' : '') + '</button>' +
         '<span class="cs-menu-acts"></span></div>');
       row.querySelector(".cs-menu-main").onclick = function () { closeMenu(); r.run(); };
@@ -1606,16 +2395,21 @@
   // NGAY từ cache (fetch mới vẫn chạy nền đè lên sau) - trước đây mở panel mới bắt đầu
   // debounce 150ms + fetch nên user thấy "Đang tải…" delay rõ.
   var cached = null;   // {brain, items}
+  // 2026-11-09: the column shows the archived chats instead of the list (the "Archived" row at its bottom), and how many
+  // there are (every /sessions answer carries `archived_count`).
+  var archView = false, archCount = 0;
 
   async function fetchList() {
-    var b = brain(), p = kenhLoc ? "" : curProject();
+    var b = brain(), p = kenhLoc ? "" : curProject(), arch = archView;
     var r = await fetch("/sessions?brain=" + encodeURIComponent(b) + "&limit=" + (shown + 1) +
                         (p ? "&project=" + encodeURIComponent(p) : "") +
-                        (kenhLoc ? "&channel=" + encodeURIComponent(kenhLoc) + (kenhLoc.indexOf("agent:") === 0 ? "&bots=1" : "") : ""));
+                        (kenhLoc ? "&channel=" + encodeURIComponent(kenhLoc) + (kenhLoc.indexOf("agent:") === 0 ? "&bots=1" : "") : "") +
+                        (arch ? "&archived=1" : "") + "&unread_first=1");
     var data = await r.json();
+    archCount = Number(data.archived_count) || 0;
     // `kenh` nằm trong khoá cache: thiếu nó thì lần mở trang Cộng sự kế tiếp vẽ tạm bằng danh
     // sách hội thoại thường của trang Trò chuyện, rồi mới thay - một nhịp nháy nội dung sai.
-    cached = { brain: b, project: p, kenh: kenhLoc, items: data.sessions || [] };
+    cached = { brain: b, project: p, kenh: kenhLoc, arch: arch, items: data.sessions || [] };
     return cached;
   }
 
@@ -1634,6 +2428,7 @@
     var o = opts || {};
     side = container;
     shown = PAGE;
+    archView = false;
     lastBrain = brain();
     kenhLoc = o.kenh || "";
     hamTaoMoi = typeof o.onNew === "function" ? o.onNew : null;
@@ -1650,6 +2445,8 @@
           '<div class="cside-list"></div>' +
         '</div>';
       listEl = side.querySelector(".cside-list");
+      ganTaiTruoc(listEl);
+      ganChanLuuTru();
       searchEl = side.querySelector(".cside-search");
       projBar = null;
       cayEl = null;
@@ -1675,6 +2472,8 @@
       '</div>' +
       '<div class="cside-pane" data-pane="files"></div>';
     listEl = side.querySelector(".cside-list");
+    ganTaiTruoc(listEl);
+    ganChanLuuTru();
     searchEl = side.querySelector(".cside-search");
     projBar = side.querySelector(".cside-proj");
     cayEl = side.querySelector('[data-pane="files"]');
@@ -1731,17 +2530,19 @@
   function refresh() {
     if (!side) return;
     var b = brain();
+    var changedBrain = b !== lastBrain;
     if (b !== lastBrain) {
-      lastBrain = b; shown = PAGE;
+      lastBrain = b; shown = PAGE; archView = false;
       // Project gắn theo brain, nên đổi brain là danh sách project đổi theo. Không nạp lại thì
       // thanh trên đầu còn treo tên project của brain cũ mà bộ lọc lại đang trỏ vào id lạ.
-      if (projBar) { renderProjBar(); loadProjects(); }
+      if (projBar) { projects = []; renderProjBar(); loadProjects(); }
       // Cây Vault tự dựng lại khi đổi brain (console.js theo dõi #graphSource), nên ở đây
       // không phải làm gì thêm - đó chính là cái lợi của việc mượn node thay vì nuôi bản hai.
     }
     // debounce nhẹ: response + notifySessions có thể bắn sát nhau
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(function () {
+      if (projBar && !kenhLoc && !changedBrain) loadProjects();
       var q = searchEl && searchEl.value.trim();
       q ? doSearch(q) : loadList();
     }, 150);
@@ -1756,6 +2557,42 @@
     if (page) page.classList.remove("side-open");
   }
 
+  // 2026-11-05: start fetching a chat the moment the pointer rests on it (or a finger touches it), so the click that
+  // follows usually finds it ready (app.js prefetchSession keeps it). One listener on the list, not one per row:
+  // the list is redrawn often.
+  function ganTaiTruoc(el) {
+    if (!el || el._taiTruoc) return;
+    el._taiTruoc = true;
+    var hen = null;
+    var sidCua = function (e) {
+      var it = e.target && e.target.closest ? e.target.closest("[data-sid]") : null;
+      return it ? it.getAttribute("data-sid") : "";
+    };
+    var tai = function (sid) {
+      try { if (sid && window.JavisSessions && window.JavisSessions.prefetch) window.JavisSessions.prefetch(sid); } catch (e) {}
+    };
+    el.addEventListener("pointerover", function (e) {
+      var sid = sidCua(e);
+      clearTimeout(hen);
+      if (sid) hen = setTimeout(function () { tai(sid); }, 80);   // a pass over the list on the way elsewhere fetches nothing
+    }, { passive: true });
+    el.addEventListener("pointerdown", function (e) { clearTimeout(hen); tai(sidCua(e)); }, { passive: true });
+  }
+
+  // Light the row of the chat on screen without asking the server. False (the caller then reloads the list) when the
+  // list is not up, is showing search results, belongs to another brain, or does not hold that chat yet.
+  function chiToDongDangMo() {
+    if (!side || !listEl || brain() !== lastBrain) return false;
+    if (searchEl && searchEl.value.trim()) return false;
+    var cur = currentId();
+    if (!cur) return false;
+    var rows = listEl.querySelectorAll(".cside-item[data-sid]"), found = false;
+    for (var i = 0; i < rows.length; i++) { if (rows[i].getAttribute("data-sid") === cur) { found = true; break; } }
+    if (!found) return false;
+    for (var j = 0; j < rows.length; j++) rows[j].classList.toggle("active", rows[j].getAttribute("data-sid") === cur);
+    return true;
+  }
+
   function openSession(id) {
     if (window.JavisSessions) window.JavisSessions.open(id);
     closeDrawerIfNarrow();
@@ -1766,11 +2603,11 @@
     // Khung đang trống: vẽ ngay từ cache prefetch (nếu đúng brain) cho hết cảm giác delay;
     // không có cache mới hiện "Đang tải…". Các lần sau giữ danh sách cũ cho khỏi nháy.
     if (!listEl.querySelector(".cside-item")) {
-      if (cached && cached.brain === brain() && cached.kenh === kenhLoc &&
+      if (cached && cached.brain === brain() && cached.kenh === kenhLoc && cached.arch === archView &&
           cached.project === (kenhLoc ? "" : curProject()) && cached.items.length) {
         renderList(cached.items.slice(0, shown), cached.items.length > shown);
       } else {
-        listEl.innerHTML = '<div class="cside-empty">' + esc(window.t("sess.loading")) + '</div>';
+        listEl.innerHTML = '<div class="cside-empty pg-loading">' + esc(window.t("sess.loading")) + '</div>';
       }
     }
     try {
@@ -1783,32 +2620,70 @@
     }
   }
 
+  // 2026-11-09: the engine badge on each chat row names the brain the owner picked, not the internal id ("cli" read
+  // as nothing to the owner; it is Claude Code). Brand names, so no i18n. An id not listed here (a provider added
+  // later) still shows, cut to 10 characters as before.
+  var ENGINE_BADGE = {
+    "cli": "Claude", "claude-code": "Claude", "anthropic-api": "Anthropic",
+    "codex": "Codex", "openai-oauth": "Codex", "openai": "OpenAI",
+    "grok-cli": "Grok", "antigravity-cli": "Antigravity",
+    "openrouter": "OpenRouter", "gemini": "Gemini", "groq": "Groq", "deepseek": "DeepSeek", "ollama": "Ollama",
+  };
+  function engineBadge(engine) {
+    var id = String(engine || "").trim();
+    return ENGINE_BADGE[id.toLowerCase()] || id.slice(0, 10);
+  }
+
   function renderList(items, hasMore) {
+    veChanLuuTru();
     if (!items.length) {
-      listEl.innerHTML = '<div class="cside-empty">' + esc(window.t("sess.empty1")) + '<br>' + esc(window.t("sess.empty2")) + '</div>';
+      listEl.innerHTML = archView
+        ? '<div class="cside-empty">' + esc(window.t("sess.arch_empty")) + '</div>'
+        : '<div class="cside-empty">' + esc(window.t("sess.empty1")) + '<br>' + esc(window.t("sess.empty2")) + '</div>';
+      if (archView) listEl.insertBefore(dauLuuTru(), listEl.firstChild);
       return;
     }
-    // Bấm "Xem thêm" render lại từ đầu → giữ chỗ cuộn để không bị nhảy lên trên.
+    // Tải thêm khi cuộn tới cuối vẽ lại từ đầu → giữ chỗ cuộn để không bị nhảy lên trên.
     var keepScroll = listEl.scrollTop;
     listEl.innerHTML = "";
+    if (archView) listEl.appendChild(dauLuuTru());
     var cur = currentId(), lastGroup = null;
+    var pins = items.filter(function (s) { return s.pinned; });
+    // 2026-11-19 (owner: "những tin chấm đỏ mà chưa đọc em sắp xếp kéo lên trên đầu"): unread chats form their own
+    // group right under the pinned ones. The server already puts them on the first page (unread_first=1); this pass
+    // only keeps the open chat, which counts as read, in its date group instead of under "Unread".
+    function laChuaDoc(s) { return !!s.unread && !isRunning(s.id) && !(s.id === cur && chatOnScreen() && !isHeldUnread(s.id)); }
+    items = pins.concat(items.filter(function (s) { return !s.pinned && laChuaDoc(s); }),
+                        items.filter(function (s) { return !s.pinned && !laChuaDoc(s); }));
     items.forEach(function (s) {
       // Mục ghim gom thành MỘT nhóm trên đầu, không xếp theo thời gian nữa - ghim chính là để
       // thoát khỏi thứ tự thời gian. Server đã sắp pinned trước nên chỉ cần đổi nhãn nhóm.
-      var g = s.pinned ? window.t("sess.grp_pinned") : groupOf(s.updated_at || 0);
+      var g = s.pinned ? window.t("sess.grp_pinned")
+        : laChuaDoc(s) ? window.t("sess.unread") : groupOf(s.updated_at || 0);
       if (g !== lastGroup) {
-        listEl.appendChild(el('<div class="cside-group">' + g + '</div>'));
+        var head = el('<div class="cside-group">' + g + '</div>');
+        // 0.454.0: the pinned group gets a Reorder button (two or more pinned chats).
+        if (s.pinned && pins.length > 1 && window.JavisReorder) {
+          var rb = el('<button type="button" class="cside-reorder" title="' + esc(window.t("reorder.title_pins")) +
+            '" aria-label="' + esc(window.t("reorder.title_pins")) + '">' + ic("arrow-up-down") + '</button>');
+          rb.onclick = function (ev) { ev.stopPropagation(); reorderPins(pins); };
+          head.appendChild(rb);
+        }
+        listEl.appendChild(head);
         lastGroup = g;
       }
-      var eng = (s.engine || "").toString().slice(0, 10);
+      var eng = engineBadge(s.engine);
       // Kênh sinh ra hội thoại: web là mặc định nên khỏi ghi, Telegram thì gắn nhãn để
       // khỏi lẫn với cuộc tự mở trên dashboard.
       // Đang LỌC theo kênh thì nhãn kênh là thừa: mọi hàng đều cùng một kênh, in ra chỉ tổ
       // chiếm chỗ của giờ và số tin trong một cột hẹp ("agent:ng" trên từng dòng).
       // Lịch sử của một Agent gồm cả hội thoại của bot chuyên trách với khách (kênh `bot:<tên>`, 0.65.0):
       // ở đó nhãn kênh KHÔNG thừa, vì nó phân biệt cuộc khách nhắn với cuộc chủ tự chat với Agent.
-      var laBot = (s.channel || "").toString().indexOf("bot:") === 0;
-      var ch = kenhLoc ? "" : (s.channel || "").toString();
+      // 2026-11-08: the owner's admin-channel chats join the histories too (Javis Core's: `zalo`, `telegram`...; an
+      // agent's: `zalo@<slug>`), labelled by the app they came from. The `@<slug>` part never shows.
+      var rawCh = (s.channel || "").toString();
+      var laBot = rawCh.indexOf("bot:") === 0;
+      var ch = (kenhLoc && rawCh === kenhLoc) ? "" : rawCh.split("@")[0];
       var chLabel = (kenhLoc && laBot) ? window.t("sess.bot_badge")
         : (ch === "telegram" ? "TG" : (ch && ch !== "web" ? ch.slice(0, 8) : ""));
       var isRun = !!(window.JavisRunning && window.JavisRunning.has(s.id));
@@ -1824,51 +2699,62 @@
       // xuống giữa danh sách thì không còn thấy cái nhãn ấy nữa. Vạch màu bên trái và dấu ghim
       // luôn hiện đi theo từng hàng, đúng khuôn danh sách trợ lý / quy trình của trang Cộng sự
       // (chủ dự án chốt 16/09 sau khi dùng bản 0.59.20).
-      var item = el('<div class="cside-item' + (s.id === cur ? " active" : "") + (isRun ? " running" : "") + (s.pinned ? " ghim" : "") + '">' +
-        '<div class="ci-title">' + (isRun ? '<span class="ci-run" title="' + esc(window.t("sess.running")) + '">' + ic("loader", { cls: "ic-spin" }) + '</span> ' : '') +
+      // Red dot for a chat Javis answered after the owner last looked. The chat open on screen is being read right now.
+      // Project tag: only in the owner's own list (an agent's history has no projects) and only when the list is not
+      // already filtered to that very project, where every row would repeat the same name.
+      var pid = (!kenhLoc && s.project_id && s.project_id !== curProject()) ? String(s.project_id) : "";
+      var pTag = projById(pid);
+      var chuaDoc = !!s.unread && !isRun;   // still working: the spinner says so, the dot waits for the end
+      if (chuaDoc && s.id === cur && chatOnScreen() && !isHeldUnread(s.id)) { chuaDoc = false; s.unread = false; markRead(s.id); }
+      // 2026-11-09: a pinned row shows a small pin before its title (no bar on the left any more); every other action
+      // is in the row's "..." menu (moMenuDong).
+      var item = el('<div class="cside-item' + (s.id === cur ? " active" : "") + (isRun ? " running" : "") + (s.pinned ? " ghim" : "") + (chuaDoc ? " has-unread" : "") + (s.archived ? " archived" : "") + '">' +
+        '<div class="ci-title">' + (chuaDoc ? '<span class="ci-unread" role="img" title="' + esc(window.t("sess.unread")) + '" aria-label="' + esc(window.t("sess.unread")) + '"></span>' : '') +
+        (isRun ? '<span class="ci-run" title="' + esc(window.t("sess.running")) + '">' + ic("loader", { cls: "ic-spin" }) + '</span> ' : '') +
+        (s.pinned ? '<span class="ci-pin" title="' + esc(window.t("sess.grp_pinned")) + '">' + ic("pin") + '</span>' : '') +
         (tt.dau || "") +
         esc(s.title || s.preview || window.t("sess.untitled")) + '</div>' +
-        '<div class="ci-meta"><span>' + fmtT(s.updated_at) + '</span>' + (tt.meta || "") +
+        '<div class="ci-meta"><span>' + fmtT(s.updated_at) + '</span>' +
+        (pid ? '<span class="ci-proj" data-pid="' + esc(pid) + '"' +
+          (pTag ? ' title="' + esc(window.t("sess.proj_tag_title", { ten: pTag.name || "" })) + '"' : '') + '>' +
+          projTagHtml(pid) + '</span>' : '') +
+        (tt.meta || "") +
         (chLabel ? '<span class="ci-badge">' + esc(chLabel) + '</span>' : '') +
         (eng ? '<span class="ci-badge">' + esc(eng) + '</span>' : '') +
         '<span>' + esc(window.t("sess.msgs", { count: s.msg_count || 0 })) + '</span>' +
-        '<span class="act">' +
-          '<span class="pin' + (s.pinned ? " on" : "") + '" title="' + esc(s.pinned ? window.t("proj.pin_off") : window.t("sess.pin_top")) + '">' + ic("pin") + '</span>' +
-          // "Xếp vào nhóm" chỉ có nghĩa với hội thoại của NGƯỜI DÙNG. Hội thoại của một trợ
-          // lý đã thuộc về trợ lý đó rồi, nhét thêm vào một project là hai cách xếp chồng lên
-          // nhau mà cột này không hiện project nào cả.
-          (kenhLoc ? "" : '<span class="mov" title="' + esc(window.t("sess.move_to")) + '">' + ic("folder") + '</span>') +
-          '<span class="ren" title="' + esc(window.t("cs.fm_rename_title")) + '">' + ic("pencil") + '</span>' +
-          '<span class="del" title="' + esc(window.t("common.delete")) + '">' + ic("trash-2") + '</span>' +
-        '</span>' +
+        nutBaCham() +
         '</div></div>');
-      // Hai nút mới gắn handler RIÊNG kèm stopPropagation, không nhét thêm nhánh vào
-      // item.onclick bên dưới. Handler đó là thứ test_chat_side_actions.js bóc ra chạy thật
-      // với đúng năm tham số của nó; thêm tên hàm lạ vào là test nổ ReferenceError.
-      item.querySelector(".pin").onclick = function (ev) { ev.stopPropagation(); togglePin(s); };
-      var nutXep = item.querySelector(".mov");
-      if (nutXep) nutXep.onclick = function (ev) { ev.stopPropagation(); moveMenu(ev.currentTarget, s); };
-      // Bấm phải dò theo TỔ TIÊN, không so class của đúng node bị bấm. Nội dung .ren/.del là
-      // một <svg> (ic() trả chuỗi SVG), nên chạm vào icon thì e.target LÀ cái svg chứ không
-      // phải cái span - so classList kiểu cũ luôn trượt và click rơi xuống openSession.
-      // Đó chính là lỗi "hover vào không xoá/đổi tên được": nút có hiện, bấm lại mở hội thoại.
+      // The "..." opens the row's menu; anywhere else on the row opens the chat. Matched by ANCESTOR: the button's
+      // content is an <svg>, so a tap on the icon has the svg as e.target (the 0.12.3 bug, test_chat_side_actions.js).
+      // A long press already opened the menu: the tap that ends it must not open the chat as well.
       item.onclick = function (e) {
-        var hit = e.target && e.target.closest ? e.target.closest(".ren, .del") : null;
-        if (hit && hit.classList.contains("del")) { e.stopPropagation(); delSession(s); return; }
-        if (hit && hit.classList.contains("ren")) { e.stopPropagation(); renSession(s); return; }
+        var hit = e.target && e.target.closest ? e.target.closest(".ci-more") : null;
+        if (hit) { e.stopPropagation(); toggleMenuDong(item, s, false); return; }
+        if (item._nhanGiu) { item._nhanGiu = false; return; }
         openSession(s.id);
       };
+      ganMenuDong(item, s);
       item.setAttribute("data-sid", s.id);
       listEl.appendChild(item);
     });
     // GitHub status icon per conversation (0.365.0, github-connect.js). Only chats with GitHub work get one.
     try { if (window.JavisGithubRepos && window.JavisGithubRepos.decorate) window.JavisGithubRepos.decorate(listEl); } catch (e) {}
+    // Endless list (2026-11-09, replaces "Xem thêm"): a loading line at the end; when it scrolls into view the next
+    // PAGE loads by itself.
     if (hasMore) {
-      var more = el('<button class="cside-more" type="button">' + esc(window.t("sess.more", { so: PAGE })) + '</button>');
-      more.onclick = function () { shown += PAGE; loadList(); };
-      listEl.appendChild(more);
+      var cuoi = el('<div class="cside-more pg-loading">' + esc(window.t("sess.loading_more")) + '</div>');
+      listEl.appendChild(cuoi);
+      theoDoiCuoiDanhSach(cuoi);
     }
     listEl.scrollTop = keepScroll;
+    if (_sm && _sm.list) danhDauDongMo();
+    // 2026-11-08: warm the first chats of the list once the page is idle (app.js prefetchMany), so the first tap on a
+    // phone, which has no hover, finds them ready too.
+    try {
+      if (window.JavisSessions && window.JavisSessions.prefetchMany) {
+        window.JavisSessions.prefetchMany(items.slice(0, 8).map(function (s) { return s.id; }));
+      }
+    } catch (e) {}
   }
 
   async function doSearch(q) {
@@ -1883,30 +2769,40 @@
       listEl.innerHTML = "";
       hits.forEach(function (h) {
         var snip = esc(h.snippet || "").replace(/&gt;&gt;&gt;/g, "<b>").replace(/&lt;&lt;&lt;/g, "</b>");
-        // Kết quả tìm cũng có nút ghim (0.223.0, chủ dự án: "trong phần tìm và chọn hội thoại thêm nút ghim"):
-        // tìm ra hội thoại cần giữ thì ghim luôn tại chỗ, khỏi xoá ô tìm rồi lục lại trong danh sách.
-        var item = el('<div class="cside-item' + (h.pinned ? " ghim" : "") + '">' +
-          '<div class="ci-title">' + esc(h.title || window.t("sess.untitled")) + '</div>' +
+        // A hit carries what its "..." menu needs (2026-11-09): pinned, archived and project, like a list row.
+        var s = { id: h.session_id, title: h.title, pinned: !!h.pinned, archived: !!h.archived,
+                  project_id: h.project_id || "", channel: h.channel || "", unread: false, timKiem: q };
+        var item = el('<div class="cside-item' + (h.pinned ? " ghim" : "") + (h.archived ? " archived" : "") + '">' +
+          '<div class="ci-title">' + (h.pinned ? '<span class="ci-pin" title="' + esc(window.t("sess.grp_pinned")) + '">' + ic("pin") + '</span>' : '') +
+            esc(h.title || window.t("sess.untitled")) + '</div>' +
           '<div class="ci-snip">' + snip + '</div>' +
           '<div class="ci-meta"><span>' + fmtT(h.ts) + '</span>' +
-          '<span class="act"><span class="pin' + (h.pinned ? " on" : "") + '" title="' +
-            esc(h.pinned ? window.t("proj.pin_off") : window.t("sess.pin_top")) + '">' + ic("pin") + '</span></span>' +
+          (h.archived ? '<span class="ci-arch-tag">' + ic("archive") + esc(window.t("sess.arch_title")) + '</span>' : '') +
+          nutBaCham() +
           '</div></div>');
-        item.querySelector(".pin").onclick = function (ev) {
-          ev.stopPropagation();
-          togglePin({ id: h.session_id, pinned: h.pinned }, q);
+        item.onclick = function (e) {
+          var hit = e.target && e.target.closest ? e.target.closest(".ci-more") : null;
+          if (hit) { e.stopPropagation(); toggleMenuDong(item, s, false); return; }
+          if (item._nhanGiu) { item._nhanGiu = false; return; }
+          openSession(s.id);
         };
-        item.onclick = function () { openSession(h.session_id); };
+        ganMenuDong(item, s);
+        item.setAttribute("data-sid", h.session_id);
         listEl.appendChild(item);
       });
     } catch (e) { listEl.innerHTML = '<div class="cside-empty">' + esc(window.t("sess.search_err")) + '</div>'; }
   }
 
-  async function delSession(s) {
-    if (!confirm(window.t("sess.del_q", { ten: s.title || s.preview || window.t("sess.untitled") }))) return;
-    try { await fetch("/sessions/" + encodeURIComponent(s.id) + "/delete", { method: "POST" }); } catch (e) {}
+  // Delete for good (the menu asked first, in its own "delete" view: no confirm() any more).
+  async function xoaHan(s) {
+    var r = {};
+    try { r = await (await fetch("/sessions/" + encodeURIComponent(s.id) + "/delete", { method: "POST" })).json(); }
+    catch (e) { r = { error: String(e) }; }
+    if (r && r.error) return r;
     if (s.id === currentId() && window.JavisSessions) window.JavisSessions.new();
-    refresh();
+    cached = null;
+    taiLaiSau(s);
+    return { ok: true };
   }
 
   async function renSession(s) {
@@ -1926,6 +2822,353 @@
     await post("/sessions/" + encodeURIComponent(s.id) + "/pin", { pinned: s.pinned ? "0" : "1" });
     cached = null;   // thứ tự vừa đổi → cache cũ vẽ ra danh sách sai thứ tự
     if (q) doSearch(q); else loadList();
+  }
+  function taiLaiSau(s) {
+    var q = (s && s.timKiem) || (searchEl && searchEl.value.trim());
+    if (q) doSearch(q); else loadList();
+  }
+
+  // Archive (on=true) or bring back (on=false). The chat on screen stays open; its title bar says it is archived.
+  async function luuTru(s, on) {
+    var r = await post("/sessions/" + encodeURIComponent(s.id) + "/archive", { archived: on ? "1" : "0" });
+    if (r && r.error) return r;
+    cached = null;
+    if (s.id === currentId()) { quenPhienProj(); renderProjChip(); }
+    taiLaiSau(s);
+    return { ok: true };
+  }
+
+  // ── The "..." menu of a history row (2026-11-09) ──────────────────────────────
+  // Same look and behaviour as the bot inbox row menu (conversations.js): one element on <body> so the list's scrolling
+  // never clips it; a bottom sheet on a phone; Escape, arrows, Home/End inside it. Views: "main", "proj" (move to a
+  // project), "del" (delete for good, asked in place).
+  var _sm = null;            // {s, view, err, kb, list}
+  var SM_PHONE = "(max-width: 640px)";
+  function smPhone() { try { return window.matchMedia(SM_PHONE).matches; } catch (e) { return false; } }
+  function smEl() { return document.getElementById("csRowMenu"); }
+  function nutBaCham() {
+    return '<button class="ci-more" type="button" aria-haspopup="menu" aria-expanded="false" title="' +
+      esc(window.t("sess.more_acts")) + '" aria-label="' + esc(window.t("sess.more_acts")) + '">' + ic("ellipsis") + '</button>';
+  }
+  function dongCuaMenu() {
+    if (!_sm || !listEl) return null;
+    var rows = listEl.querySelectorAll(".cside-item[data-sid]");
+    for (var i = 0; i < rows.length; i++) if (rows[i].getAttribute("data-sid") === _sm.s.id) return rows[i];
+    return null;
+  }
+  function danhDauDongMo() {
+    if (!listEl) return;
+    listEl.querySelectorAll(".cside-item").forEach(function (x) {
+      var on = !!(_sm && x.getAttribute("data-sid") === _sm.s.id);
+      x.classList.toggle("menu-on", on);
+      var b = x.querySelector(".ci-more");
+      if (b) b.setAttribute("aria-expanded", String(on));
+    });
+  }
+  function toggleMenuDong(row, s, kb) {
+    if (_sm && _sm.s.id === s.id) return dongMenuDong(true);
+    moMenuDong(row, s, kb);
+  }
+  function moMenuDong(row, s, kb) {
+    dongMenuDong(false);
+    closeMenu();
+    _sm = { s: s, view: "main", err: "", kb: !!kb, list: true };
+    danhDauDongMo();
+    veMenuDong(true);
+    theoDoiNgoaiMenu();
+  }
+  function dongMenuDong(refocus) {
+    var m = smEl(), bg = document.getElementById("csRowMenuBg");
+    if (m) m.parentNode.removeChild(m);
+    if (bg) bg.parentNode.removeChild(bg);
+    if (!_sm) return;
+    var row = refocus ? dongCuaMenu() : null;
+    _sm = null;
+    danhDauDongMo();
+    var b = row && row.querySelector(".ci-more");
+    if (b && b.focus) b.focus();
+  }
+  function ganMenuDong(item, s) {
+    // Right click, and a long press where the phone reports it as a context menu (Android), open the same menu.
+    item.oncontextmenu = function (e) { e.preventDefault(); moMenuDong(item, s, false); };
+    // iPhone has no context menu for a long press: time it here (moving the finger cancels it, that is a scroll).
+    var hen = null;
+    item.addEventListener("touchstart", function () {
+      clearTimeout(hen);
+      // A new touch starts clean: a long press that no click followed (Android after its context menu) must not
+      // leave the flag set and swallow this tap.
+      item._nhanGiu = false;
+      hen = setTimeout(function () { item._nhanGiu = true; moMenuDong(item, s, false); }, 550);
+    }, { passive: true });
+    ["touchmove", "touchend", "touchcancel"].forEach(function (ev) {
+      item.addEventListener(ev, function () { clearTimeout(hen); }, { passive: true });
+    });
+    var b = item.querySelector(".ci-more");
+    if (b) b.onkeydown = function (e) {
+      if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") { e.preventDefault(); e.stopPropagation(); toggleMenuDong(item, s, true); }
+    };
+  }
+  function smItem(act, icon, key, o) {
+    o = o || {};
+    return '<button type="button" class="ht-rm-it' + (o.on ? " on" : "") + (o.danger ? " danger" : "") + '" role="menuitem" data-act="' + esc(act) + '"' +
+      (o.more ? ' aria-haspopup="menu"' : "") + '>' +
+      '<span class="ht-rm-ic">' + ic(icon) + '</span>' +
+      '<span class="ht-rm-t"><span>' + esc(o.label || window.t(key)) + '</span></span>' +
+      (o.more ? '<span class="ht-rm-end">' + ic("chevron-right") + '</span>' : o.on ? '<span class="ht-rm-end">' + ic("check") + '</span>' : "") +
+      '</button>';
+  }
+  function smSep() { return '<div class="ht-rm-sep" role="separator"></div>'; }
+  function noiDungMenu(s) {
+    var v = _sm.view;
+    if (v === "proj") {
+      var h = smItem("back", "chevron-left", "sess.move_to");
+      if (s.project_id) h += smItem("move:", "x", "sess.move_none");
+      h += smSep();
+      projects.forEach(function (p) {
+        h += smItem("move:" + p.id, p.icon && window.Icons && window.Icons.has && window.Icons.has(p.icon) ? p.icon : "folder", "",
+                    { label: p.name || "", on: s.project_id === p.id });
+      });
+      if (!projects.length) h += smItem("newproj", "plus", "sess.proj_new");
+      return h;
+    }
+    if (v === "del") {
+      return '<div class="cs-rm-del"><p>' + esc(window.t("sess.del_ask", { ten: s.title || s.preview || window.t("sess.untitled") })) + '</p>' +
+        '<div class="cs-rm-btns">' +
+        '<button type="button" class="ht-rm-it cs-rm-b" data-act="del_no">' + esc(window.t("common.cancel")) + '</button>' +
+        (s.archived ? "" : '<button type="button" class="ht-rm-it cs-rm-b" data-act="archive">' + esc(window.t("sess.archive")) + '</button>') +
+        '<button type="button" class="ht-rm-it cs-rm-b cs-rm-red" data-act="del_yes">' + esc(window.t("sess.del_forever")) + '</button>' +
+        '</div></div>';
+    }
+    if (s.archived) {
+      return smItem("restore", "archive-restore", "sess.arch_back") +
+        smItem("export", "download", "sess.export_md") + smSep() +
+        smItem("delete", "trash-2", "sess.del_forever", { danger: true });
+    }
+    var h2 = smItem("pin", s.pinned ? "pin-off" : "pin", s.pinned ? "proj.pin_off" : "sess.pin_top");
+    if (!kenhLoc) h2 += smItem("proj", "folder", "sess.move_to", { more: true });
+    h2 += smItem("rename", "pencil", "sess.rename") + smSep() +
+      smItem("share", "share-2", "sess.share_link") +
+      smItem("export", "download", "sess.export_md");
+    if (s.unread) h2 += smItem("read", "mail-open", "sess.mark_read");
+    else if (!isRunning(s.id)) h2 += smItem("unread", "mail", "sess.mark_unread");
+    h2 += smSep() + smItem("archive", "archive", "sess.archive") +
+      smItem("delete", "trash-2", "common.delete", { danger: true });
+    return h2;
+  }
+  function veMenuDong(focusFirst) {
+    if (!_sm) return;
+    var phone = smPhone(), m = smEl(), s = _sm.s;
+    if (!m) {
+      m = document.createElement("div");
+      m.id = "csRowMenu";
+      m.addEventListener("click", onMenuDongClick);
+      m.addEventListener("keydown", onMenuDongKey);
+      document.body.appendChild(m);
+    }
+    if (phone && !document.getElementById("csRowMenuBg")) {
+      var bg = document.createElement("div");
+      bg.id = "csRowMenuBg";
+      bg.className = "ht-rsheet-bg";
+      bg.onclick = function () { dongMenuDong(false); };
+      document.body.insertBefore(bg, m);
+    }
+    var ten = s.title || s.preview || window.t("sess.untitled");
+    m.className = "ht-rmenu cs-rmenu" + (phone ? " ht-rsheet" : "");
+    m.setAttribute("role", "menu");
+    m.setAttribute("aria-label", ten);
+    m.innerHTML = (phone ? '<div class="ht-rsheet-h"><span class="ht-rsheet-grip" aria-hidden="true"></span><b>' + esc(ten) + '</b></div>' : "") +
+      noiDungMenu(s) + (_sm.err ? '<div class="ht-rm-err" role="alert">' + ic("triangle-alert") + ' <span>' + esc(_sm.err) + '</span></div>' : "");
+    datMenuDong();
+    if (focusFirst) {
+      var first = m.querySelector(".ht-rm-it");
+      if (first && (_sm.kb || phone)) first.focus();
+      else { m.tabIndex = -1; m.focus(); }
+    }
+  }
+  // Desktop: under the row's "...", right edges aligned; above it when there is no room below; inside the window.
+  function datMenuDong() {
+    var m = smEl();
+    if (!m || !_sm) return;
+    if (m.classList.contains("ht-rsheet")) { m.style.left = m.style.top = ""; return; }
+    var row = dongCuaMenu(), a = row ? (row.querySelector(".ci-more") || row) : null;
+    if (!a) return;
+    var r = a.getBoundingClientRect(), vw = window.innerWidth, vh = window.innerHeight;
+    var w = m.offsetWidth, h = m.offsetHeight;
+    var left = Math.max(8, Math.min(r.right - w, vw - w - 8));
+    var top = r.bottom + 4;
+    if (top + h > vh - 8 && r.top - h - 4 >= 8) top = r.top - h - 4;
+    top = Math.max(8, Math.min(top, vh - h - 8));
+    m.style.left = left + "px";
+    m.style.top = top + "px";
+  }
+  var _smNgoai = false;
+  function theoDoiNgoaiMenu() {
+    if (_smNgoai) return;
+    _smNgoai = true;
+    document.addEventListener("mousedown", function (ev) {
+      if (!_sm) return;
+      var m = smEl();
+      if (m && m.contains(ev.target)) return;
+      var more = ev.target.closest && ev.target.closest(".ci-more");
+      var row = more && more.closest(".cside-item");
+      if (row && row.getAttribute("data-sid") === _sm.s.id) return;   // its own "..." closes it through the click
+      if (ev.target.id === "csRowMenuBg") return;
+      dongMenuDong(false);
+    }, true);
+    document.addEventListener("scroll", function () { if (_sm) datMenuDong(); }, true);
+    window.addEventListener("resize", function () { if (_sm) veMenuDong(false); });
+  }
+  function onMenuDongKey(e) {
+    var m = smEl();
+    if (!m) return;
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); return dongMenuDong(true); }
+    if (e.key === "Tab") { dongMenuDong(false); return; }
+    var its = [].slice.call(m.querySelectorAll(".ht-rm-it"));
+    if (!its.length) return;
+    var i = its.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); its[(i + 1) % its.length].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); its[(i - 1 + its.length) % its.length].focus(); }
+    else if (e.key === "Home") { e.preventDefault(); its[0].focus(); }
+    else if (e.key === "End") { e.preventDefault(); its[its.length - 1].focus(); }
+    else if (e.key === "ArrowRight" && document.activeElement && document.activeElement.dataset.act === "proj") { e.preventDefault(); document.activeElement.click(); }
+    else if (e.key === "ArrowLeft" && _sm && _sm.view !== "main") { e.preventDefault(); _sm.view = "main"; _sm.kb = true; veMenuDong(true); }
+  }
+  async function onMenuDongClick(e) {
+    var b = e.target.closest && e.target.closest(".ht-rm-it");
+    if (!b || !_sm) return;
+    e.stopPropagation();
+    var act = b.dataset.act, s = _sm.s, mine = _sm;
+    _sm.err = "";
+    var ketQua = function (r) {
+      if (r && r.error) { if (_sm === mine) { _sm.err = window.t("sess.act_err", { err: r.error }); veMenuDong(false); } return; }
+      if (_sm === mine) dongMenuDong(false);
+    };
+    if (act === "proj") { _sm.view = "proj"; _sm.kb = true; return veMenuDong(true); }
+    if (act === "back" || act === "del_no") { _sm.view = "main"; _sm.kb = true; return veMenuDong(true); }
+    if (act === "delete") { _sm.view = "del"; return veMenuDong(true); }
+    if (act === "newproj") { dongMenuDong(false); return newProject(); }
+    if (act.indexOf("move:") === 0) { dongMenuDong(false); return moveTo(s, act.slice(5)); }
+    if (act === "rename") { dongMenuDong(false); return doiTenTaiDong(s); }
+    if (act === "share") {
+      var row = dongCuaMenu(), nut = row && row.querySelector(".ci-more");
+      dongMenuDong(false);
+      return moChiaSeHoiThoai(nut || document.body, s.id);
+    }
+    if (act === "export") {
+      dongMenuDong(false);
+      if (window.JavisLenh && window.JavisLenh.xuatHoiThoai) window.JavisLenh.xuatHoiThoai(s.id);
+      return;
+    }
+    if (act === "pin") { dongMenuDong(false); return togglePin(s, s.timKiem); }
+    if (act === "read") {
+      dongMenuDong(false);
+      if (heldUnread === s.id) heldUnread = null;
+      markRead(s.id); clearDot(s.id); return;
+    }
+    if (act === "unread") {
+      if (s.id === currentId()) heldUnread = s.id;
+      // A read still waiting in its timer would undo this the moment it lands.
+      if (readTimers[s.id]) { clearTimeout(readTimers[s.id]); delete readTimers[s.id]; }
+      return ketQua(await post("/sessions/" + encodeURIComponent(s.id) + "/unread", {}).then(function (r) {
+        cached = null; taiLaiSau(s); refreshProjects();
+        try { if (window.JavisRailUnread) window.JavisRailUnread.refresh(); } catch (e) {}
+        return r;
+      }));
+    }
+    if (act === "archive") return ketQua(await luuTru(s, true));
+    if (act === "restore") return ketQua(await luuTru(s, false));
+    if (act === "del_yes") return ketQua(await xoaHan(s));
+  }
+
+  // Rename right on the row (2026-11-09): the row turns into a box; Enter saves, Escape puts it back.
+  function doiTenTaiDong(s) {
+    var row = null;
+    if (listEl) listEl.querySelectorAll(".cside-item[data-sid]").forEach(function (x) { if (x.getAttribute("data-sid") === s.id) row = x; });
+    if (!row) return renSession(s);
+    var cu = s.title || s.preview || "";
+    row.classList.add("renaming");
+    row.innerHTML = '<div class="ci-ren"><input class="ci-ren-in" maxlength="120" value="' + esc(cu) + '" aria-label="' + esc(window.t("sess.rename")) + '">' +
+      '<button type="button" class="ci-ren-b" data-ren="x">' + esc(window.t("common.cancel")) + '</button>' +
+      '<button type="button" class="ci-ren-b ci-ren-ok" data-ren="ok">' + esc(window.t("sess.save")) + '</button></div>';
+    row.onclick = function (e) { e.stopPropagation(); };
+    row.oncontextmenu = null;
+    var o = row.querySelector(".ci-ren-in");
+    var xong = false;
+    var huy = function () { if (xong) return; xong = true; taiLaiSau(s); };
+    var luu = async function () {
+      if (xong) return;
+      var t = o.value.trim();
+      if (!t || t === cu) return huy();
+      xong = true;
+      try {
+        var fd = new FormData(); fd.append("title", t);
+        await fetch("/sessions/" + encodeURIComponent(s.id) + "/rename", { method: "POST", body: fd });
+      } catch (e) {}
+      quenPhienProj();      // the title in the chat header reads this cache
+      renderProjChip();
+      cached = null;
+      taiLaiSau(s);
+    };
+    row.querySelector('[data-ren="ok"]').onclick = luu;
+    row.querySelector('[data-ren="x"]').onclick = huy;
+    o.onkeydown = function (e) {
+      if (e.key === "Enter") { e.preventDefault(); luu(); }
+      else if (e.key === "Escape") { e.preventDefault(); huy(); }
+    };
+    o.focus();
+    o.select();
+  }
+
+  // ── Archived chats: the row at the bottom of the column, and the header of their view ──
+  var chanEl = null;
+  function ganChanLuuTru() {
+    var pane = listEl && listEl.parentNode;
+    if (!pane) return;
+    chanEl = el('<button class="cside-arch" type="button" hidden>' + ic("archive") + '<span class="t">' +
+      esc(window.t("sess.arch_title")) + '</span><span class="n"></span>' + ic("chevron-right") + '</button>');
+    chanEl.onclick = function () { moLuuTru(true); };
+    pane.insertBefore(chanEl, listEl.nextSibling);
+  }
+  function veChanLuuTru() {
+    if (!chanEl) return;
+    chanEl.hidden = archView || !archCount;
+    chanEl.querySelector(".t").textContent = window.t("sess.arch_title");
+    chanEl.querySelector(".n").textContent = archCount ? String(archCount) : "";
+  }
+  function dauLuuTru() {
+    var h = el('<div class="cside-arch-top"><button class="cside-arch-back" type="button" title="' + esc(window.t("sess.arch_leave")) +
+      '" aria-label="' + esc(window.t("sess.arch_leave")) + '">' + ic("chevron-left") + '</button><b>' +
+      esc(window.t("sess.arch_title")) + '</b><span class="n">' + (archCount || "") + '</span></div>');
+    h.querySelector(".cside-arch-back").onclick = function () { moLuuTru(false); };
+    return h;
+  }
+  function moLuuTru(on) {
+    archView = !!on;
+    shown = PAGE;
+    cached = null;
+    if (searchEl && searchEl.value) searchEl.value = "";
+    if (listEl) { listEl.innerHTML = ""; listEl.scrollTop = 0; }
+    loadList();
+  }
+
+  // The loading line at the end of the list: when it scrolls into view, the next PAGE loads.
+  var _cuoiObs = null, _dangTaiThem = false;
+  function theoDoiCuoiDanhSach(node) {
+    if (!("IntersectionObserver" in window)) {
+      node.onclick = function () { shown += PAGE; loadList(); };
+      return;
+    }
+    if (_cuoiObs && _cuoiObs.root !== listEl) { _cuoiObs.disconnect(); _cuoiObs = null; }   // the column was mounted again
+    if (!_cuoiObs) {
+      _cuoiObs = new IntersectionObserver(function (ents) {
+        if (_dangTaiThem || !ents.some(function (x) { return x.isIntersecting; })) return;
+        _dangTaiThem = true;
+        shown += PAGE;
+        Promise.resolve(loadList()).then(function () { _dangTaiThem = false; }, function () { _dangTaiThem = false; });
+      }, { root: listEl, rootMargin: "120px" });
+    }
+    _cuoiObs.disconnect();
+    _cuoiObs.observe(node);
   }
 
   function moveMenu(anchor, s) {
@@ -1959,7 +3202,7 @@
     loadList();
   }
 
-  window.JavisChatSide = { mount: mount, refresh: refresh, tab: chonTab,
+  window.JavisChatSide = { mount: mount, refresh: refresh, tab: chonTab, unreadSkipQuery: unreadSkipQuery,
                            chip: renderProjChip, moKhung: openProjDrawer,
                            moKhungCuoc: openCuocDrawer,
                            // Trang Cộng sự mở đúng ngăn kéo này cho MỘT trợ lý (nút "File &
@@ -1976,16 +3219,33 @@
   // trong DB thì tới lượt server xử lý mới có - endpoint tự tạo hàng khi nhận kèm brain.
   window.JavisProjects = {
     current: curProject,
+    // Returns the request (2026-11-15), so the first message of the chat waits for it: the server reads the chat's
+    // project at the start of the turn to bring the project's GitHub repos in (main._seed_chat_repos).
     claim: function (sid) {
       var p = curProject();
       if (!sid || !p || p === "none") return;
-      post("/sessions/" + encodeURIComponent(sid) + "/project",
-           { project_id: p, brain: brain() });
+      return post("/sessions/" + encodeURIComponent(sid) + "/project",
+                  { project_id: p, brain: brain() });
     },
   };
 
   // Cập nhật khi có lượt chat mới / đổi phiên / đổi brain
-  window.addEventListener("javis:sessions-changed", refresh);
+  window.addEventListener("javis:sessions-changed", function (e) {
+    // 0.491.0: every change of chat, every finished turn and every background message that lands: the chat on
+    // screen is read, so its red dot goes out here and on the server.
+    markCurrentRead();
+    // Performance (2026-11-05): a plain switch to a chat already in the list changes nothing in the list but which row
+    // is lit. Re-fetching it (and its GitHub icons) on every click cost two round trips and redrew every row.
+    if (e && e.detail && e.detail.reason === "open" && chiToDongDangMo()) return;
+    refresh();
+  });
+  document.addEventListener("visibilitychange", markCurrentRead);
+  // Read in this tab or another one: the dot goes away here too.
+  window.addEventListener("javis:session-read", function (e) {
+    var sid = e && e.detail && e.detail.session_id;
+    if (sid) clearDot(sid);
+    refreshProjects();
+  });
   // Chip phải tự sống KHÔNG phụ thuộc cột trái: refresh() thoát sớm khi chưa mount sidebar,
   // mà chip còn đứng ở màn Javis nơi cột đó chưa bao giờ mount. Đổi phiên là đổi project có
   // hiệu lực, nên bỏ cache rồi vẽ lại.
@@ -2025,22 +3285,9 @@
   function bindGlobal() {
     var gs = document.getElementById("graphSource");
     if (gs) gs.addEventListener("change", refresh);
-    // Nút "Lịch sử" → mở thẳng workspace với sidebar. Đặt INLINE trong hàng nút header
-    // (.hud-actions) để không đè lên nút Cài đặt/Reset; fallback về body nếu chưa có header.
-    var btn = el('<div id="jv-sess-btn">' + ic("history") + ' <span class="jv-sess-lbl"></span></div>');
-    // Nút này dựng NGAY lúc tải trang, có thể trước khi từ điển về, mà t() lúc đó trả về
-    // chính cái khoá. Nên vẽ nhãn qua một hàm và vẽ lại khi từ điển sẵn sàng/đổi ngôn ngữ.
-    function veNhanBtn() {
-      btn.title = window.t("sess.hist_title");
-      var lbl = btn.querySelector(".jv-sess-lbl");
-      if (lbl) lbl.textContent = window.t("sess.hist");
-    }
-    veNhanBtn();
-    window.addEventListener("javis:i18n", veNhanBtn);
-    btn.onclick = function () { if (window.JavisChatStage) window.JavisChatStage.showSide(); };
-    var host = document.querySelector(".hud-actions");
-    (host || document.body).appendChild(btn);
-    // Prefetch danh sách sau khi cockpit đã yên: bấm Lịch sử lần đầu là có sẵn dữ liệu.
+    // Nút "Lịch sử" ở thanh trên cùng đã bỏ (chủ repo, 06/11/2026: "bỏ nút lịch sử và nút reset hội thoại đi không
+    // cần thiết"): danh sách hội thoại đã nằm ở trang Trò chuyện, mục đầu tiên của menu.
+    // Prefetch danh sách sau khi cockpit đã yên: mở trang Trò chuyện lần đầu là có sẵn dữ liệu.
     // Kèm danh sách project vì chip ở thanh tiêu đề khung chat cần tên + số file/link ngay,
     // trong khi cột trái (nơi vẫn gọi loadProjects) chỉ mount khi mở trang Trò chuyện.
     setTimeout(function () {

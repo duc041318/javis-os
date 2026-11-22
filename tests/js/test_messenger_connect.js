@@ -139,5 +139,77 @@ check("a channel with a Connections card hides the token part and Save", () => {
   assert.ok(css.includes("#htTokenPart[hidden], .ht-form-acts .ht-save[hidden] { display: none; }"));
 });
 
+
+// 0.446.0 (owner, 03/11/2026): the card is "Meta", names the apps it covers, and each Page can be disconnected.
+// WhatsApp is not on it: it has its own number, token and webhook, so it stays its own channel.
+check("each Page has Disconnect, in the danger style", () => {
+  const h = M.accountHtml({ id: "acc_1", page_id: "123", page_name: "Em Mi", bots: [] });
+  assert.ok(h.includes('class="s-btn-ghost msc-del" type="button" data-act="remove"'));
+});
+{
+  const src = fs.readFileSync(path.join(__dirname, "..", "..", "dashboard", "messenger-connect.js"), "utf8");
+  check("apps: Facebook, Messenger, Instagram (0.447.0), Threads (0.448.0) live; no WhatsApp", () => {
+    assert.ok(src.includes('[["facebook", true], ["messenger", true], ["instagram", true], ["threads", true]]'));
+    assert.ok(!/data-msc-wa|"whatsapp"/.test(src));
+  });
+  check("Disconnect goes through the shared account delete, taking the Page off its bot", () => {
+    assert.ok(src.includes('"/channels/accounts/" + encodeURIComponent(id) + "/delete"') && src.includes('f.append("go_khoi_bot", "1")'));
+  });
+}
+
+
+// 0.447.0: Instagram through the same Page login.
+check("Instagram: opt-in tick on the form, sent to the login", () => {
+  const h = M.formHtml({ https: true }, null);
+  assert.ok(h.includes('data-f-ig="1"') && !/data-f-ig="1" checked/.test(h));
+  const src = fs.readFileSync(path.join(__dirname, "..", "..", "dashboard", "messenger-connect.js"), "utf8");
+  assert.ok(src.includes("instagram: !!(igBox && igBox.checked)"));
+});
+// Issue 1439: post insights, an opt-in tick of its own.
+check("Post insights: opt-in tick on the form with its (i), sent to the login", () => {
+  const h = M.formHtml({ https: true }, null);
+  assert.ok(h.includes('data-f-insights="1"') && !/data-f-insights="1" checked/.test(h));
+  assert.ok(h.includes("msc.insights_tick") && h.includes("msc.insights_tick_how"));
+  const src = fs.readFileSync(path.join(__dirname, "..", "..", "dashboard", "messenger-connect.js"), "utf8");
+  assert.ok(src.includes("insights: !!(insBox && insBox.checked)"));
+});
+check("Instagram: the Page list names the linked account", () => {
+  const h = M.pickHtml([{ id: "1", name: "Shop", ig_username: "shop.vn" }, { id: "2", name: "Kho" }]);
+  assert.ok(h.includes("Instagram @shop.vn") && (h.match(/Instagram @/g) || []).length === 1);
+});
+check("Instagram: a connected account shows on/off, none shows how to connect", () => {
+  const on = M.igRowHtml({ id: "17", username: "shop.vn", on: true });
+  assert.ok(on.includes("@shop.vn") && on.includes('data-act-ig="1"') && /value="1" selected/.test(on));
+  const off = M.igRowHtml({ id: "17", username: "shop.vn", on: false });
+  assert.ok(/value="0" selected/.test(off));
+  const none = M.igRowHtml({});
+  assert.ok(none.includes("msc.ig_none") && !none.includes("data-act-ig"));
+  assert.ok(M.accountHtml({ id: "a", page_id: "1", bots: [], instagram: { id: "17", username: "x", on: true } }).includes("@x"));
+});
+
+
+// 0.448.0: Threads on the Meta card (its own login, replies by webhook).
+check("catalog card offers a Page and Threads", () => {
+  const h = M.catCard("chat");
+  assert.ok(h.includes('data-msc-open="1"') && h.includes('data-th-open="1"'));
+});
+check("Threads form: every address Meta asks for, with Copy, the app id and secret, the reply mode, the login", () => {
+  const h = M.thFormHtml({ https: true, redirect_url: "https://x/threads/oauth/callback", uninstall_url: "https://x/threads/uninstall",
+    delete_url: "https://x/threads/delete", webhook_url: "https://x/threads/webhook", verify_token: "VT" });
+  ["/threads/oauth/callback", "/threads/uninstall", "/threads/delete", "/threads/webhook", "VT"].forEach((v) => assert.ok(h.includes('data-copy="' + (v === "VT" ? v : "https://x" + v) + '"'), v));
+  assert.ok(h.includes('data-th="app_id"') && h.includes('data-th="app_secret"') && h.includes("data-th-cmt") && h.includes('data-th="login"'));
+  assert.ok(/data-th="login" disabled/.test(M.thFormHtml({ https: false })));
+});
+check("connected card: Pages and Threads counted, + Threads offered; Threads alone still shows it", () => {
+  assert.strictEqual(M.groupHtml([], []), "");
+  const h = M.groupHtml([], [{ id: "t1", username: "shop" }]);
+  assert.ok(h.includes("th.n") && !h.includes("msc.pages_n") && h.includes('data-th-open="1"'));
+});
+check("a Threads account row: @username, reply mode, Check, Log in again, Disconnect", () => {
+  const h = M.thAccHtml({ id: "t1", username: "shop", comments: "reply", bots: [] });
+  assert.ok(h.includes("@shop") && h.includes("data-th-mode") && /value="reply" selected/.test(h));
+  ["th_check", "th_renew", "remove"].forEach((a) => assert.ok(h.includes('data-act="' + a + '"'), a));
+});
+
 if (fails) { console.log("\n" + fails + " FAILED"); process.exit(1); }
 console.log("\nall ok");

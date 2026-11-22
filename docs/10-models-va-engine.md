@@ -61,7 +61,7 @@ Bảng dưới là các nhà cung cấp có sẵn. Nhà **đã kết nối** n�
 
 | Provider (nhãn trên màn hình) | Kiểu kết nối | Ghi chú |
 |---|---|---|
-| **Claude Code** | Đăng nhập Claude Code, không cần key | Đầy đủ MCP/skill/tool máy. Thường là thẻ MAIN mặc định |
+| **Claude Code** | Bấm **Kết nối Claude** để lấy token dài hạn của gói Claude (dùng 1 năm), không cần key | Đầy đủ MCP/skill/tool máy. Thường là thẻ MAIN mặc định |
 | **OpenAI OAuth (ChatGPT)** | Device code (đăng nhập gói ChatGPT) | Chạy qua Codex, đấu kho Kết nối qua hub + dùng skill qua router |
 | **xAI Grok Build CLI** | Đăng nhập **ngay trên trang Models** (device code), không cần key | Dùng gói **SuperGrok / X Premium+** sẵn có. Chạy qua binary `grok`. Đầy đủ MCP/skill/tool máy, nối lại được mạch hội thoại. Là thẻ CLI **duy nhất đăng nhập được khi Javis chạy trên VPS** - xem [B1a](#b1a-kết-nối-grok-build-cli-dùng-gói-supergrok--x-premium) |
 | **Google Antigravity CLI** | Gõ `agy` **một lần trong terminal**, không cần key | Bản Google chỉ định thay Gemini CLI. Chạy qua binary `agy`. Đầy đủ MCP/skill/tool máy, và chọn được **đúng dàn model của Antigravity IDE** (có cả model không phải của Google) |
@@ -83,16 +83,26 @@ Mỗi card provider hiển thị trạng thái **● Đã kết nối** hoặc *
 
 Đây là engine mặc định. Nó dùng được toàn bộ công cụ, skill và bộ nhớ, cộng thêm chạy lệnh máy. Không bắt buộc: nếu bạn không có gói Claude thì bỏ qua mục này và đi thẳng xuống mục B (ChatGPT) hoặc C (API key) - Javis chạy đủ chức năng như nhau, chỉ thiếu phần lệnh máy khi đi bằng API key.
 
-1. Vào **Models**, tìm card **Claude Code** (chưa đăng nhập thì nó nằm sau nút **＋ Kết nối thêm nhà cung cấp** ở cuối trang).
-2. Nếu chưa đăng nhập, card báo **○ Chưa đăng nhập** và có hai nút: **Đăng nhập Claude** và **↻ Kiểm tra lại**. Nếu máy chạy Javis chưa có lệnh `claude`, card báo **○ Chưa cài Claude Code**, hiện một khung hướng dẫn cài (bản Docker: cập nhật Javis; bản cài tay: một lệnh để chép) và chỉ có nút **↻ Kiểm tra lại**.
-3. Bấm **Đăng nhập Claude**. Javis hiện dòng "**1)** Mở link này để đăng nhập claude.ai" kèm đường link.
-4. Mở link đó để đăng nhập tài khoản claude.ai của bạn.
-5. Nếu trang hiện **một mã code**, dán mã vào ô "dán code (nếu có)" rồi bấm **Gửi code**. Một số luồng không cần dán code - Javis vừa chờ vừa tự kiểm tra mỗi 3 giây, kết nối xong là card tự đổi. Quá 5 phút không xong thì báo "Hết thời gian, thử lại.".
-6. Khi xong, card đổi sang **● Đã kết nối** kèm email và gói.
+Từ 22/11/2026 thẻ Claude Code chỉ có một đường vào: **token dài hạn** của gói Claude. Kiểu đăng nhập cũ (`claude auth login`) có thể hết hạn giữa chừng, báo đăng nhập đã hết thời hạn và không gia hạn được, làm bot và việc nền dừng lại. Token thì không bao giờ bị đăng xuất giữa chừng.
 
-Nút **↻ Kiểm tra lại** chỉ có ở trạng thái chưa đăng nhập, dùng khi bạn vừa đăng nhập bằng terminal và muốn Javis nhìn lại. Khi đã kết nối, card chỉ còn đúng một nút **Ngắt**.
+1. Vào **Models**, tìm card **Claude Code** (chưa kết nối thì nó nằm sau nút **＋ Kết nối thêm nhà cung cấp** ở cuối trang).
+2. Nếu chưa kết nối, card báo **○ Chưa đăng nhập** và có ô **Tên tài khoản** cùng các nút **Kết nối Claude**, **Dán token** và **↻ Kiểm tra lại**. Nếu máy chạy Javis chưa có lệnh `claude`, card báo **○ Chưa cài Claude Code**, hiện một khung hướng dẫn cài (bản Docker: cập nhật Javis; bản cài tay: một lệnh để chép) và chỉ có nút **↻ Kiểm tra lại**.
+3. Gõ một cái tên vào ô **Tên tài khoản** (ví dụ "Gmail công việc") cho khỏi lẫn về sau, rồi bấm **Kết nối Claude**. Javis tự chạy lệnh `claude setup-token` và hiện dòng "**1)** Mở link này, đăng nhập claude.ai để tạo token:" kèm đường link.
+4. Mở link đó và đăng nhập tài khoản claude.ai của bạn.
+5. Nếu trang hiện **một mã code**, dán mã vào ô "Dán mã vào đây" rồi bấm **Xác nhận mã**. Trên máy có trình duyệt, trang có thể không hiện mã nào: cứ quay lại Javis, thẻ tự xong sau vài giây. Mã bị từ chối thì bấm **Lấy link mới** để làm lại.
+6. Khi xong, Javis lưu token (đã mã hoá) và Claude Code chạy bằng token đó. Card đổi sang **● Đã kết nối**, bên dưới có dòng **Token ••••** kèm bốn ký tự cuối của token.
 
-Cách này chạy được cả trên VPS không có màn hình. Nếu thích dùng dòng lệnh, bạn có thể chạy `claude auth login --claudeai` trong terminal.
+Khi đã kết nối bằng token, card có các nút **Lấy token mới**, **Dán token** và **Ngắt**. Bấm **Ngắt** là ngắt kết nối và Javis quên luôn token. Nút **↻ Kiểm tra lại** chỉ có ở trạng thái chưa kết nối, dùng khi bạn vừa làm gì đó bằng terminal và muốn Javis nhìn lại.
+
+**Dán token làm ở nơi khác.** Nút nhỏ **Dán token** nhận một token bạn đã tạo bằng lệnh `claude setup-token` trên bất kỳ máy nào (token bắt đầu bằng `sk-ant-oat01-`). Dán vào ô rồi bấm **Lưu token**. Trên **Windows** không có bước tự động nên thẻ không có nút Kết nối Claude: mở terminal, gõ `claude setup-token`, làm theo, rồi dán token vào ô trên thẻ.
+
+**Token dùng được 1 năm.** Anthropic cho mỗi token chạy một năm, Javis không đổi được điều đó. Thẻ hiện ngày hết hạn và số ngày còn lại, chuyển màu vàng trong hai tuần cuối, và từ một tuần trước Javis để một thông báo mỗi ngày trong chuông. Bấm **Lấy token mới** trên thẻ, đăng nhập claude.ai thêm một lần là có thêm một năm. Token vẫn chạy bằng gói Claude của bạn, nên lưu ý về chạy nền trên gói vẫn giữ nguyên.
+
+**Máy còn chạy bằng đăng nhập cũ.** Máy đã đăng nhập trước đợt đổi này vẫn chạy bình thường cho tới khi phiên đăng nhập đó hết hạn. Thẻ của máy đó hiện **● Đã kết nối** kèm nút **Chuyển sang token dài hạn**: bấm vào là đi đúng các bước link và mã ở trên để lấy token dùng 1 năm.
+
+**Muốn trả theo lượt dùng bằng API key** thì dùng thẻ riêng **Anthropic (API)** (mục C). Thẻ Claude Code không còn lựa chọn **Chạy bằng** (gói hay API key). Chỉ máy nào trước đây đã đặt thẻ Claude chạy bằng API key mới còn thấy lựa chọn cũ đó, để chuyển về gói.
+
+Cách này chạy được cả trên VPS không có màn hình. Lệnh `claude auth login --claudeai` gõ trong terminal vẫn dùng được như một đường lui, nhưng đó là kiểu đăng nhập cũ, có thể hết hạn giữa chừng.
 
 ### B. Kết nối ChatGPT bằng gói thuê bao
 
@@ -148,7 +158,7 @@ Vài chỗ đáng biết:
 - **Prompt đi qua file, không qua dòng lệnh** (`--prompt-file`), cùng lý do với thẻ Antigravity: Windows chặn tổng dòng lệnh ở 32767 ký tự mà system prompt của Javis đã hơn 36.000.
 - Danh sách model hỏi CLI chứ Javis không giữ bảng chép tay, nên xAI đổi tên model cũng không làm picker lạc hậu.
 - **Javis tắt bộ tự cập nhật của CLI** ở mọi lượt (cờ `--no-auto-update` khi bản CLI có, cộng biến `GROK_DISABLE_AUTOUPDATER=1` luôn luôn). Lý do: Javis chạy `grok` headless trên VPS và trong container, để nó tự tải bản mới giữa lượt là in thêm chữ vào luồng kết quả rồi hỏng câu trả lời, hoặc ghi vào chỗ chỉ đọc rồi chết. Muốn nó tự cập nhật thì tự đặt `GROK_DISABLE_AUTOUPDATER=0` - Javis tôn trọng giá trị bạn đặt. Nâng cấp tay lúc nào cũng được: `grok update`.
-- Lượt chạy quá lâu thì bị cắt ở **900 giây**; đổi bằng biến môi trường `JAVIS_GROK_TIMEOUT`. Binary nằm chỗ lạ thì trỏ bằng `JAVIS_GROK_BIN`.
+- Lượt chạy **không bị giới hạn thời gian** (bấm Dừng để cắt); muốn có trần thì đặt biến môi trường `JAVIS_GROK_TIMEOUT` (giây). Binary nằm chỗ lạ thì trỏ bằng `JAVIS_GROK_BIN`.
 
 ### B1b. Kết nối Antigravity CLI (dùng gói Google của bạn)
 
@@ -243,7 +253,7 @@ Javis chỉ lưu khi kiểm tra thành công, nên thấy báo lỗi tức là c
 |---|---|---|
 | API key không hợp lệ (HTTP 401) hoặc (HTTP 403) | Key sai, hết hạn hoặc bị khoá | Chép lại key (không thừa dấu cách), hoặc xin bên bán key mới |
 | Cổng này không trả danh sách model | Chưa điền tên model | Điền tên model bên bán đưa rồi bấm Kết nối lại |
-| Không thấy .../v1/messages (HTTP 404) | Base URL chưa đúng | Hỏi lại bên bán địa chỉ cổng Anthropic; hay gặp nhất là lấy nhầm địa chỉ cổng OpenAI |
+| Không thấy API ở .../v1/messages | Base URL chưa đúng | Hỏi lại bên bán địa chỉ cổng Anthropic; hay gặp nhất là lấy nhầm địa chỉ cổng OpenAI |
 | Cổng trả HTTP 400 khi thử model ... | Thường là tên model sai, hoặc gói không có model đó | Kiểm tra chính tả tên model, hoặc hỏi bên bán tên đúng |
 | Không gọi được ... | Máy chạy Javis không tới được địa chỉ đó | Kiểm tra Base URL, mạng, hoặc hỏi bên bán cổng còn chạy không |
 
@@ -283,7 +293,7 @@ Mỗi thẻ nhớ model và Effort riêng, nên đổi thứ tự không làm m�
 
 **Liên hệ với khung chat.** Khung chat vẫn chạy như cũ: chọn model ở chip model dưới khung chat là ghim cho phiên đó và đổi luôn model chính. Chọn model của **một nhà khác** ở đó thì thẻ nhà ấy **tự lên đầu** thành MAIN, các thẻ còn lại giữ thứ tự, MAIN cũ thành Dự phòng 1. Danh sách model ở khung chat nay **chỉ liệt kê nhà đã kết nối**.
 
-**Thẻ nhà chạy bằng gói** (Claude Code, ChatGPT, Grok Build, Antigravity) giữ nguyên phần đăng nhập ngay trong thẻ: lựa chọn **Chạy bằng** (gói đang đăng nhập hay API key Anthropic) và nút **↻ Cập nhật Claude Code** của thẻ Claude, nút **Kiểm tra lại**, **Ngắt**... như các mục A, B, B1a, B1b. Từ 0.353.0, thẻ ChatGPT, Grok Build và Claude Code nhận được nhiều tài khoản (xem mục D1), còn Antigravity vẫn một tài khoản; thẻ nhà API thì nhận được nhiều key (xem mục C).
+**Thẻ nhà chạy bằng gói** (Claude Code, ChatGPT, Grok Build, Antigravity) giữ nguyên phần kết nối ngay trong thẻ: các nút **Kết nối Claude**, **Lấy token mới**, **Dán token** và **↻ Cập nhật Claude Code** của thẻ Claude, nút **Kiểm tra lại**, **Ngắt**... như các mục A, B, B1a, B1b. Từ 0.353.0, thẻ ChatGPT, Grok Build và Claude Code nhận được nhiều tài khoản (xem mục D1), còn Antigravity vẫn một tài khoản; thẻ nhà API thì nhận được nhiều key (xem mục C).
 
 Chưa có nhà nào đăng nhập thì khối này báo "Chưa có nhà nào đăng nhập. Bấm Kết nối thêm nhà cung cấp bên dưới."
 
@@ -301,12 +311,12 @@ Thẻ của ba nhà chạy bằng gói **ChatGPT (Codex)**, **Grok Build** và *
 2. Đọc dòng cảnh báo nhẹ: "Nhiều tài khoản cho một gói có nguy cơ bị khoá, dù Javis chưa ghi nhận ca nào. Nếu gặp, hãy báo cho nhà phát triển qua mục Issues trên GitHub của Javis."
 3. Bấm **Lấy link đăng nhập**, mở link trên máy nào cũng được, rồi đăng nhập đúng tài khoản cần thêm.
    - **ChatGPT** và **Grok Build**: thẻ hiện link kèm một mã. Đăng nhập xong là tự hoàn tất: trang kiểm tra mỗi 3 giây, chờ tối đa 15 phút.
-   - **Claude Code**: thẻ hiện link. Đăng nhập xong, dán mã hiện ra vào ô trên thẻ rồi bấm **Xác nhận**.
+   - **Claude Code**: thẻ hiện link. Đăng nhập xong, dán mã hiện ra vào ô trên thẻ rồi bấm **Xác nhận**. Từ 22/11/2026 tài khoản phụ cũng nhận **token dài hạn** như tài khoản 1 (Javis chạy `claude setup-token` cho riêng tài khoản đó), nên không bị đăng xuất giữa chừng. Token lưu mã hoá trong thư mục của tài khoản; Gỡ tài khoản là xoá luôn token. Tài khoản phụ đăng nhập kiểu cũ vẫn chạy tới khi phiên hết hạn; bấm **Đăng nhập lại** là chuyển sang token.
 4. Muốn dừng một lần đăng nhập chưa xong thì bấm **Huỷ**.
 
 **Danh sách Tài khoản.** Có từ 2 tài khoản trở lên thì thẻ hiện khối **Tài khoản** kèm nút (i):
 
-- Mỗi dòng đánh số 1, 2, 3... kèm trạng thái: **Đã đăng nhập**, **Chưa đăng nhập**, **Đã tắt** hoặc **Hết lượt, mở lại HH:MM**.
+- Mỗi dòng đánh số 1, 2, 3... kèm trạng thái: **Đã đăng nhập**, **Chưa đăng nhập**, **Đã tắt** hoặc **Hết lượt, mở lại HH:MM**. Tài khoản Claude chạy bằng token có thêm ngày hết hạn và số ngày còn lại; trước một tuần, chuông nhắc mỗi ngày một lần, kèm tên tài khoản.
 - Tài khoản đang gánh việc có nhãn xanh **Chat đang dùng** hoặc nhãn tím **Việc nền đang dùng**.
 - Đổi thứ tự bằng mũi tên lên / xuống, hoặc kéo dòng.
 - Nút **⋯** cuối dòng: **Tắt** / **Bật**; với các tài khoản khác tài khoản 1 có thêm **Đăng nhập lại** và **Gỡ**. Gỡ là xoá thư mục đăng nhập của tài khoản đó trên máy này. Tài khoản 1 không gỡ ở đây được.
@@ -322,10 +332,11 @@ Thẻ của ba nhà chạy bằng gói **ChatGPT (Codex)**, **Grok Build** và *
 
 **Giới hạn cần biết:**
 
+- Dòng trạng thái đầu thẻ ghi tên, email và gói của **tài khoản đang được dùng** (tài khoản đầu tiên đang bật, đã đăng nhập và không nghỉ). Tài khoản thêm mà CLI của nó chưa ghi lại email hay gói thì dòng đó chỉ hiện tên bạn đặt.
 - Đổi tài khoản giữa cuộc trò chuyện thì lượt đó mở một mạch CLI mới, Javis tự nạp lại lịch sử.
 - Đồng hồ hạn mức, tạo ảnh, giọng nói và những đường ChatGPT không đi qua Codex CLI vẫn dùng tài khoản 1.
 - Antigravity vẫn chỉ một tài khoản (token nằm trong keyring của hệ điều hành).
-- Claude Code chạy bằng API key Anthropic không có danh sách tài khoản.
+- Máy nào trước đây đã đặt thẻ Claude Code chạy bằng API key Anthropic thì thẻ đó không có danh sách tài khoản. Muốn dùng nhiều key Anthropic thì thêm vào thẻ **Anthropic (API)** (mục C).
 - Trên macOS, một tài khoản Claude được tính là đã đăng nhập khi Javis thấy bước đăng nhập hoàn tất (token nằm trong Keychain).
 
 ### D2. Hết lượt giữa một lượt chat (từ 0.354.0)
@@ -337,6 +348,8 @@ Thẻ của ba nhà chạy bằng gói **ChatGPT (Codex)**, **Grok Build** và *
 - **Hết lượt giữa chừng** (đã viết được một đoạn): câu trả lời dừng ở đó, kèm thẻ **Chạy lại ngay**. Bấm vào là hỏi lại câu đó bằng đường còn lượt, câu trả lời dở được thay bằng câu mới. Javis không tự chạy lại trường hợp này.
 - **Đã gọi công cụ rồi mới hết lượt**: Javis dừng và báo, không chạy lại ở đường khác, để không gửi tin hay đăng bài hai lần.
 - Telegram cũng tự đổi đường như vậy, dòng "Đang dùng..." hiện ở tin trạng thái. Bot chuyên trách nói với khách thì không đổi: nó luôn chạy model của Agent nó trỏ tới.
+- **Nhóm (Team) cũng xoay tài khoản của cùng thẻ.** Lượt của cộng sự trong nhóm bắt đầu trên tài khoản còn lượt; tài khoản đang chạy báo hết lượt trước khi gọi công cụ nào thì Javis cho nó nghỉ và chạy lại ngay bằng tài khoản kế của cùng gói, tin trả lời ghi thêm dòng "Đang dùng Claude Code (tài khoản 2) vì tài khoản 1 hết lượt." Lượt nhóm không nhảy sang thẻ khác: nó chạy model riêng của cộng sự hoặc MAIN. Mọi tài khoản của gói đều hết thì nhóm báo lỗi như trước và bước của việc nhóm tự chờ tới giờ gói mở lại.
+- **Bước của workflow cũng vậy.** Bước chạy bằng Claude Code hay ChatGPT bắt đầu trên tài khoản còn lượt. Tài khoản báo hết lượt khi bước chưa viết gì và chưa gọi công cụ nào thì Javis cho nó nghỉ rồi chạy lại ngay bước đó bằng tài khoản kế của cùng gói, lần chạy đi tiếp như thường. Bước đã làm dở thì dừng và báo như trước, tài khoản đó vẫn được cho nghỉ, nên bấm chạy lại workflow là sang tài khoản kế. Workflow nền ở chế độ giới hạn công cụ vẫn luôn là Claude Code, chỉ đổi tài khoản.
 - Đổi đường không sửa thứ tự hay model đã lưu. Lượt sau bắt đầu lại từ MAIN, trừ khi MAIN vẫn đang nghỉ.
 
 ### E. Chọn model việc nền
@@ -352,7 +365,10 @@ Không còn nút **Về mặc định** (bỏ ở 0.351.0). Muốn quay về mod
 
 Vài điều cần biết:
 
-- **Model việc nền không chạy theo MAIN.** Lần đầu (máy mới, hoặc nâng cấp mà chưa từng đặt) Javis chọn sẵn cấu hình mặc định của nhà cung cấp: model mặc định và mức Effort mặc định của nó. Sau đó model nền **giữ cố định** tới khi bạn tự đổi; kéo thẻ khác lên làm MAIN không kéo model nền đổi theo.
+- **Mặc định là Tự động (từ 11/2026).** Ở chế độ này model nền dùng nhà cung cấp của MAIN, và Javis chọn sẵn hai model từ danh sách của chính nhà đó: một model nhẹ cho việc Javis tự làm (tự học, gợi ý câu tiếp theo, chấm điểm) và một model bậc giữa cho việc bạn giao chạy nền (nhắc hẹn, loop, Kanban). Dòng lớn ghi **Tự động**, dòng nhỏ ghi tên hai model đang dùng. Javis chọn bằng cách cho model chính đọc danh sách model của nhà đó một lần, và chỉ chọn lại khi danh sách ấy thay đổi (nhà ra model mới, bạn nâng gói); chưa chọn được thì dùng model của MAIN như trước. Mỗi lần chọn hoặc đổi, chuông có một thông báo ghi rõ hai model.
+- **Mỗi việc nền tự tìm model vừa đủ cho nó.** Hai model ở trên chỉ là điểm xuất phát. Một nhắc hẹn, một loop hay một loại việc Kanban hỏng vì model yếu thì lần chạy sau tự dùng model mạnh hơn một bậc; chạy tốt nhiều lần liền thì thử model nhẹ hơn, không được thì quay lại. Lỗi do hết hạn mức, mất đăng nhập hay đứt kết nối không làm đổi model. Mỗi lần đổi có một thông báo ở chuông ghi lý do.
+- **Muốn chỉnh thì nói với Javis, không có nút gạt.** "Tiết kiệm token giúp anh", "việc gửi báo cáo phải thật chắc", "báo cáo sáng nay sai rồi" hay "việc nền đang chạy model gì": Javis ghi lại ý định của bạn (cho mọi việc hoặc riêng một việc), điều chỉnh theo, và hoàn lại được một lần đổi khi bạn bảo.
+- **Tự chọn thì Javis không đổi nữa.** Bấm **Đổi model ▾** và chọn một model cụ thể: model nền giữ cố định ở đó, kể cả khi bạn đổi MAIN. Muốn về Tự động thì chọn dòng **Tự động (khuyên dùng)** ở đầu danh sách. Máy nâng cấp từ bản cũ: nếu model nền vẫn là cấu hình mặc định Javis đặt sẵn thì chuyển sang Tự động; nếu bạn từng chọn một model khác thì giữ nguyên.
 - **Chọn được MỌI nhà bạn đã kết nối**, không riêng Claude: Claude Code, ChatGPT/Codex, OpenRouter, OpenAI, Gemini, Anthropic API... Chọn nhà cung cấp khác thì việc nền chạy bằng gói hoặc khoá của nhà đó, không ăn vào hạn mức Claude nữa.
 - **Hết lượt thì đi theo Thứ tự dùng (từ 0.350.0, gắn với Thứ tự dùng từ 0.351.0).** Việc nền chạy model nền trước; model nền hết lượt thì lần lượt sang **Dự phòng 1, Dự phòng 2...**, và **MAIN sau cùng**, mỗi nhà chạy cấu hình mặc định của nó (không phải model bạn chọn cho chat). Một nhà có nhiều API key thì thử từng key trước khi sang nhà kế, và thẻ gói có nhiều tài khoản cũng thử từng tài khoản trước (xem mục D1). Javis không tự chen một nhà bạn chưa kết nối vào.
 - **Trang chỉ lên tiếng khi cần.** Chuỗi thứ tự trên không hiện ra thường xuyên. Chỉ khi model nền hết lượt mới có một dòng, ví dụ "Haiku 5.5 đang hết lượt, việc nền chạy tạm ChatGPT · GPT-5.5." Nhà của model nền chưa kết nối thì có dòng cảnh báo "Nhà cung cấp này chưa kết nối, việc nền bắt đầu từ Dự phòng 1." Không còn nhà nào chạy được thì báo "Không còn tài khoản nào chạy được việc nền."
@@ -488,10 +504,16 @@ Từ 0.42.1 trở về trước có lỗi ở đúng chỗ này: chỉ mạch c�
 | **Lấy link đăng nhập** | Ô thêm tài khoản | Lấy link (ChatGPT, Grok kèm mã) để đăng nhập tài khoản cần thêm; Claude Code thì dán mã rồi bấm **Xác nhận** |
 | Danh sách **Tài khoản** | Thẻ nhà chạy bằng gói có từ 2 tài khoản | Dùng lần lượt từ trên xuống; trạng thái **Đã đăng nhập** / **Chưa đăng nhập** / **Đã tắt** / **Hết lượt, mở lại HH:MM**; **⋯** để Tắt / Bật, Đăng nhập lại, Gỡ |
 | **＋ Kết nối thêm nhà cung cấp (N)** | Cuối trang | Hiện N nhà chưa kết nối để đăng nhập / dán key |
-| **○ Chưa đăng nhập** | Card Claude Code | Chưa đăng nhập Claude Code trên máy |
+| **○ Chưa đăng nhập** | Card Claude Code | Claude Code chưa được kết nối trên máy này |
 | **○ Chưa cài Claude Code** | Card Claude Code | Máy chạy Javis chưa có lệnh `claude`, làm theo khung hướng dẫn cài trên card |
-| **Đăng nhập Claude** | Card Claude Code | Bắt đầu luồng đăng nhập bằng link |
-| **↻ Kiểm tra lại** | Card Claude Code (chỉ khi chưa đăng nhập) | Hỏi lại trạng thái đăng nhập |
+| **Kết nối Claude** | Card Claude Code (chưa kết nối) | Javis chạy `claude setup-token` và hiện link đăng nhập claude.ai để lấy token dài hạn (dùng 1 năm) |
+| **Xác nhận mã** | Card Claude Code, sau khi bấm Kết nối Claude | Gửi mã trang claude.ai đưa cho bạn |
+| **Dán token** / **Lưu token** | Card Claude Code | Dán token làm bằng `claude setup-token` ở nơi khác (bắt đầu bằng `sk-ant-oat01-`) rồi lưu |
+| **Token ••••** | Card Claude Code (đã kết nối bằng token) | Đang chạy bằng token dài hạn, kèm ngày hết hạn và số ngày còn lại |
+| **Lấy token mới** | Card Claude Code (đã kết nối bằng token) | Đăng nhập claude.ai thêm một lần để có token mới, dùng thêm 1 năm |
+| **Chuyển sang token dài hạn** | Card Claude Code (máy còn đăng nhập kiểu cũ) | Lấy token dài hạn thay cho phiên đăng nhập cũ có thể hết hạn giữa chừng |
+| **Ngắt** | Card Claude Code | Ngắt kết nối, Javis quên luôn token |
+| **↻ Kiểm tra lại** | Card Claude Code (chỉ khi chưa kết nối) | Hỏi lại trạng thái kết nối |
 | **Đăng nhập ChatGPT** | Card OpenAI OAuth | Đăng nhập bằng mã device code |
 | **Qua trình duyệt** | Card OpenAI OAuth | Đường dự phòng khi workspace chặn device code |
 | **Kết nối** | Card provider API chưa kết nối | Lưu key đầu tiên, nhà đó vào cuối Thứ tự dùng |

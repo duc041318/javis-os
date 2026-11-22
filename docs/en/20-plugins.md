@@ -104,7 +104,7 @@ These ship with the app (the **Bundled** label). All are on by default except `t
 
 | Name on the card | slug | Tools provided | Minimum level | Default |
 |---|---|---|---|---|
-| Time and date (VN) | `datetime-vn` | `javis_now`, `javis_date_add` | read only | On |
+| Time and date (timezone picked in Settings) | `datetime-vn` | `javis_now`, `javis_date_add` | read only | On |
 | Recurring jobs and reminders | `javis-schedule` | `javis_schedule` | write (safe) | On |
 | Queue Kanban work | `javis-task` | `javis_task` | write (safe) | On |
 | Attach another MCP | `javis-connect` | `javis_add_mcp` | write (safe) | On |
@@ -112,12 +112,11 @@ These ship with the app (the **Bundled** label). All are on by default except `t
 | Read YouTube videos | `youtube-read` | `javis_youtube_read` | read only | On |
 | Meta Ads (Graph API) | `meta-ads-graph` | `meta_ads_accounts`, `meta_ads_insights`, `meta_ads_campaigns`, `meta_ads_get` | read only | On |
 | Facebook Pages (Graph API) | `meta-pages-graph` | `fb_pages_list`, `fb_page_posts`, `fb_page_comments`, `fb_page_post`, `fb_page_photo`, `fb_page_album`, `fb_page_video`, `fb_page_edit`, `fb_page_delete`, `fb_page_reply` | full power | On |
-| Facebook monitoring (Apify) | `fb-monitor-apify` | `fb_monitor` | read only | On |
 | Tool usage log | `tool-audit` | `javis_tool_stats` + the `post_tool_call` hook | read only | **Off** |
 
 What each one does:
 
-- **Queue Kanban work**: queue a background job straight from chat (`op=add`) and see how running work is going (`op=list`). Added in 0.17.1. Before that the only route was `POST /kanban/task`, and calling it required running machine commands, so only Claude Code and Codex could do it even though the documentation promised every brain could. This tool calls the in-process queue directly and opens no extra HTTP door. Two hard rails: it **cannot create `full`-level jobs** (the level that spends money, creates orders, sends messages, which you must set yourself on the Work page), and it defaults to `suggest`. Moving columns, cancelling work and approving pending work still happen on the Work page.
+- **Queue Kanban work**: queue a background job straight from chat (`op=add`) and see how running work is going (`op=list`). Added in 0.17.1. Before that the only route was `POST /kanban/task`, and calling it required running machine commands, so only Claude Code and Codex could do it even though the documentation promised every brain could. This tool calls the in-process queue directly and opens no extra HTTP door. Two hard rails: it **cannot create `full`-level jobs** (the level that spends money, creates orders, sends messages, which you must set yourself on the Work page), and it defaults to `suggest`. Moving columns and approving pending work still happen on the Work page; cancelling a job works from chat too (`op=cancel`).
 - **Attach another MCP**: have Javis attach a new MCP source right from chat, and it **appears on the Connections page** under "Connected" like an account you added by hand, shared by every brain. Before this plugin, Javis had no way to write into the connection store, so all it could do was run `claude mcp add`; that server landed in Claude Code's own configuration where the other six brains could not see it, and on the Connections page it did not sit under "Connected" but fell into the collapsed "Connections already in Claude Code and Codex" section (closed by default), so it looked as if nothing had been added. Three safety rails: the permission level defaults to **read only** (raise it yourself on the Connections page if you want writes); a source that runs a **local command** (stdio) is added **disabled** so you read the command before enabling it; and a service already in the Connections catalogue (Gmail, Calendar, POS...) makes Javis point at the right card rather than spawning a parallel hand-declared copy. If the connection test fails, the entry **stays** on the Connections page with the reason rather than vanishing silently.
 - **Zalo extras (the `javis.zalo` pack on Javis Store)**: since 0.73.0 the Zalo tools that fill what the standard MCP lacks no longer ship inside the app, so people who do not use Zalo do not carry them. The pack has image and file sending (`zalo_send_image`), tagging the right people, notes, reminders and polls in a group (`zalo_group_members`, `zalo_send_mention`, `zalo_create_note`, `zalo_create_reminder`, `zalo_create_poll`) and reading group images (`zalo_read_images`). Javis offers it right after you scan the Zalo QR; on a machine that already used Zalo, the Connections page shows an install button. Details in [Zalo](12-zalo-agent-mcp.md).
 - **Time and date (VN)**: tells Javis today's date, the time and the weekday in Vietnam time (UTC+7), and computes relative dates ("in 3 days", "last week"). Pure standard library, no network needed. It is also the simplest example plugin to read when you want to write your own.
@@ -128,7 +127,7 @@ What each one does:
 - **Safe Zalo sending**: sends Zalo messages in place of the raw tool. It locks onto the listening account and can only send to chats on the watch list; when a name matches several people it refuses and forces a question back. The two Zalo plugins are shared with [the Zalo channel](12-zalo-agent-mcp.md).
 - **Meta Ads (Graph API)**: reads Facebook/Instagram advertising figures (ad accounts, campaigns, performance). **Read only, spends no money.** Requires the "Meta Ads (Facebook & Instagram)" connection on the Connections page.
 - **Facebook Pages (Graph API)**: manages Pages. Reading the Page list, posts and comments is read-only; posting, uploading photos, albums and videos, editing text, deleting posts and replying to comments are **real, public** actions and need the full-power level. Uses the Pages connected on the Facebook Messenger card on the Connections page (or the store's Facebook Pages connection if installed earlier).
-- **Facebook monitoring (Apify)**: monitors **public** Pages and Groups to find heavily shared posts, through the Apify service. Read only, does not touch a personal account, and works on a VPS. Requires pasting an apify.com Personal API token into the "Facebook monitoring (Apify)" connection.
+- **Facebook monitoring (Apify)** no longer ships inside Javis (since 2026-11-12): the `fb_monitor` tool comes with the **Facebook monitor (Apify)** pack in the Store. If you installed that pack before, update it and the tool is back; otherwise install the pack and paste your apify.com Personal API token on the Connections page.
 - **Tool usage log**: counts how many times **each** tool is called by the engine (through the `post_tool_call` hook) and lets you see the most-used ones. It is a demonstration of the hook mechanism, so it is off by default; enable it on the Plugins page, chat a few turns that call tools, then ask Javis which tool is used most.
 
 A note about the "Minimum level" column: that is the level declared for the **whole plugin** and what the card shows. Each tool inside still has its own level. For example `meta-pages-graph` says "full power" on the card, but its three post/comment reading tools only need read-only, and only the posting and deleting tools need full power.
@@ -308,7 +307,7 @@ A plugin using this hook sits behind the usual rails: a user-installed plugin on
 
 ## Own page and HTTP routes (since 0.64.26)
 
-A plugin can open web routes of its own, under `/ext/<slug>/`. Use it for a settings page, or for an outside service to call in (webhook, OAuth door). The "Javis in ChatGPT" package in the store is a working example.
+A plugin can open web routes of its own, under `/ext/<slug>/`. Use it for a settings page, or for an outside service to call in (webhook, OAuth door). The **Javis Gate** package (`javis.gate`) in the store is a working example.
 
 ```python
 def register(ctx):
@@ -324,6 +323,76 @@ def register(ctx):
 - **`register_well_known`**: GET only, public, no cookie. If two plugins claim one name, the one loaded first keeps it.
 - Declare `page: ""` in `plugin.yaml` and the plugin card gets an **Open page** button.
 - Only bundled plugins, plugins from an installed package and global plugins get routes. **A plugin inside a brain does not**, because the model can write into the brain.
+
+## Javis Gate: an outside AI posts into a chat (since 0.440.0)
+
+The **Javis Gate** package (`javis.gate`) opens an MCP door with OAuth for ChatGPT, Claude and other AIs. Besides the
+tools Javis already has, that door carries five tools only the outside AI sees (`server/chat_bridge.py`):
+
+| Tool | What it does | Access level |
+|---|---|---|
+| `javis_chat_find` | Find chats by title (accents ignored) or content | Any |
+| `javis_chat_read` | Read the last messages of a chat | Any |
+| `javis_chat_send` | Post into a chat as if the owner typed it, wait for the answer | Full only |
+| `javis_chat_result` | Read the answer when Javis takes long | Any |
+| `javis_chat_note` | Save a note of the outside chat: what the owner said and decided (since 0.441.0) | Draft, Full |
+| `javis_sync_setup` | Turn on Javis Sync on a coding agent's machine: returns one install command the AI runs | Draft, Full |
+
+- **A posted message runs exactly like a typed one:** it goes through the dashboard's own chat loop, so the answer
+  streams on every open tab, has a Stop button, is saved to History, written to `memory/conversations` and fed to
+  self-learning. Its bubble is labelled **via ChatGPT** or **via Claude**.
+- **A chat that is answering** takes the message as a follow-up, as when the owner types while Javis works.
+- **Only the owner's chats** (main chat, partner chats). Customer chats and team chats can't be read or posted to.
+- **A note does not run Javis:** `javis_chat_note` only saves, so it costs Javis's brain nothing, yet it goes
+  through the same path as a chat turn: History, conversation log and self-learning. Each outside chat gets its own
+  conversation **From ChatGPT: <title>** (in the interface language); with an `id` the note goes into that
+  Javis chat instead. Javis can't read ChatGPT's or Claude's history, so this is how the outside AI sends over
+  what is worth keeping.
+- The five tools are **never** in Javis's own toolset: they appear only when the package's door calls
+  `mcp_hub.tra_loi_jsonrpc(..., gate={"source": "<AI name>"})`.
+
+### Saving Claude Code and Codex sessions automatically (Javis Sync)
+
+A coding agent busy writing code almost never calls `javis_chat_note` by itself. **Javis Sync**
+(`tools/javis-sync/javis_sync.py`) does it automatically: it runs on the machine with Claude Code or Codex, as Claude
+Code's **Stop hook** and Codex's **notify** program. After each turn it sends the owner's prompt and the agent's final
+answer (not the tool calls in between) to `POST /chat/external` on Javis.
+
+- Each outside session gets its own conversation: **From Claude Code: <project folder>: <first prompt>** or **From
+  Codex: ...**, saved through the normal chat path, so it lands in History, `memory/conversations` and self-learning.
+  Javis runs no model for it and spends no quota.
+- API keys in the text are masked before saving. Very long text is cut, with a line saying how much is missing.
+- When Javis is off or unreachable, unsent turns are kept and sent on the next run; a turn Javis already has is
+  skipped, never duplicated.
+- The hook never breaks Claude Code or Codex: failures only go to `~/.javis-sync/sync.log`.
+
+**Setup: just connect Gate.** As soon as Claude Code or Codex connects to Javis Gate, the Gate tells it to ask you
+once: "Turn on Javis Sync?". Say yes and it calls the `javis_sync_setup` tool, runs the install command on its machine
+and reports back. No command to type, no token to copy. To turn it on later, tell it "turn on Javis Sync".
+
+- That tool creates a **save-only** token: it reaches `/chat/external` and nothing else, cannot run a chat turn and
+  cannot read anything. It shows on the **Integrations** page, **API tokens** tab, named "Javis Sync (Claude Code)";
+  revoke it there.
+- Needs the Draft or Full level of the Gate door. Javis's address comes from the domain in **Settings** (or
+  `DOMAIN_NAME`); when none is set, the AI takes it from the Gate address it connected to.
+- Needs Python 3.8 or newer on that machine. Sessions already open pick the hook up after Claude Code or Codex
+  restarts.
+
+Manual setup (a machine not connected to Gate): create a token on the **Integrations** page, **API tokens** tab, then:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/blogminhquy/javis-os/main/tools/javis-sync/javis_sync.py
+python3 javis_sync.py install --url https://<your-javis-domain> --token jvs_...
+```
+
+`install` tests the connection first and installs nothing on a wrong URL or token. It copies the script to
+`~/.javis-sync/`, adds the hook to `~/.claude/settings.json` and a `notify` line to `~/.codex/config.toml` (with a
+`.bak` backup). If Codex already had a notify program, it keeps running. Only one side: add `--claude` or `--codex`.
+
+- The first turn of a Claude Code session also sends what was said before the install.
+- Status: `python3 ~/.javis-sync/javis_sync.py status`. Remove: `... uninstall` (restores Codex's previous notify).
+- Never send one folder: add its path to `"exclude"` in `~/.javis-sync/config.json`. Pause one shell:
+  `JAVIS_SYNC_OFF=1`.
 
 ## Quick reference of buttons and states
 

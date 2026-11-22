@@ -75,6 +75,9 @@ body.in-console .hud-actions { display: none; }
   transition: max-height var(--rail-anim), opacity var(--rail-anim);
 }
 .rail-group.open > .rail-grp-items { max-height: 340px; opacity: 1; padding: 2px 0 4px; }
+/* A solo group (Chat, owner 2026-11-05) has no header and never folds: its row is always on screen, first in the rail. */
+.rail-group.solo > .rail-grp-lbl { display: none !important; }
+.rail-group.solo > .rail-grp-items { max-height: none; opacity: 1; overflow: visible; padding: 0 0 4px; }
 .rail-brand {
   height: 42px; display: flex; align-items: center; justify-content: center; gap: 9px;
   color: var(--accent); font-size: 22px;
@@ -94,7 +97,9 @@ body.in-console .hud-actions { display: none; }
 }
 .rail-brand-text i { font-style: normal; font-weight: 400; color: var(--text3); }
 .rail-item {
-  position: relative; background: transparent; border: 0; cursor: pointer;
+  /* width 100% (19/11/2026): on a phone the rail's item list is a block, where a <button> shrinks to its text; the row
+     must span the drawer like on a computer so the unread dot lines up on the right edge. */
+  position: relative; width: 100%; background: transparent; border: 0; cursor: pointer;
   color: var(--text3); border-radius: 9px; padding: 7px 8px 7px 16px;
   display: flex; flex-direction: row; align-items: center; gap: 10px;
   transition: color var(--rail-anim), background var(--rail-anim);
@@ -105,6 +110,10 @@ body.in-console .hud-actions { display: none; }
   font-family: var(--font-ui); font-size: 13.5px; letter-spacing: 0.1px; opacity: 0.95;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* Owner, 19/11/2026: red dot on Chat, Partners and Team when something there is unread (rail-unread.js), at the end of
+   the row, the same red as the unread dot on a chat in the history; on a folded group's header too. */
+.rail-dot { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--red); }
+.rail-grp-lbl .rail-dot { margin-right: 4px; }
 .rail-item:hover { color: var(--text); background: var(--surface-2); }
 .rail-item.active { color: var(--accent); background: var(--accent-wash-2); }
 .rail-item.active::before {
@@ -118,9 +127,6 @@ body.in-console .hud-actions { display: none; }
 /* Icon bộ não đứng trước dropdown chọn brain - đi theo khối .navbar-brain kể cả
    khi mobile-chat.js dời cả khối vào rail, nên không cần rule riêng cho mobile. */
 .navbar-brain .brain-select-ico { color: var(--accent); font-size: 17px; }
-@media (max-width: 860px) {
-  .hud-top .navbar-brain .graph-stats { display: none; }   /* mobile: ẩn stats cho gọn */
-}
 
 /* Form trong card (Channels / Account / provider key) */
 .js-lbl { display: block; font-size: 13px; color: var(--text2); margin: 12px 0 5px; font-family: var(--font); }
@@ -180,7 +186,8 @@ body.in-console .hud-actions { display: none; }
 .ord-chips .mb-item, .ord-chips .mb-search { font-size: 15px; }
 .aux-now-act.ord-chips { margin-top: 0; flex-wrap: nowrap; }
 .aux-now-act.ord-chips .mb-pop, .aux-now-act.ord-chips .eff-pop { left: auto; right: 0; }
-.ord-swap-row { display: flex; justify-content: center; margin: -4px 0; }
+/* Owner 05/11/2026: the Swap button sits in the middle of the gap between two cards, never touching the one above. */
+.ord-swap-row { display: flex; align-items: center; justify-content: center; margin: 4px 0; }
 .ord-swap { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 14px; border-radius: 999px;
   border: 1px solid var(--border); background: var(--bg2); color: var(--text2); font: inherit; font-size: 15px; cursor: pointer; }
 .ord-swap:hover { border-color: var(--accent); color: var(--accent-ink); }
@@ -207,11 +214,7 @@ body.in-console .hud-actions { display: none; }
 .ord-ib { width: 36px; height: 36px; border-radius: 50%; border: 0; background: transparent; color: var(--text2); display: grid; place-items: center; cursor: pointer; }
 .ord-ib:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
 .ord-ib:disabled { opacity: .3; cursor: not-allowed; }
-.ord-menu { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 4px 4px 38px; }
-.ord-menu[hidden], .ord-rekey[hidden], .ord-addbox[hidden], .ord-off[hidden] { display: none; }
-.ord-menu .danger { color: var(--red); }
-.ord-rekey { flex-basis: 100%; display: flex; gap: 8px; }
-.ord-rekey .js-input { flex: 1; min-width: 0; }
+.ord-addbox[hidden], .ord-off[hidden] { display: none; }
 .ord-add, .ord-more { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; padding: 8px 14px; border-radius: 22px;
   border: 1px dashed var(--border); background: transparent; color: var(--text2); font: inherit; font-size: 16px; cursor: pointer; }
 .ord-add:hover, .ord-more:hover { background: var(--bg3); color: var(--text); }
@@ -224,7 +227,7 @@ body.in-console .hud-actions { display: none; }
 .ord-drop-line[hidden] { display: none; }
 body.ord-is-dragging, body.ord-is-dragging * { cursor: grabbing !important; user-select: none; }
 .ord-pressing { outline: 2px dashed var(--accent-line); outline-offset: 3px; }
-.ord-badges-m { display: none; }
+
 /* 0.353.0: the accounts of a plan card (ChatGPT, Grok, Claude Code). */
 .ord-pacct { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 .ord-pacct .prov-auth-title { margin-bottom: 2px; }
@@ -232,8 +235,7 @@ body.ord-is-dragging, body.ord-is-dragging * { cursor: grabbing !important; user
 .ord-pcode { font-size: 20px; letter-spacing: 1px; padding: 2px 8px; }
 .ord-pstep:empty { display: none; }
 .ord-pstep { display: flex; flex-direction: column; gap: 8px; font-size: 16px; }
-.prov-card.ord-raise, .gcard.ord-raise { position: relative; z-index: 70; }
-/* Phone pickers (0.352.0): a bottom sheet with a title and a close button instead of a popover over the card. */
+/* Pickers (0.352.0 phone, 05/11/2026 every screen): a bottom sheet with a title and a close button. */
 .ord-sheet-back { position: fixed; inset: 0; z-index: 900; background: rgba(0, 0, 0, .5); }
 .ord-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 901; display: flex; flex-direction: column;
   max-height: min(78vh, 680px); background: var(--bg2); border: 1px solid var(--border); border-bottom: 0;
@@ -249,13 +251,127 @@ body.ord-is-dragging, body.ord-is-dragging * { cursor: grabbing !important; user
 .ord-sheet .mb-prov { font-size: 14px; padding: 14px 8px 6px; }
 .ord-sheet .eff-head { font-size: 16px; }
 .ord-sheet .eff-track { height: 36px; }
+/* Owner 05/11/2026: every picker and menu of the Models page is a pull-up sheet, on a computer too, in the
+   Tasks page's style. A computer gets a narrower sheet centered at the bottom instead of a full-width one. */
+.ord-sheet { animation: ordSheetUp .2s ease-out; }
+@keyframes ordSheetUp { from { transform: translateY(100%); } to { transform: none; } }
+@media (min-width: 601px) {
+  .ord-sheet { left: 50%; right: auto; width: min(480px, calc(100vw - 32px)); transform: translateX(-50%);
+    animation-name: ordSheetUpC; border-bottom: 0; }
+  @keyframes ordSheetUpC { from { transform: translate(-50%, 100%); } to { transform: translateX(-50%); } }
+}
+@media (prefers-reduced-motion: reduce) { .ord-sheet { animation: none; } }
+.ord-cmenu { flex: none; margin-left: 2px; }
+.ord-limit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; padding: 8px 10px;
+  border-radius: 10px; background: var(--warn-wash, rgba(234, 179, 8, .1)); color: var(--warn-ink, var(--text2)); font-size: 15px; }
+.ord-limit > span { flex: 1 1 200px; min-width: 0; }
+.ord-limit .gcard-btn { width: auto; min-height: 36px; padding: 6px 14px; }
 .ord-mname { min-width: 0; overflow-wrap: anywhere; }
+
+/* ---- Models page, approved design (owner 05/11/2026, docs/design/models-page-redesign.html) ---- */
+/* The provider's logo in a tile, a dot for its state. A one-colour logo takes the text colour (light and dark). */
+.prov-logo { position: relative; flex: none; width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text); }
+.prov-logo > svg { width: 26px; height: 26px; }
+.prov-logo.ic-tile { color: var(--text2); }
+.prov-logo.ic-tile > svg { width: 22px; height: 22px; }
+.prov-logo.sm { width: 36px; height: 36px; border-radius: 10px; }
+.prov-logo.sm > svg { width: 22px; height: 22px; }
+.prov-dot { position: absolute; right: -3px; bottom: -3px; width: 14px; height: 14px; border-radius: 50%;
+  border: 3px solid var(--bg2); background: var(--text3); }
+.prov-dot.on { background: var(--green); }
+.prov-dot.rest { background: var(--warn-ink); }
+.prov-status { display: flex; align-items: center; gap: 6px; }
+.prov-status > .ic { flex: none; width: 16px; height: 16px; }
+.prov-status.rest { color: var(--warn-ink); }
+.prov-kind { font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 6px; }
+.ord-card .prov-name { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.ord-card .prov-name .prov-kind { margin-left: 0; }
+.ord-pill { font-size: 13px; }
+/* Chips: model (chip icon) and Effort (the app's own chip, with the Fast mode bolt), then the badges at the end. */
+.ord-chips .ord-mchip .ic { width: 16px; height: 16px; flex: none; color: var(--text2); }
+.ord-chips .ord-mchip .ord-up { color: var(--text3); }
+.ord-badges-m { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; }
+.ord-badges-m .prov-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 800; padding: 3px 8px; border-radius: 8px; }
+.ord-badges-m .prov-badge .ic { width: 14px; height: 14px; }
+.ord-badges-m .ord-pos { font-size: 13px; padding: 3px 8px; border-radius: 8px; border: 1px solid var(--border); }
+.prov-badge.ord-bgb { color: var(--accent2-ink); border-color: var(--accent2-ink); background: var(--accent2-wash); }
+.prov-card.ord-card { padding: 14px 14px 12px; border-radius: 18px; }
+/* The button row under a card: icon + word, Disconnect last and red, pushed right. */
+.ord-acts { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.ord-act { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 12px; border: 0; border-radius: 10px;
+  background: none; color: var(--text2); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.ord-act:hover, .ord-act:focus-visible { background: var(--bg3); color: var(--text); }
+.ord-act .ic { width: 18px; height: 18px; flex: none; }
+.ord-act.danger { color: var(--red); margin-left: auto; }
+.ord-act:disabled { opacity: .5; cursor: default; }
+/* Key and account rows: an icon tile, the name, a state line with its icon, ⋯ at the end. */
+.ord-acct { border-radius: 14px; min-height: 52px; background: var(--bg); }
+.ord-ai { flex: none; width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; background: var(--bg3); color: var(--text2); }
+.ord-ai .ic { width: 17px; height: 17px; }
+.ord-ast { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; }
+.ord-ast .ic { width: 14px; height: 14px; flex: none; }
+.ord-ast.ready { color: var(--green); }
+.ord-ast.rest { color: var(--warn-ink); }
+.ord-acct.inuse .ord-ai { background: var(--green); color: #fff; }
+.ord-acct.inuse-bg .ord-ai { background: var(--accent2-ink); color: #fff; }
+.ord-offnote { display: flex; align-items: flex-start; gap: 10px; margin-top: 12px; padding: 10px 12px; border-radius: 12px;
+  background: var(--bg3); color: var(--text2); font-size: 15px; }
+.ord-offnote .ic { flex: none; width: 18px; height: 18px; margin-top: 2px; }
+/* The background model card: the model chip icon in front. */
+.aux-now .aux-ic { width: 40px; height: 40px; }
+.aux-now-txt { flex: 1; }
+/* "Connect another provider": three real logos stacked, the names, an arrow that turns over when the list below opens. */
+.ord-more { display: flex; width: 100%; max-width: 760px; align-items: center; gap: 12px; margin: 0 0 10px; padding: 12px 14px;
+  border-radius: 18px; border: 1px dashed var(--border); text-align: left; }
+.ord-stack { display: flex; flex: none; }
+.prov-logo.mini { width: 34px; height: 34px; border-radius: 50%; margin-left: -8px; border: 2px solid var(--bg); }
+.prov-logo.mini:first-child { margin-left: 0; }
+.prov-logo.mini > svg { width: 18px; height: 18px; }
+.ord-more-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ord-more-t b { color: var(--text); font-size: 16px; }
+.ord-more-t span { color: var(--text3); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ord-more-c { flex: none; color: var(--text3); transition: transform .2s; }
+.ord-more[aria-expanded="true"] .ord-more-c { transform: rotate(180deg); }
+/* Sheets in the Tasks page's style: grouped finger-sized rows, an icon tile, a short line under the label. */
+.ord-sheet-head .prov-logo { flex: none; }
+.ord-sheet-head small { display: block; font-size: 14px; font-weight: 500; color: var(--text3); overflow: hidden; text-overflow: ellipsis; }
+.ord-mgrp { padding: 4px 0; }
+.ord-mgrp + .ord-mgrp { border-top: 1px solid var(--border); }
+.ord-mi { width: 100%; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 4px 10px; border: 0; border-radius: 12px;
+  background: none; color: var(--text); font: inherit; font-size: 16px; text-align: left; cursor: pointer; }
+button.ord-mi:hover, button.ord-mi:focus-visible { background: var(--bg3); }
+.ord-mic { flex: none; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--bg3); color: var(--text2); }
+.ord-mic .ic { width: 18px; height: 18px; }
+.ord-mic.logo { color: var(--text); }
+.ord-mic.logo > svg { width: 22px; height: 22px; }
+.ord-mt { flex: 1; min-width: 0; }
+.ord-ms { display: block; font-size: 14px; color: var(--text3); overflow-wrap: anywhere; }
+.ord-mi.danger { color: var(--red); }
+.ord-mi.danger .ord-mic { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
+.ord-mi.warn .ord-mic { background: var(--warn-wash); color: var(--warn-ink); }
+.ord-mi.acc .ord-mic { background: var(--accent-wash-2); color: var(--accent-ink); }
+.ord-mi.bgsel { cursor: default; }
+.ord-mi.bgsel .ord-mt { color: var(--accent2-ink); }
+.ord-mi.bgsel .ord-mic { background: var(--accent2-wash); color: var(--accent2-ink); }
+.ord-steps .ord-mi { cursor: default; }
+.ord-sform { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px 8px; }
+.ord-sform .js-input { font-size: 16px; min-height: 50px; border-radius: 14px; }
+.ord-sform .ord-offnote { margin-top: 0; }
+.ord-sfmsg:empty { display: none; }
+.ord-cq { margin: 4px 6px 14px; color: var(--text2); font-size: 16px; line-height: 1.5; }
+.ord-btns { display: flex; gap: 10px; }
+.ord-btn { flex: 1; min-height: 50px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg3); color: var(--text);
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; font: inherit; font-weight: 700; font-size: 16px; cursor: pointer; }
+.ord-btn .ic { width: 18px; height: 18px; }
+.ord-btn.red { background: var(--red); border-color: var(--red); color: #fff; }
+.ord-btn.pri { background: var(--accent); border-color: var(--accent); color: var(--on-accent, #1a0d05); }
+.ord-btn:disabled { opacity: .55; cursor: default; }
+.ord-btn[hidden] { display: none; }
+.ord-pstep .ord-btn { margin-top: 8px; width: 100%; }
+.ord-cmd { display: block; padding: 10px 12px; border-radius: 10px; background: var(--bg); overflow-wrap: anywhere; font-size: 14px; }
 .ord-msec { cursor: default; border-top: 1px solid var(--border); margin-top: 6px; }
 @media (max-width: 600px) {
-  .ord-menu { padding-left: 4px; }
-  /* Name, kind label and status get the whole head; the MAIN / Fallback badge moves to the end of the chip row. */
-  .ord-head .ord-badges { display: none; }
-  .ord-chips .ord-badges-m { display: flex; flex-direction: row; align-items: center; gap: 6px; margin-left: auto; }
   .ord-head .prov-status { overflow-wrap: anywhere; }
   .aux-now { flex-wrap: wrap; }
   .aux-now-act.ord-chips { width: 100%; justify-content: flex-end; }
@@ -273,6 +389,11 @@ body.ord-is-dragging, body.ord-is-dragging * { cursor: grabbing !important; user
 .prov-help summary { cursor: pointer; color: var(--text2); }
 .prov-help > div { margin-top: 4px; color: var(--text2); }
 .prov-action .js-input { margin-bottom: 0; flex: 1; }
+/* The account name asked at a card's first sign-in (owner 07/11/2026): its own full row above the buttons, 16px so iOS
+   does not zoom in. An empty box the sign-in waits for, here or in the add-account sheet, turns red. */
+.prov-action .prov-acname { flex: 1 1 100%; max-width: 420px; font-size: 16px; }
+.prov-action .prov-acname + .gcard-btn { margin-left: 0; }
+.js-input.need:placeholder-shown { border-color: var(--red); box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 20%, transparent); }
 /* Claude sign-in code (0.308.0): the box takes the row, at least 240px before the button wraps under it on a phone;
    16px so iOS does not zoom in, monospace so a mistyped character is easy to spot. */
 .prov-code { margin-top: 6px; max-width: 560px; }
@@ -302,6 +423,17 @@ body.ord-is-dragging, body.ord-is-dragging * { cursor: grabbing !important; user
 .prov-auth-opt input { margin-top: 3px; flex: 0 0 auto; }
 .prov-auth-opt b { color: var(--text); font-weight: 600; }
 .prov-auth-opt i { color: var(--text3); }
+/* Long-lived Claude token (2026-11-22): the saved token's line and its buttons, under "Runs on". */
+.prov-tok { margin-top: 8px; }
+.prov-tok-row { display: flex; align-items: center; gap: 8px; font-size: 16px; line-height: 1.5; color: var(--text2); }
+.prov-tok-row > svg { flex: 0 0 auto; width: 18px; height: 18px; color: var(--green, var(--text2)); }
+.prov-tok-row.warn { color: var(--warn-ink); }
+.prov-tok-row.warn > svg { color: var(--warn-ink); }
+.prov-tok .prov-action { margin-top: 8px; }
+.prov-tok .prov-code[hidden] { display: none; }
+/* A destructive button in a card row: last, pushed right, red (design-style 6). */
+.gcard-btn.ghost.danger { margin-left: auto; color: var(--red); border-color: var(--danger-line); }
+.gcard-btn.ghost.danger:hover { background: var(--danger-wash); color: var(--red); border-color: var(--red); }
 .prov-auth-warn { font-size: 16px; line-height: 1.55; color: var(--warn-ink); background: var(--warn-wash); border: 1px solid var(--warn-line); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
 
 /* Auxiliary model chips */
@@ -414,15 +546,20 @@ body.ord-is-dragging, body.ord-is-dragging * { cursor: grabbing !important; user
 .sk-group-head .dim { color: var(--text3); font-weight: 400; margin-left: 6px; }
 
 .rail-spacer { flex: 1; }
-.rail-lang {                                           /* ô đổi ngôn ngữ giao diện, ngay trên hàng version */
-  display: flex; align-items: center; gap: 6px; padding: 8px 6px 0;
+/* Ô đổi ngôn ngữ giao diện, ngay trên hàng version. Ô và hàng version là MỘT khối chân rail: chung
+   một đường kẻ phía trên, cách nhau một nhịp đều (chủ repo, 0.481.5: hai đường kẻ chồng nhau và ô
+   chọn dính sát vào hàng version). `display:flex` đè mất thuộc tính `hidden`, nên phải ẩn lại tay. */
+.rail-lang {
+  display: flex; align-items: center; gap: 8px; padding: 10px 6px 8px;
   border-top: 1px solid var(--glass-brd); color: var(--text3);
 }
+.rail-lang[hidden] { display: none; }
+.rail-lang:not([hidden]) + .rail-foot { border-top: 0; padding-top: 0; }
 .rail-lang svg { width: 14px; height: 14px; flex: 0 0 auto; }
 .rail-lang-sel {
-  flex: 1; min-width: 0; background: transparent; color: var(--text2);
+  flex: 1; min-width: 0; height: 32px; background: transparent; color: var(--text2);
   border: 1px solid var(--glass-brd); border-radius: 8px;
-  font-family: var(--font-ui); font-size: 12px; padding: 4px 6px; cursor: pointer;
+  font-family: var(--font-ui); font-size: 13px; line-height: 1.2; padding: 0 8px; cursor: pointer;
 }
 .rail-lang-sel:hover { color: var(--text); background: var(--surface-2); }
 .rail-lang-sel option { background: var(--panel-solid); color: var(--text); }
@@ -469,9 +606,11 @@ body.ord-is-dragging, body.ord-is-dragging * { cursor: grabbing !important; user
   }
   .rail.collapsed .rail-item { justify-content: center; padding: 9px 0; gap: 0; }
   .rail.collapsed .rail-item .rail-lbl { display: none; }       /* giấu chữ, chỉ còn icon */
+  .rail.collapsed .rail-item .rail-dot { position: absolute; top: 6px; right: 12px; margin: 0; } /* chấm nằm ở góc icon */
   .rail.collapsed .rail-brand-text { display: none; }           /* thu gọn: chỉ còn dấu ấn, chữ không vừa */
   .rail.collapsed .rf-meta { display: none; }                   /* giấu version/tác giả cho vừa bề ngang hẹp, chỉ còn nút */
   .rail.collapsed .rail-lang { display: none; }                 /* ô ngôn ngữ cũng không vừa bề ngang thu gọn */
+  .rail.collapsed .rail-lang + .rail-foot { border-top: 1px solid var(--glass-brd); padding-top: 8px; } /* ô ẩn thì hàng nút giữ lại đường kẻ */
   .rail.collapsed .rail-foot { justify-content: center; }       /* thu: chỉ còn nút, căn giữa */
 }
 
@@ -571,9 +710,11 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .settings-page { width: min(100%, 960px); margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
 .cview-body:has(> .settings-tabs-page) { padding-top: 0; }
 .settings-tabs-page { width: 100%; margin: 0; min-width: 0; }
-.vt-create-menu { position: fixed; margin: 0; padding: 5px; width: 204px; max-width: calc(100vw - 16px); border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); box-shadow: var(--shadow-1); }
+.vt-create-menu { position: fixed; margin: 0; padding: 5px; width: max-content; min-width: 204px; max-width: min(300px, calc(100vw - 16px)); border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); box-shadow: var(--shadow-1); }
 .vt-create-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; text-align: left; }
 .vt-create-menu button:hover, .vt-create-menu button:focus-visible { background: var(--surface-2); }
+.vt-create-menu button.danger { color: var(--red); }
+.vt-create-menu hr { margin: 4px 6px; border: 0; border-top: 1px solid var(--border); }
 .ne-location-side { display: flex; flex-direction: column; flex: 0 0 280px; min-height: 0; max-width: 75vw; border-right: 1px solid var(--border); padding-right: 10px; }
 .ne-location-side > button { align-self: flex-end; }
 @media (max-width: 700px) { .fm-edit > .ne-location-side { position: absolute; inset: 0 auto 0 0; z-index: 5; width: 280px; background: var(--bg); } }
@@ -642,31 +783,102 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .settings-card { min-width: 0; padding: 14px; border: 1px solid var(--glass-brd); border-radius: 12px; background: var(--surface-1); }
 .settings-card.compact { max-width: 520px; margin-top: 16px; }
 
-/* Danh sách link chia sẻ. Mỗi hàng là một link đang SỐNG ngoài Internet, nên nút Thu hồi
-   phải luôn nhìn thấy chứ không nấp sau menu. Màn hẹp thì xuống dòng, hàng nút tụt xuống
-   dưới khối thông tin, không bao giờ bị đẩy khuất. */
-/* Ô tìm của trang Chia sẻ. Cỡ chữ 16px là cố ý: dưới 16px thì Safari trên iPhone TỰ PHÓNG TO
-   cả trang khi chạm vào ô nhập, và trang này hay được mở trên điện thoại. */
+/* Share links page (rebuilt 2026-11-06). Every row is a link LIVE on the Internet, so its actions are always visible
+   icons, never hidden behind a menu; on a narrow screen they drop under the text block instead of being pushed out.
+   Search box at 16px on purpose: below that, Safari on iPhone zooms the whole page when the field is tapped. */
+.share-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; font-size: 14px; color: var(--text2); }
+.share-stat { display: inline-flex; align-items: center; gap: 6px; }
+.share-stat b { color: var(--text-hi); font-size: 16px; }
+.share-stat .ic { width: 16px; height: 16px; color: var(--text3); }
 .share-search { width: 100%; box-sizing: border-box; margin-top: 12px; padding: 9px 12px;
   border: 1px solid var(--border); border-radius: 9px; background: var(--bg2);
   color: var(--text-hi); font-size: 16px; }
 .share-search:focus { outline: none; border-color: var(--accent-line); }
+.share-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.share-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.share-chip { border: 1px solid var(--glass-brd); background: none; color: var(--text2); border-radius: 999px;
+  padding: 5px 12px; font-size: 13px; cursor: pointer; }
+.share-chip:hover { background: var(--surface-2); }
+.share-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.share-sort { display: inline-flex; align-items: center; gap: 6px; color: var(--text3); }
+.share-sort .ic { width: 15px; height: 15px; }
+.share-sort select { border: 1px solid var(--glass-brd); border-radius: 8px; background: var(--bg2); color: var(--text-hi);
+  padding: 5px 8px; font-size: 13px; }
 .share-count { margin-top: 6px; min-height: 1.2em; font-size: 13px; color: var(--text3); }
 .share-empty { padding: 14px 2px; color: var(--text2); }
-.share-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
-.share-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-  justify-content: space-between; padding: 12px 14px; border: 1px solid var(--glass-brd);
+.share-list { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.share-row { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-start;
+  justify-content: space-between; padding: 12px 10px 12px 14px; border: 1px solid var(--glass-brd);
   border-radius: 10px; background: var(--surface-2); }
 .share-info { min-width: 0; flex: 1 1 260px; }
 .share-name { font-weight: 600; color: var(--text-hi); overflow-wrap: anywhere; }
 .share-path { font-size: 12px; color: var(--text2); margin-top: 2px; overflow-wrap: anywhere; }
 .share-url { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--accent);
   overflow-wrap: anywhere; }
-.share-acts { display: flex; gap: 8px; flex-wrap: wrap; }
-/* Điện thoại: đường dẫn và link đọc được, không phải lác mắt; nút đủ to để chạm. */
+.share-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--text2); }
+.share-views { display: inline-flex; align-items: center; gap: 5px; color: var(--text-hi); }
+.share-views b { font-size: 14px; }
+.share-views .ic { width: 15px; height: 15px; color: var(--accent); }
+.share-views.none { color: var(--text3); }
+.share-views.none .ic { color: var(--text3); }
+.share-spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 18px; }
+.share-spark i { display: block; width: 4px; border-radius: 1px; background: var(--accent); opacity: .8; }
+.share-spark i.z { background: var(--text3); opacity: .3; }
+/* Icon actions, same look as the Tasks page row icons (.nv-starb.nv-tri1): 32px, no frame, red only on hover for revoke. */
+.share-acts { display: flex; gap: 2px; flex: none; }
+.share-ib { width: 32px; height: 32px; flex: none; border: 0; border-radius: 8px; background: none; color: var(--text2);
+  cursor: pointer; display: grid; place-items: center; text-decoration: none; }
+.share-ib:hover, .share-ib:focus-visible { background: var(--surface-1); color: var(--text-hi); }
+.share-ib .ic { width: 16px; height: 16px; }
+.share-ib.bad:hover, .share-ib.bad:focus-visible { color: var(--red); }
+.share-ib.ok { color: var(--green, #16a34a); }
+.share-ib[disabled] { opacity: .45; cursor: default; }
+/* Edit dialog: centered card on a computer, a sheet from the bottom on a phone. */
+.share-dlg-wrap { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; }
+.share-dlg-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); }
+.share-dlg { position: relative; width: 460px; max-width: calc(100vw - 24px); box-sizing: border-box; padding: 14px 16px 16px;
+  border: 1px solid var(--glass-brd); border-radius: 14px; background: var(--panel-solid, var(--bg2)); color: var(--text-hi);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .35); }
+.share-dlg-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 16px; }
+.share-fld { display: block; margin-top: 10px; font-size: 13px; color: var(--text2); }
+.share-fld > span:first-child { display: block; margin-bottom: 5px; }
+.share-fld input { width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--bg2); color: var(--text-hi); font-size: 16px; }
+.share-fld input:focus { outline: none; border-color: var(--accent-line); }
+.share-slug { display: flex; align-items: stretch; border: 1px solid var(--border); border-radius: 9px; background: var(--bg2); overflow: hidden; }
+.share-slug:focus-within { border-color: var(--accent-line); }
+.share-slug-pre { display: flex; align-items: center; padding: 0 0 0 11px; color: var(--text3); font-size: 16px; white-space: nowrap; }
+.share-slug input { border: 0; border-radius: 0; padding-left: 2px; min-width: 0; }
+.share-dlg-note { margin-top: 8px; font-size: 13px; color: var(--text3); line-height: 1.45; overflow-wrap: anywhere; }
+.share-tok { color: var(--text2); }
+.share-dlg-err { margin-top: 8px; min-height: 1.2em; font-size: 13px; color: var(--red); }
+.share-dlg-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.share-dlg-acts a.gcard-btn, .share-dlg-acts .gcard-btn { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.share-dlg-acts .gcard-btn .ic { width: 16px; height: 16px; }
+/* QR dialog: the code on its own white tile (it has its own quiet zone), centered, big enough to scan off a screen. */
+.share-qr-dlg { width: 340px; text-align: center; }
+.share-qr-img { display: block; width: 240px; height: 240px; margin: 6px auto 10px; border-radius: 10px; background: #fff; }
+.share-qr-url { font-size: 13px; color: var(--text2); overflow-wrap: anywhere; }
+.share-qr-dlg .share-dlg-acts { justify-content: center; }
+/* Phone: bigger text and 40px touch targets; the dialog becomes a bottom sheet. */
 @media (max-width: 900px) {
-  .share-path, .share-url, .share-count { font-size: 14px; }
-  .share-acts .gcard-btn { font-size: 15px; padding: 8px 12px; }
+  .share-sum { font-size: 15px; }
+  .share-name { font-size: 16px; }
+  .share-path, .share-url, .share-count, .share-meta { font-size: 14px; }
+  .share-chip, .share-sort select { font-size: 15px; padding: 7px 13px; }
+  /* Chips scroll sideways in one row instead of wrapping onto two (owner: save vertical space). */
+  .share-chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; max-width: 100%; }
+  .share-chip { flex: none; }
+  .share-ib { width: 40px; height: 40px; }
+  .share-ib .ic { width: 18px; height: 18px; }
+  .share-acts { width: 100%; justify-content: flex-end; border-top: 1px solid var(--glass-brd); padding-top: 4px; }
+  .share-dlg-wrap { place-items: end stretch; }
+  .share-dlg { width: auto; max-width: none; border-radius: 16px 16px 0 0; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .share-fld, .share-dlg-note, .share-dlg-err { font-size: 15px; }
+  .share-qr-dlg { width: auto; }
+  .share-qr-img { width: min(72vw, 300px); height: min(72vw, 300px); }
+  .share-qr-url { font-size: 15px; }
+  .share-dlg-acts .gcard-btn { font-size: 16px; padding: 10px 16px; }
 }
 .settings-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .settings-card p { margin: 8px 0 0; color: var(--text2); font-size: 13px; line-height: 1.5; }
@@ -806,20 +1018,20 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
     --topbar-h: calc(46px + env(safe-area-inset-top, 0px));
   }   /* header thấp hơn trên mobile nhưng vẫn chừa tai thỏ khi chạy full-screen */
 
-  /* Header mobile: chỉ nút menu, chip model, nút thêm. Ẩn phần rườm rà. */
+  /* Phone header: menu, bell and the + button only (the model chip stays in the composer since 2026-11-09). */
   .nav-toggle-btn, .new-chat-btn { display: inline-flex; }
-  /* Header CỐ ĐỊNH trên cùng: luôn thấy nút menu, chip model, nút thêm ở mọi trang, không bị cuộn trôi mất. */
+  /* Header CỐ ĐỊNH trên cùng: luôn thấy nút menu, chuông, nút thêm ở mọi trang, không bị cuộn trôi mất. */
   .hud-top { position: fixed; top: 0; left: 0; right: 0; height: 46px; z-index: 55;
     background: var(--bg2); border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 6px; padding: 0 8px; }
-  .hud-top-left, .hud-top-right { display: none; }    /* rỗng ở mobile: nút menu, chip model, nút thêm là con trực tiếp header */
+  .hud-top-left, .hud-top-right { display: none; }    /* rỗng ở mobile: nút menu, chuông, nút thêm là con trực tiếp header */
   .hud-top .brand, .hud-top .navbar-brain,
-  .hud-top #themeToggle, .hud-top #studioOpenBtn,
+  .hud-top #themeToggle, .hud-top #soundToggle, .hud-top #studioOpenBtn,
   .hud-top #settingsBtn, .hud-top #ttsToggle, .hud-top #resetBtn { display: none; }
-  .hud-center-title { display: none; }                /* mobile: ẩn tên workspace + ngày; chip model làm giữa header */
-  /* 0.182.0 (owner: putting the chip in the composer on a phone "là sai lầm"): back to the top bar, centred, as before 0.180.0.
-     It keeps the short model name and the pin icon from 0.180.0, so it stays narrow. */
-  .hud-top #mbOpen { display: inline-flex; margin-left: auto; margin-right: auto; max-width: 56vw; }  /* chip model căn giữa, đẩy ＋ sang phải */
+  .hud-center-title { display: none; }                /* mobile: ẩn tên workspace + ngày */
+  /* 2026-11-09 (owner): the model chip left the header for the composer, next to the Effort chip as on a computer. The
+     header centre is empty now, so the + button pushes itself to the right edge. */
+  .hud-top .new-chat-btn { margin-left: auto; }
   .hud-top .notification-trigger {
     flex: 0 0 34px; width: 34px; min-width: 34px; height: 34px; padding: 0;
   }
@@ -836,10 +1048,7 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
   .notification-shade { background: var(--scrim); backdrop-filter: blur(2px); }
   .noti-head { padding: 14px 13px 12px; }
   .noti-list { padding: 7px; }
-  .hud-top #mbPop { position: fixed; top: calc(50px + env(safe-area-inset-top, 0px)); bottom: auto; left: 50%; transform: translateX(-50%);
-    width: min(340px, 92vw); z-index: 200; max-height: 70vh; }
   .model-bar { display: none; }                       /* hàng model gốc ẩn; chip bên trong dời đi (JS) */
-  #jv-sess-btn { display: none; }                     /* nút Lịch sử: ẩn ở mobile để header cockpit khỏi chồng/lệch */
 
   /* Rail: từ thanh đáy → ngăn kéo trượt từ trái */
   .rail {
@@ -863,7 +1072,11 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
   body.nav-open .rail { left: 0; visibility: visible; transition: left .22s ease, visibility 0s;
     box-shadow: 8px 0 40px var(--shadow-veil); }
   .rail-top, .rail-foot { display: flex; }            /* hiện lại brand + version trong ngăn kéo */
-  .rail-nav { flex-direction: column; overflow: visible; gap: 2px; padding: 0; }
+  .rail-nav { flex-direction: column; overflow: visible; gap: 2px; padding: 0; flex: 1 0 auto; }
+  /* The drawer itself scrolls, so nothing inside may shrink. The desktop rule gives the nav list `min-height: 0` to let
+     it scroll on its own; left in the drawer, a long menu was squeezed below its content and the "System" group spilled
+     over the language picker under it (owner, iPhone 13 Safari, 2026-11-06). */
+  .rail > * { flex-shrink: 0; }
   .rail-group, .rail-grp-items { display: block; }
   .rail-grp-lbl { display: flex; }
   .rail-item { flex: none; flex-direction: row; gap: 10px; padding: 9px 10px; border-radius: 9px; }
@@ -881,9 +1094,11 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
   .rail-sys-btns:empty { display: none; }
   /* Light/dark switch in the drawer's foot, beside the collapse button (owner, 0.393.0): same size and outline, so the
      two read as one pair of small controls on the version row. */
-  .rail-foot #themeToggle { order: 2; margin-left: auto; display: inline-flex; align-items: center;
+  .rail-foot #themeToggle, .rail-foot #soundToggle { order: 2; margin-left: auto; display: inline-flex; align-items: center;
     justify-content: center; width: 32px; height: 28px; padding: 0; border-radius: 8px; flex: 0 0 auto; }
-  .rail-foot #themeToggle svg { width: 17px; height: 17px; }
+  .rail-foot #themeToggle svg, .rail-foot #soundToggle svg { width: 17px; height: 17px; }
+  /* The sound switch (2026-11-06) sits just left of the light/dark one: the pair stays together on the right. */
+  .rail-foot #soundToggle + #themeToggle { margin-left: 0; }
 
   /* Nền mờ khi mở ngăn kéo */
   /* Shown by the drawer's own state only (0.216.0): a dim screen with no drawer on it can no longer stay behind. */
@@ -995,6 +1210,10 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
      Xếp lại tường minh, mỗi nút một hàng. */
   .graph-timelapse-btn { top: 46px; }
   .brain-max-btn { top: 85px; }
+  /* Node / Link counter: a small pill in the top-left corner. The nearest folder label is centred at 19% of a 210px
+     view (its top edge at 32px), so the pill ends at 26px to leave a gap. */
+  .graph-stats { top: 6px; left: 7px; height: 20px; line-height: 18px; padding: 0 7px; border-radius: 7px;
+    font-size: 10.5px; letter-spacing: .2px; max-width: calc(100% - 56px); }
 
   /* Agents / Skills / Workflows thành một thanh mỏng thay vì một card lớn che neuron.
      Số và nhãn nằm CÙNG MỘT DÒNG: xếp chồng như desktop thì dải cao ~56px, tức một phần tư
@@ -1018,16 +1237,18 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
   body.brain-max .brain-max-btn .bmx-out { display: block; }
   body.brain-max .brain-max-btn { color: var(--accent-ink); border-color: var(--accent-line); }
 
-  /* Ô nhập luôn nằm trong visual viewport của Safari/Chrome iOS và chừa safe area. */
+  /* Ô nhập luôn nằm trong visual viewport của Safari/Chrome iOS và chừa safe area. Since 21/11/2026 every bottom
+     margin here also keeps the room of the row under the card (#cpUnder, --cp-under-h in style.css), which hangs
+     below the card's border. */
   .hud-voice {
     min-width: 0;
-    margin: 5px 8px max(7px, env(safe-area-inset-bottom, 0px));
+    margin: 5px 8px calc(max(7px, env(safe-area-inset-bottom, 0px)) + var(--cp-under-h, 0px));
   }
   .hud-voice .voice-input { min-width: 0; }
   /* Trang quản lý (Trò chuyện, Coding, Cộng sự) mượn ô nhập vào một cột đã có lề đáy riêng.
      Trước đây lề an toàn cộng CHỒNG lên lề cột (34 + 12px), ô nhập đứng lửng cách đáy màn
      hình gần 50px. Nay lề an toàn chuyển xuống cột, ô nhập không tự chừa thêm. */
-  .cview .hud-voice { margin-bottom: 0; }
+  .cview .hud-voice { margin-bottom: var(--cp-under-h, 0px); }
   .cview .chatpage-main, .cview .ws-main { padding-bottom: max(10px, env(safe-area-inset-bottom, 0px)); }
 
   /* BÀN PHÍM ĐANG MỞ (lớp do mobile-chat.js gắn theo visualViewport). Vạch Home nằm dưới bàn
@@ -1048,8 +1269,8 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
     top: calc(var(--vv-top, 0px) + var(--topbar-h)); bottom: auto;
     height: calc(var(--vv-h, 100dvh) - var(--topbar-h));
   }
-  body.kb-open .hud-voice { margin-bottom: 6px; }
-  body.kb-open .cview .hud-voice { margin-bottom: 0; }
+  body.kb-open .hud-voice { margin-bottom: calc(6px + var(--cp-under-h, 0px)); }
+  body.kb-open .cview .hud-voice { margin-bottom: var(--cp-under-h, 0px); }
   body.kb-open .cview .chatpage-main, body.kb-open .cview .ws-main { padding-bottom: 6px; }
   .cview-head { padding: 14px 16px; }
   .cview-title { font-size: 16px; }
@@ -1103,6 +1324,10 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .reuse-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 2px 0 6px;
   padding: 9px 12px; border: 1px solid var(--ok-line); border-radius: 10px; background: var(--ok-wash); }
 .reuse-row select { max-width: 200px; }
+/* 2026-11-16: the row now sits at the top of a Google form and is often the only thing the owner needs, so its
+   sentence reads at the 16px floor (docs/dev/design-style.md), not as a 13px footnote. */
+.reuse-row > .mp-note { font-size: 16px; color: var(--text2); flex-basis: 100%; }
+.reuse-row .mp-btn { margin-left: 0; }   /* one left edge with the select above it */
 /* Đèn báo não: bộ não mất đăng nhập - dải đỏ mỏng giữa thanh trạng thái */
 /* Ngắn gọn và BẤM ĐƯỢC. Trước đây chuỗi dài hơn cả thanh trạng thái nên bị cắt cụt giữa
    chừng, và phần bị cắt lại đúng là phần nói phải làm gì. Nay chữ đủ ngắn để không cần cắt;
@@ -1209,6 +1434,19 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .aud-ts { opacity: .55; font-size: 12px; margin-right: 6px; }
 .aud-err { font-size: 12px; opacity: .8; margin-top: 2px; }
 
+
+/* "Forgot your current password?" under the change-password form (Account page, 2026-11-20). A quiet text link: it
+   is the way out for a few owners, not an action for everyone, so it must not compete with "Change password". */
+.ac-forgot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--hairline, var(--surface-2)); }
+.ac-forgot-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-height: 36px; }
+.ac-forgot-btn, .ac-forgot .info-i.with-text { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px;
+  margin-left: -6px; border: 0; border-radius: 8px; background: none; cursor: pointer; font: inherit; font-size: 16px;
+  color: var(--accent); }
+.ac-forgot-btn svg { width: 18px; height: 18px; flex: none; }
+.ac-forgot-btn:hover, .ac-forgot .info-i.with-text:hover { background: var(--surface-2); }
+.ac-forgot-steps { padding-left: 1.5em; }
+.ac-forgot-steps li + li { margin-top: 6px; }
+@media (max-width: 600px) { .ac-forgot-row { min-height: 44px; } .ac-forgot-btn, .ac-forgot .info-i.with-text { min-height: 44px; } }
 
 /* Xác thực 2 lớp (trang Tài khoản) */
 .tfa-card .tfa-warn { color: var(--warn-ink); font-weight: 600; }
@@ -1475,6 +1713,8 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .kho-btn-go { background: transparent; color: var(--danger-ink, #b3261e);
   border-color: var(--border); }
 .kho-btn-go:hover { border-color: var(--danger-ink, #b3261e); }
+/* An empty search in one tab: the offer to run it on the All tab sits under the message, on the same left edge. */
+.kho-search-all { display: flex; margin-top: 12px; }
 
 .kho-trang { display: flex; align-items: center; gap: 6px; margin-top: 22px; padding-top: 16px;
   border-top: 1px solid var(--border); flex-wrap: wrap; }
@@ -1785,7 +2025,7 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
   min-height: 0; padding: 14px 12px; border-right: 1px solid var(--glass-brd);
   background: var(--surface-1); }
 .ws-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0;
-  padding: 14px 18px 16px; }
+  padding: 14px 18px 8px; }
 .ws-slot { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
 /* Các node chat MƯỢN của app là mục flex của cột này, và mặc định flex-shrink của một mục
    flex là 1 - tức là ai cũng có thể bị bóp lại. Đoạn hội thoại (.transcript) thì KHÔNG bị,
@@ -1908,6 +2148,11 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .ws-tag-note.loi { background: var(--warn-wash, rgba(255, 122, 60, .12)); color: var(--text); }
 .ws-tag-note-x { flex: none; margin-left: auto; background: none; border: 0; color: inherit; cursor: pointer; padding: 0; }
 .ws-tag-note-x svg { width: 13px; height: 13px; }
+/* 2026-11-11: assistants of one Store pack waiting for "same assistant?": the count, then one button for all of them. */
+.ws-pack-confirm { flex-wrap: wrap; align-items: center; background: var(--warn-wash, rgba(255, 122, 60, .12)); color: var(--text); }
+.ws-pack-confirm-text { flex: 1 1 160px; min-width: 0; }
+.ws-pack-confirm-btn { flex: none; min-height: 32px; }
+@media (max-width: 600px) { .ws-pack-confirm-btn { min-height: 44px; flex: 1 1 100%; justify-content: center; } }
 .ws-tag-new { display: flex; gap: 6px; padding: 4px 6px 6px; }
 .ws-tag-new .ws-tag-in { flex: 1 1 auto; min-width: 0; padding: 6px 8px; border-radius: 7px;
   border: 1px solid var(--line, var(--surface-2)); background: var(--surface-1); color: var(--text); font: inherit; font-size: 13px; }
@@ -1965,6 +2210,33 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
   color: var(--text3); margin: 12px 0 6px; }
 .ws-rtitle:first-child { margin-top: 0; }
 .ws-empty { font-size: 12.5px; color: var(--text3); padding: 8px 2px; }
+/* 2026-11-09 (owner): a small "Loading..." line where a list or a chat has not arrived yet (Partners, Teams), so an
+   empty column does not read as a frozen page. The spinner reuses the Teams page's keyframes. */
+.pg-loading { padding: 12px 6px; font-size: 14px; line-height: 1.4; color: var(--text3); }
+/* An inline-block spinner, so the line works on its own and when the class is added to an existing empty-state
+   element (2026-11-09: every "Loading..." spot of the dashboard), whatever that element's display or alignment. */
+.pg-loading::before { content: ""; display: inline-block; vertical-align: -2px; margin-right: 8px; width: 13px; height: 13px;
+  border-radius: 50%; border: 2px solid var(--border, rgba(140,140,160,.35)); border-top-color: var(--accent);
+  animation: tm-spin .8s linear infinite; }
+.tm-msgs > .pg-loading, .ws-id > .pg-loading { text-align: center; }
+/* A whole page waiting for its data: a bigger spinner in the middle of the view. */
+.pg-loading.pg-page { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  min-height: 40vh; padding: 24px; font-size: 15px; text-align: center; }
+.pg-loading.pg-page::before { width: 28px; height: 28px; border-width: 3px; margin: 0; }
+@media (prefers-reduced-motion: reduce) { .pg-loading::before { animation: none; } }
+@media (max-width: 760px) { .pg-loading { font-size: 16px; } }
+/* Start-up screen (2026-11-09, boot-splash.js): covers the app from the first paint until the first page has its data. */
+.boot-splash { position: fixed; inset: 0; z-index: 100000; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 14px; padding: 24px; text-align: center; background: var(--bg, #f7f5f2); color: var(--text2);
+  transition: opacity .15s ease; }
+.boot-splash.boot-out { opacity: 0; pointer-events: none; }
+.boot-logo { width: 64px; height: 64px; border-radius: 16px; object-fit: contain; }
+.boot-spin { width: 30px; height: 30px; border-radius: 50%; border: 3px solid var(--border, rgba(140,140,160,.35));
+  border-top-color: var(--accent); animation: tm-spin .8s linear infinite; }
+.boot-text { font-size: 16px; font-weight: 600; color: var(--text); min-height: 1.4em; }
+.boot-sub { font-size: 14px; max-width: 320px; line-height: 1.5; }
+@media (max-width: 760px) { .boot-text { font-size: 17px; } .boot-sub { font-size: 16px; } }
+@media (prefers-reduced-motion: reduce) { .boot-spin { animation: none; } .boot-splash { transition: none; } }
 .ws-form label { display: block; font-size: 12px; color: var(--text3); margin: 8px 0 3px; }
 .ws-form input, .ws-form select, .ws-form textarea { width: 100%; box-sizing: border-box; }
 .ws-form h3 { display: none; }   /* tiêu đề "Sửa Agent" thừa: cột phải đã có nhãn riêng */
@@ -2472,10 +2744,18 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .ht-msg.bot, .ht-msg.nguoi { align-self: flex-end; align-items: flex-end; }
 .ht-msg.hethong { align-self: center; max-width: 90%; }
 .ht-msg-h { font-size: 11.5px; color: var(--text3); margin: 0 4px 3px; }
+/* Who wrote an outgoing message (2026-11-22): the agent's own icon, name and an "AI" tag, or a person's icon and name. */
+.ht-who { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
+.ht-who b { font-weight: 600; color: var(--text2); }
+.ht-who .ic { flex: none; }
+.ht-who.ai, .ht-who.ai b { color: var(--accent-ink, var(--accent)); }
+.ht-who-tag { font-size: 0.8em; font-weight: 700; letter-spacing: 0.04em; padding: 0 5px; border-radius: 6px; line-height: 1.5;
+  background: var(--accent-wash); border: 1px solid var(--accent-line); }
 .ht-bubble { padding: 8px 12px; border-radius: 14px; font-size: 14px; line-height: 1.5; color: var(--text);
   background: var(--surface-2); border: 1px solid var(--hairline); white-space: pre-wrap; word-break: break-word; }
 .ht-msg.bot .ht-bubble { background: var(--accent-wash); border-color: var(--accent-line); }
 .ht-msg.nguoi .ht-bubble { background: var(--bg3); }
+/* Dictation draft (2026-11-06): the words heard so far, faded and dashed like the main chat's bubble. */
 .ht-msg.hethong .ht-bubble { background: none; border-style: dashed; color: var(--text3); font-size: 12.5px; }
 .ht-bubble p { margin: 0 0 .5em; } .ht-bubble p:last-child { margin: 0; }
 .ht-loai { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text3); margin-right: 6px; }
@@ -2516,6 +2796,9 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 /* A channel set up on its own Connections card (Messenger, 0.438.3) hides the token part and Save. */
 #htTokenPart[hidden], .ht-form-acts .ht-save[hidden] { display: none; }
 .ht-card-hint .ht-mo-the { margin-left: 4px; }
+.ht-zo-oauth { margin-top: 12px; line-height: 1.5; }
+.ht-zo-oauth code { word-break: break-all; }
+.ht-zo-oauth .s-btn, .ht-zo-oauth .s-btn-ghost { margin: 8px 0 4px; }
 /* Drag the list column (2026-10-25), wide screens only: width from --ht-list-w (col-resize.js), handle in the 12px gap
    right of the list; snapped into a strip (.ht-mini) the rows show only an initial, with a dot for unread. */
 @media (min-width: 901px) {
@@ -2824,6 +3107,36 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .ach-dot.st-err { background: var(--red); opacity: 1; }
 .ach-dot.st-start { background: var(--warn-ink); opacity: 1; }
 .ach-panel { min-width: 0; }
+
+/* ---- Account > Security tab (2026-11-09). Rows read on a phone: label left, value right, wrapping under. ---- */
+.ac-page { max-width: 760px; }
+/* The Account page has no page header (owner, 2026-11-09): its Account | Security tabs take that place, flush at the top. */
+.cview.cview-tk .cview-head { display: none; }
+/* Plugins page (2026-11-20): its own title sits at the top of its left column, like the Tasks page. */
+.cview.cview-pl .cview-head { display: none; }
+.cview.cview-tk .cview-body { padding-top: 0; }
+.cview.cview-tk .ach-tabs.tabs-top { padding-top: 12px; }
+.tk-intro { margin: 0 0 10px; }
+.sec-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 0; border-bottom: 1px solid var(--glass-brd); font-size: 15px; line-height: 1.45; }
+.sec-row:last-of-type { border-bottom: 0; }
+.sec-ico { flex: none; display: inline-flex; }
+.sec-lbl { flex: 1 1 180px; color: var(--text2); }
+.sec-val { flex: 0 1 auto; color: var(--text); text-align: right; overflow-wrap: anywhere; }
+.sec-bad .sec-lbl, .sec-bad .sec-val { color: var(--red); font-weight: 600; }
+.sec-warn .sec-val { color: var(--warn-ink); }
+.sec-list { display: flex; flex-direction: column; }
+.sec-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--glass-brd); }
+.sec-item:last-child { border-bottom: 0; }
+.sec-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 15px; }
+.sec-meta { color: var(--text2); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.sec-tag { align-self: flex-start; display: inline-block; font-size: 13px; font-weight: 600; padding: 1px 8px; border-radius: 999px; color: var(--accent-ink); background: var(--accent-wash-2); }
+.sec-lv-warn .sec-item-main b { color: var(--warn-ink); }
+.sec-lv-alert .sec-item-main b { color: var(--red); }
+.sec-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.sec-chip { border: 1px solid var(--glass-brd); background: transparent; color: var(--text2); border-radius: 999px; padding: 6px 12px; font: inherit; font-size: 15px; cursor: pointer; min-height: 36px; }
+.sec-chip[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent-wash-2); border-color: var(--accent-line); }
+@media (max-width: 700px) { .sec-val { text-align: left; } .sec-item { align-items: flex-start; } }
+.sec-item .gcard-btn { margin-top: 0; width: auto; padding: 6px 12px; font-size: 14px; flex: none; }
 .ach-panel:focus-visible { outline: none; }
 .ach-card {
   border: 1px solid var(--glass-brd); border-radius: 14px; background: var(--surface-1);
@@ -2899,6 +3212,16 @@ body.has-rail .hud { margin-left: var(--rail-w); width: calc(100% - var(--rail-w
 .tm-page .ws-btn.tm-primary { background: var(--accent); color: var(--on-accent, #fff); border-color: var(--accent); }
 .tm-list, .tm-chat, .tm-side { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .tm-list[hidden], .tm-chat[hidden], .tm-side[hidden] { display: none; }
+/* 2026-11-15: a file link clicked in the team chat opens the file editor IN the chat column, the Partners page's rule
+   (.ws-main.edit-on): the editor takes the whole column and every other part of it hides. Hidden with display:none, so
+   the messages, the words typed in the composer and the open team stay; closing the file (X on the editor) brings the
+   chat back. The editor is a floating layer in .hud-center by itself, so here it drops inset and z-index, except while
+   maximized (.ne-full), when it covers the screen on purpose. */
+.tm-edit { display: none; position: relative; flex: 1 1 auto; min-height: 0; min-width: 0; flex-direction: column; }
+.tm-chat.edit-on > .tm-edit { display: flex; }
+.tm-chat.edit-on > :not(.tm-edit) { display: none; }
+.tm-edit > .note-editor:not(.ne-full) { position: static; inset: auto; z-index: auto;
+  flex: 1 1 auto; min-height: 0; min-width: 0; border-radius: 12px; }
 .tm-list { border-right: 1px solid var(--border); padding: 8px; gap: 2px; overflow-y: auto; }
 .tm-bar { display: flex; align-items: center; gap: 8px; justify-content: space-between; min-height: 36px; }
 .tm-bar[hidden] { display: none; }
@@ -3004,6 +3327,14 @@ body.on-teams .cview-head { display: none; }
 .tm-title-btn:hover strong { text-decoration: underline dotted; text-underline-offset: 3px; }
 .tm-sub { font-size: 12px; color: var(--text3); }
 .tm-icon { flex: none; justify-content: center; min-width: 36px; padding: 0 8px; }
+/* 2026-11-09 (owner: the search, settings and close buttons "look ugly next to the other tabs"): with no vertical
+   padding they were as tall as the icon, so the 8px corners drew a squashed oval. Now square, borderless icon buttons
+   in the same soft wash as the panel tabs, the selected state included. */
+.ws-btn.tm-icon { width: 36px; height: 36px; min-width: 36px; padding: 0; border-radius: 10px; border-color: transparent;
+  color: var(--text2); background: none; }
+.ws-btn.tm-icon:hover, .ws-btn.tm-icon:focus-visible { background: var(--accent-wash); color: var(--text); border-color: transparent; }
+.ws-btn.tm-icon[aria-expanded="true"] { background: var(--accent-wash); color: var(--accent-ink); }
+.ws-btn.tm-icon svg { width: 18px; height: 18px; }
 .tm-jobs-chip { display: inline-flex; align-items: center; gap: 4px; flex: none; border: 1px solid var(--border); border-radius: 999px;
   padding: 4px 10px; background: var(--surface-1); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; white-space: nowrap; }
 .tm-jobs-chip[hidden] { display: none; }
@@ -3026,8 +3357,8 @@ body.on-teams .cview-head { display: none; }
   border: none; border-radius: 8px; background: none; color: inherit; cursor: pointer; }
 @media (max-width: 760px) { .tm-note-retry, .tm-note-close { min-height: 44px; min-width: 44px; } }
 
-/* Dải việc ở đầu khung chat: việc đang làm và việc chờ chủ (một nút giải quyết). */
-.tm-jobs { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--border); max-height: 40%; overflow-y: auto; }
+/* Dải việc (17/11/2026): một viên thuốc ngay trên khung nhập, cùng lớp với viên việc nền của chat chính (.bg-strip). */
+.tm-jobs { flex: none; }
 .tm-jobs[hidden] { display: none; }
 .tm-jrun { border-bottom: none; padding: 2px 0; }
 .tm-spin { display: inline-flex; color: var(--accent); }
@@ -3038,20 +3369,37 @@ body.on-teams .cview-head { display: none; }
 .tm-jcard[hidden] { display: none; }
 .tm-jcard-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 200px; }
 .tm-jmore { align-self: flex-start; }
-.tm-filterbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; font-size: 12.5px;
-  background: var(--accent-wash); }
+/* One line while the chat holds one job's messages (17/11/2026): name, usage icon, X. */
+.tm-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-height: 40px; padding: 0 4px 0 12px; font-size: 14.5px;
+  color: var(--text2); background: var(--accent-wash); border-bottom: 1px solid var(--hairline); }
+.tm-fb-ic { display: inline-flex; flex: none; color: var(--accent-ink); }
+.tm-fb-ic .ic { width: 16px; height: 16px; }
+.tm-fb-text { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-filterbar .tm-jb-ic[aria-expanded="true"] { color: var(--accent-ink); background: var(--surface-2); }
+.tm-fb-panel { flex: 1 0 100%; max-height: 40vh; overflow: auto; padding: 0 8px 8px 0; font-size: 14px; }
+.tm-fb-panel > .tm-task-quality > summary { display: none; }   /* the icon above already names it */
 .tm-filterbar[hidden] { display: none; }
 
 /* Tin: bong bóng. Của chủ bên phải (không tên, không ảnh); của trợ lý bên trái kèm ảnh và tên; tin hệ thống ở giữa. */
 .tm-msgs { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior-x: none; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .tm-msgs[hidden] { display: none; }
+/* Older messages (18/11/2026): they load by themselves near the top; the button stays for a press, and shows a spinner
+   while a page is on its way. Both labels are in the button, the list's class picks one. */
+.tm-older-wait { display: none; }
+.tm-older-wait::before { content: ""; display: inline-block; vertical-align: -2px; margin-right: 8px; width: 13px; height: 13px;
+  border-radius: 50%; border: 2px solid var(--border, rgba(140,140,160,.35)); border-top-color: var(--accent);
+  animation: tm-spin .8s linear infinite; }
+.tm-msgs.tm-older-busy .tm-older { pointer-events: none; opacity: .75; }
+.tm-msgs.tm-older-busy .tm-older-idle { display: none; }
+.tm-msgs.tm-older-busy .tm-older-wait { display: inline; }
+@media (prefers-reduced-motion: reduce) { .tm-older-wait::before { animation: none; } }
 /* Mỗi tin chiếm trọn hàng (để phần trăm bên dưới tính theo bề ngang khung, không theo nội dung), bong bóng dồn về đúng
    phía. Bề ngang tối đa chừa chỗ cho ảnh và nút bên cạnh để ba thứ nằm một hàng; hàng có wrap cho bảng mở ra bên dưới. */
 .tm-msg { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 4px 6px; width: 100%; }
 .tm-msg[hidden] { display: none; }
 .tm-msg-owner { justify-content: flex-end; }
 .tm-bubble { min-width: 0; flex: 0 1 auto; padding: 8px 12px; border-radius: 16px; background: var(--surface-1); border: 1px solid var(--border); }
-.tm-msg-agent .tm-bubble { border-bottom-left-radius: 6px; max-width: min(680px, calc(100% - 86px)); }
+.tm-msg-agent .tm-bubble { border-bottom-left-radius: 6px; max-width: min(100ch, calc(100% - 86px)); }
 .tm-msg-owner .tm-bubble { background: var(--accent-wash); border-color: var(--accent-line); border-bottom-right-radius: 6px;
   max-width: min(680px, 85%); }
 .tm-msg-late .tm-bubble { opacity: .8; border-style: dashed; }
@@ -3070,6 +3418,8 @@ body.on-teams .cview-head { display: none; }
 /* Nhãn việc dài: cắt bằng dấu ba chấm ở phần chữ (inline-flex không tự cắt). */
 .tm-tag-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-levels { border: none; margin: 0; padding: 0; min-width: 0; }
+/* 2026-11-12: the goal block now sits right above this one; a legend takes no top margin, so the space is given here. */
+.tm-md + .tm-sec > .tm-levels { margin-top: 14px; }
 .tm-levels > legend { padding: 0; }
 .tm-tag-new { cursor: default; border: none; padding: 0; }
 .tm-text { overflow-wrap: anywhere; font-size: 14px; color: var(--text); line-height: 1.45; }
@@ -3120,7 +3470,7 @@ body.on-teams .cview-head { display: none; }
 /* 0.194.1 (owner, 17/10/2026): the bubble and its action row (time, Reply, Copy, Pin) stack in one column, the row right
    under the bubble on its own side, like the main chat (.msg-acts). Beside the bubble it looked cluttered. */
 .tm-col { display: flex; flex-direction: column; min-width: 0; flex: 0 1 auto; }
-.tm-msg-agent .tm-col { align-items: flex-start; max-width: min(680px, calc(100% - 40px)); }
+.tm-msg-agent .tm-col { align-items: flex-start; max-width: min(100ch, calc(100% - 40px)); }
 .tm-msg-owner .tm-col { align-items: flex-end; max-width: min(680px, 85%); }
 .tm-msg .tm-col > .tm-bubble { max-width: 100%; }
 .tm-hacts { display: flex; align-items: center; gap: 2px; height: 26px; margin-top: 2px; opacity: 0; transition: opacity .12s; }
@@ -3196,6 +3546,7 @@ body.kb-open .tm-composer { padding-bottom: 8px; }
 /* The owner's message on its way (shown at once, replaced by the server's copy): a little faded with "Sending...";
    "Not sent" in red with Try again and Remove when the POST failed. */
 .tm-msg-pending .tm-bubble { opacity: .72; }
+/* Dictation draft (2026-11-06): the words heard so far, faded and dashed like the main chat's bubble (.msg-nhap-giong). */
 .tm-msg-pending.is-failed .tm-bubble { opacity: 1; border-color: var(--red, #d64545); }
 .tm-pending-st { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 26px; margin-top: 2px;
   color: var(--text3); font-size: 12px; }
@@ -3277,6 +3628,9 @@ body.kb-open .tm-composer { padding-bottom: 8px; }
 .tm-mtext { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .tm-mname { font-weight: 600; overflow-wrap: anywhere; }
 .tm-mrole { font-size: 12px; color: var(--text3); }
+.tm-mmodel { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 12px; color: var(--text3); }
+.tm-mmodel span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-mmodel svg { flex: none; width: 12px; height: 12px; }
 .tm-chev { display: inline-flex; color: var(--text3); transition: transform .15s; }
 .tm-mhead[aria-expanded="true"] .tm-chev { transform: rotate(180deg); }
 .tm-mact { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 2px 12px 46px; }
@@ -3384,6 +3738,7 @@ body.kb-open .tm-composer { padding-bottom: 8px; }
   line-height: 1.4; color: var(--text3); padding: 6px 10px; border-radius: 12px; background: var(--surface-2); }
 .tm-reply-main { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
 .tm-reply-main b { color: var(--text); font-weight: 600; }
+.tm-reply-merged { background: none; padding-left: 0; }
 .tm-reply-error { background: var(--warn-wash, var(--surface-2)); color: var(--warn-ink); border: 1px solid var(--warn-line, transparent); }
 .tm-reply-detail { display: block; font-size: 16px; opacity: .85; margin-top: 2px; }
 .tm-reply-retry { min-height: 44px; padding: 0 14px; font-size: 16px; display: inline-flex; align-items: center; gap: 6px; }
@@ -3421,6 +3776,38 @@ body.kb-open .tm-composer { padding-bottom: 8px; }
 .tmp-desc > summary::-webkit-details-marker { display: none; }
 .tmp-desc input { font: inherit; font-size: 16px; min-height: 44px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border);
   background: var(--field-bg); color: var(--text); width: 100%; box-sizing: border-box; }
+/* Documents in the create-team box (2026-11-12, team-picker.js docsHtml). */
+.tmp-docs > summary { gap: 8px; }
+.tmp-docs > summary .tmp-chip-n { min-width: 26px; padding: 0 7px; border-radius: 13px; background: var(--accent); color: #fff; font-size: 16px;
+  line-height: 26px; opacity: 1; text-align: center; }
+.tmp-docs-help { margin: 0 0 8px; color: var(--text3); font-size: 16px; line-height: 1.45; }
+.tmp-docs-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tmp-docs-chips:not(:empty) { margin-bottom: 8px; }
+.tmp-doc { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 36px; padding: 2px 4px 2px 10px; border-radius: 18px;
+  border: 1px solid var(--border); background: var(--bg2); font-size: 16px; }
+.tmp-doc.is-err { border-color: var(--warn-line); background: var(--warn-wash); color: var(--warn-ink); }
+.tmp-doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.tmp-doc-state { color: var(--text3); font-size: 16px; white-space: nowrap; }
+.tmp-docs-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.tmp-docs-row input { flex: 1; min-width: 0; }
+.tmp-docs-row .ws-btn { min-height: 44px; white-space: nowrap; flex: 0 0 auto; }
+.tmp-doc-results:not(:empty) { margin-bottom: 8px; max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
+.tmp-doc-res { display: flex; align-items: center; gap: 8px; padding: 6px 10px; min-height: 48px; }
+.tmp-doc-res + .tmp-doc-res { border-top: 1px solid var(--border); }
+.tmp-doc-res-text { flex: 1; min-width: 0; display: grid; }
+.tmp-doc-res-text b { font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmp-doc-res-text i { font-style: normal; color: var(--text3); font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmp-doc-note { padding: 10px 12px; color: var(--text3); font-size: 16px; }
+.tmp-doc-warn { color: var(--warn-ink); padding: 0 0 8px; }
+/* 2026-11-15: GitHub repos picked in the create box (team-github.js picker in .tmp-repo-box). */
+.tmp-repo .cp-ic, .tmp-repo-open .cp-ic { width: 16px; height: 16px; }
+.tmp-repo-open { display: inline-flex; align-items: center; gap: 6px; }
+.tmp-repo-box:not([hidden]) { margin-bottom: 8px; }
+.tmp-repo-box .gh-results { max-height: 260px; overflow-y: auto; }
+.tm-info-fsearch { flex: 1; min-width: 0; }
+.tm-info-found li { justify-content: space-between; gap: 8px; }
+.tm-info-found li > span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) { .tmp-docs-row { flex-wrap: wrap; } .tmp-docs-row input { flex: 1 1 100%; } .tmp-doc-name { max-width: 180px; } }
 .tmp-lead { min-height: 32px; padding: 0 10px; border-radius: 16px; border: 1px solid var(--accent-line); background: var(--bg2);
   color: var(--accent); font: inherit; font-size: 16px; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; }
 .tmp-lead.is-on { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -3485,6 +3872,14 @@ span.tmp-lead { cursor: default; }
 .tmp-foot .tmp-submit:disabled { opacity: .5; cursor: not-allowed; }
 .tm-mrow-you .tm-mhead-static { cursor: default; }
 .tm-mrow-you .tmp-you { width: 34px; height: 34px; }
+/* 18/11/2026: the deputy coordinates the whole team, so its row stands out: tinted, an accent edge, a badge. */
+.tm-mrow-lead { background: var(--accent-wash); border: 1px solid var(--accent-line); border-left: 3px solid var(--accent);
+  border-radius: 12px; margin: 6px -10px; padding: 0 9px 0 7px; }
+.tm-mrow-lead .tm-mrole { color: var(--accent); font-weight: 600; }
+.tm-mrow-lead .tm-ava { box-shadow: 0 0 0 2px var(--accent); }
+.tm-lead-badge { flex: none; display: inline-flex; align-items: center; gap: 4px; font-weight: 600; white-space: nowrap;
+  background: var(--accent); color: #fff; }
+.tm-lead-badge svg { width: 14px; height: 14px; }
 @media (max-width: 640px) {
   .tmp-layer { padding: 0; align-items: stretch; }
   .tmp-dialog { width: 100%; max-height: none; height: 100%; height: 100dvh; border-radius: 0; border: none; }
@@ -3541,6 +3936,12 @@ span.tmp-lead { cursor: default; }
 .aj-n { font-size: 12px; opacity: .8; }
 .aj-sec { display: flex; flex-direction: column; gap: 6px; }
 .aj-sec-h { margin: 4px 0 0; font-size: 12px; font-weight: 700; color: var(--text2); }
+/* The assistant's chat turn running now (agent-jobs.js liveHtml): same card as a running job, plus the engine's plan. */
+.aj-live-card { padding: 10px; border-radius: 12px; border: 1px solid var(--border); border-left: 4px solid var(--accent);
+  background: var(--surface-1); display: flex; flex-direction: column; gap: 6px; }
+.aj-live-line { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--text); }
+.aj-live-line svg { width: 16px; height: 16px; flex: none; color: var(--accent); }
+.aj-live-plan { margin: 0; max-width: none; }
 .aj-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .aj-job { padding: 10px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-1); display: flex;
   flex-direction: column; gap: 6px; border-left-width: 4px; }
@@ -3575,8 +3976,7 @@ span.tmp-lead { cursor: default; }
    hàng với nút bật tắt auto và nhỏ thôi"): giờ chat gần nhất và công tắc Auto chung một cụm nhỏ ở góc dưới phải của thẻ.
    Công tắc có trên mọi trợ lý (tắt thì xám). Nút ba chấm luôn ở góc trên phải; dòng chữ cuối chừa chỗ cho cụm. */
 .ws-item-wrap.has-end > .ws-item-more { top: 6px; transform: none; }
-.ws-item-wrap.has-end .ws-item-text > :last-child { padding-right: 104px; }
-.ws-item-wrap.has-end.he .ws-item-text > :last-child { padding-right: 44px; }
+.ws-item-wrap.has-end .ws-item-text > :last-child:not(.ws-item-top) { padding-right: 104px; }
 .ws-item-end { position: absolute; right: 8px; bottom: 8px; display: flex; align-items: center; gap: 6px;
   pointer-events: none; }
 .ws-item-end > .ws-auto, .ws-item-end > .ws-rs-confirm { pointer-events: auto; position: relative; }
@@ -3597,6 +3997,22 @@ span.tmp-lead { cursor: default; }
   .ws-item-end > .ws-auto::after, .ws-item-end > .ws-rs-confirm::after { content: ""; position: absolute; inset: -12px -6px; }
 }
 .rsa-desc { color: var(--text2); }
+/* 2026-11-07 (owner: the grey role line under the name "vừa xấu vừa không đọc được thông tin gì cả"): an assistant card
+   shows its name only, on the top line beside the avatar; the role opens whole from an (i) in the top right corner, on
+   the name's row and right above the Auto switch, its centre on the same vertical line as the switch's centre (owner:
+   "căn dọc phải bằng với công tắc"): the switch is 24px wide, 4px inside the pill, the pill 8px from the edge, so its
+   centre is 24px from the card's right edge and the 20px (i) sits at right 14px. The "..." (shown on hover) moves to
+   the left of the (i). The name row keeps room for both; the touch area stays small so it does not swallow taps meant
+   for Auto. */
+.ws-item-wrap.has-end .ws-item-text { align-self: flex-start; }
+.ws-item-info { position: absolute; right: 14px; top: 8px; display: flex; }
+.ws-item-info > .info-i { margin-left: 0; }
+.ws-item-wrap.has-info > .ws-item-more { right: 36px; }
+.ws-item-wrap.has-info .ws-item-top { padding-right: 30px; }
+@media (hover: none), (max-width: 600px) { .ws-item-info > .info-i::after { inset: -6px; } }
+.info-pop .ws-info-name { margin: 0 0 4px; }
+.info-pop .ws-info-role { margin: 0; white-space: pre-line; }
+.info-pop .ws-info-tags { margin: 8px 0 0; color: var(--text3); }
 
 /* Tab Công việc: lọc nguồn, bước kế tiếp, mục được kiểm, form Giao việc hai bước, Xem thêm (0.142.0, bổ sung). */
 .aj-next { font-size: 13px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
@@ -3667,16 +4083,24 @@ span.tmp-lead { cursor: default; }
 .ws-item-text { flex: 1 1 auto; }
 .ws-item-top { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .ws-item-top > strong { flex: 1 1 auto; min-width: 0; }
-/* 0.185.0: Javis Core, the system assistant. A small System badge on its row and on its card; the row keeps the
-   accent edge like a pinned one. */
+/* 0.185.0: Javis Core, the system assistant. A small System badge on its card; the row keeps the accent edge like a
+   pinned one. */
 .ws-sys { flex: 0 0 auto; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600; line-height: 1.5;
   color: var(--accent); background: var(--accent-wash); border: 1px solid var(--accent); }
 .ws-item-wrap.he > .ws-item { border-left: 3px solid var(--accent); border-radius: 9px; }
-.ws-core-card { padding: 4px 2px 12px; }
-.ws-core-head { display: flex; align-items: center; gap: 10px; }
-.ws-core-head h3 { margin: 0; font-size: 16px; }
-.ws-core-card p { margin: 10px 0 0; font-size: 14.5px; line-height: 1.5; }
-.ws-core-card .ws-core-note { color: var(--text2); font-size: 13.5px; }
+/* 2026-11-08 (owner): the card's second line, under the name and beside the avatar: System badge, then tag chips. One
+   line, never wrapping, level with the time and Auto corner on the right. workspace.js fitCardTags sizes it up to that
+   corner and folds the chips that would be cut into "+n"; only the first chip may shrink, and only when it is alone.
+   Before that runs (hidden page) the last line of the text keeps 104px clear for the corner (rule above). */
+.ws-item-sub { display: flex; align-items: center; gap: 4px; min-width: 0; margin-top: 4px; overflow: hidden; }
+.ws-item-sub .ws-sys { font-size: 12px; padding: 0 7px; line-height: 16px; }
+.ws-item-sub .ws-tags { flex: 0 1 auto; flex-wrap: nowrap; margin-top: 0; overflow: hidden; }
+.ws-item-sub .ws-tag { flex: none; font-size: 12px; line-height: 16px; }
+.ws-item-sub .ws-tag:first-child { flex: 0 1 auto; min-width: 2.6em; }
+.ws-item-sub.measure .ws-tag:first-child { flex: none; }
+@media (max-width: 900px) {
+  .ws-item-sub .ws-sys, .ws-item-sub .ws-tag { font-size: 14px; line-height: 20px; }
+}
 .ws-item-time { flex: none; font-size: 12px; color: var(--text3); font-variant-numeric: tabular-nums; }
 
 /* 0.148.0: tay kéo đổi bề rộng cột (col-resize.js) ở trang đồ thị (cột Vault, cột hội thoại) và trang Trò chuyện (cột
@@ -3858,11 +4282,34 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .tm-file.is-img .chat-img-gone { margin: 0; max-width: 160px; white-space: normal; }
 .tm-file.is-img .chat-img-gone + span { display: none; }
 .tm-folder-pop { position: fixed; z-index: 80; }
+/* 0.449.0: GitHub repos and /skill in a team chat (team-github.js, teams.js). */
+.tm-gh-pop { width: min(360px, calc(100vw - 16px)); }
+.tm-gh-pop .gh-results { max-height: min(50vh, 360px); overflow-y: auto; }
+.tm-chip-gh { background: var(--accent-wash, rgba(255, 122, 60, .12)); border-color: transparent; }
+.tm-chip-gh svg { color: var(--accent); }
+.tm-chip.is-busy { opacity: .55; pointer-events: none; }
+button.tm-gh-st { border: 0; background: none; padding: 0; font: inherit; font-size: 12.5px; color: var(--accent); cursor: pointer; }
+.tm-skill-chip { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 4px; padding: 1px 8px; border-radius: 999px;
+  background: var(--accent-wash, rgba(255, 122, 60, .12)); color: var(--accent); font-size: 13.5px; font-family: var(--mono, monospace); }
+.tm-skill-chip svg { width: 13px; height: 13px; }
+.tm-sug-skill .tm-sug-name { font-family: var(--mono, monospace); }
+/* Owner, 17/11/2026: the "/" skill list overlapped. The box is a column with a max height, so its rows shrank below their
+   text (flex-shrink) and each row ran into the next; a long skill name also wrapped onto its description. Rows keep their
+   height and the box scrolls; the name and the description are one line each, cut with "...". */
+.tm-sug-item { flex: none; }
+.tm-sug-skill { width: 100%; }
+.tm-sug-skill .tm-sug-text { flex: 1 1 auto; }
+.tm-sug-skill .tm-sug-name, .tm-sug-skill .tm-sug-role { display: block; max-width: none; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.tm-sug-skill .tm-sug-slug { font-family: var(--font); font-weight: 400; }
+@media (hover: none), (pointer: coarse) { .tm-skill-chip { font-size: 14.5px; } button.tm-gh-st { font-size: 14px; min-height: 28px; } }
 .tm-ava-btn { border: 0; padding: 0; background: none; border-radius: 50%; cursor: pointer; flex: none; display: inline-flex; }
 .tm-ava-btn:hover, .tm-ava-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tm-info-head { display: flex; align-items: center; gap: 12px; padding: 4px 2px 12px; }
 .tm-info-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .tm-info-name strong { font-size: 17px; overflow-wrap: anywhere; }
+/* Team name with the (i) that holds its description (2026-11-07). */
+.tm-info-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .tm-info-sec { border-top: 1px solid var(--border); padding: 12px 2px; }
 .tm-info-sec h4 { margin: 0 0 8px; font-size: 15px; font-weight: 600; color: var(--text); }
 .tm-info-sechead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
@@ -3872,10 +4319,17 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .tm-info-members li > span:not(.tm-ava):not(.tm-info-badge) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-info-badge { margin-left: auto; font-size: 12.5px; color: var(--accent-ink, var(--accent)); background: var(--accent-wash, rgba(255, 122, 60, .12));
   border-radius: 999px; padding: 1px 8px; }
-.tm-info-list a { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; color: var(--text); text-decoration: none; }
-.tm-info-list a:hover span { text-decoration: underline; }
-.tm-info-list a span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-info-list a, .tm-info-dir { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; color: var(--text); text-decoration: none; }
+/* A folder document (2026-11-12) is a button that opens the Files page; it reads like the file links beside it. */
+.tm-info-dir { background: none; border: 0; padding: 0; font: inherit; text-align: left; cursor: pointer; }
+.tm-info-list a:hover span, .tm-info-dir:hover span { text-decoration: underline; }
+.tm-info-list a span, .tm-info-dir span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tm-info-list svg { width: 16px; height: 16px; flex: none; color: var(--text2); }
+/* 2026-11-13: what a team document holds, one line under its name. The row wraps so the line can sit below. */
+.tm-info-list li:has(.tm-info-desc) { flex-wrap: wrap; }
+.tm-info-desc { order: 9; flex: 1 0 100%; padding-left: 24px; color: var(--text2); font-size: 14px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tm-chip-x.on { color: var(--accent); }
 .tm-info-row { display: flex; align-items: center; gap: 8px; font-size: 15px; }
 .tm-info-row svg { width: 16px; height: 16px; color: var(--accent); flex: none; }
 .tm-info-grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3886,6 +4340,50 @@ body.col-resizing { cursor: col-resize; user-select: none; }
   background: var(--bg); color: var(--text); font: inherit; font-size: 15px; }
 .tm-info-addlink input:focus { outline: none; border-color: var(--accent); }
 @media (pointer: coarse) { .tm-chip-x { width: 36px; height: 36px; } .tm-info-addlink input { font-size: 16px; } }
+/* 19/11/2026 (owner: "phân trang ... như Zalo xem tất cả rồi vào kho lưu trữ"): Info shows the newest few, "See all" opens
+   the storage view in the same panel. A file row: a tile with its extension in the colour of its kind, the name, one line
+   with the size (and the day on Info). */
+.tm-info-all { display: flex; justify-content: center; width: 100%; min-height: 40px; margin-top: 10px; font-size: 15px; font-weight: 500; }
+.tm-info-list li.tm-as-row { flex-wrap: nowrap; align-items: center; gap: 10px; }
+.tm-as-list { gap: 4px; }
+.tm-as-row { padding: 4px 0; }
+.tm-as-type { --ft: var(--text3); display: grid; place-items: center; flex: none; width: 38px; height: 38px; border-radius: 9px;
+  color: var(--ft); background: color-mix(in srgb, var(--ft) 14%, transparent); font-size: 11px; font-weight: 700;
+  letter-spacing: .02em; line-height: 1; overflow: hidden; }
+.tm-as-type[data-long] { font-size: 9.5px; letter-spacing: 0; }
+.tm-info-list .tm-as-type svg, .tm-as-type .ic { width: 18px; height: 18px; color: inherit; }
+.tm-as-type[data-ft="pdf"] { --ft: var(--red); }
+.tm-as-type[data-ft="doc"], .tm-as-type[data-ft="link"] { --ft: var(--link-ink); }
+.tm-as-type[data-ft="sheet"] { --ft: var(--green); }
+.tm-as-type[data-ft="slide"], .tm-as-type[data-ft="dir"] { --ft: var(--accent); }
+.tm-as-type[data-ft="zip"] { --ft: var(--warn-ink); }
+.tm-as-type[data-ft="media"] { --ft: var(--accent2); }
+.tm-as-type[data-ft="code"] { --ft: var(--text2); }
+.tm-as-main { display: flex; flex-direction: column; gap: 1px; flex: 1 1 auto; min-width: 0; }
+.tm-info-list .tm-as-main .tm-as-name { flex: none; font-size: 15px; line-height: 1.4; }
+.tm-as-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; min-width: 0; color: var(--text3); font-size: 13px; line-height: 1.4; }
+.tm-as-dot { color: var(--text3); }
+.tm-as-gone { display: inline-flex; align-items: center; gap: 4px; color: var(--warn-ink); }
+.tm-info-list .tm-as-gone svg { width: 13px; height: 13px; color: inherit; }
+.tm-as-main .tm-info-desc { order: 0; flex: none; padding-left: 0; margin-top: 2px; }
+/* The storage view: back, three tabs with their totals, then the search box with the pager beside it. The head stays on
+   top while the page scrolls, so the pager is always at hand. */
+.tm-as-head { position: sticky; top: -4px; z-index: 2; display: flex; flex-direction: column; gap: 8px; margin: 0 -14px; padding: 8px 14px 10px;
+  background: var(--bg); border-bottom: 1px solid var(--border); }
+.tm-as-back { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; min-height: 36px; padding: 0 8px 0 0; border: 0;
+  background: none; color: var(--text); font: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
+.tm-as-back .ic { width: 20px; height: 20px; }
+.tm-as-back:hover { color: var(--accent-ink); }
+.tm-as-tabs { display: flex; gap: 2px; padding: 4px; border-radius: 12px; background: var(--surface-2); }
+.tm-as-tools { display: flex; align-items: center; gap: 4px; }
+.tm-side .tm-as-search { flex: 1 1 auto; min-width: 0; margin: 0; }
+.tm-as-pg:empty { display: none; }
+.tm-as-pg .tm-jb-pg { margin-left: 0; }
+.tm-as-day h5 { margin: 14px 0 8px; font-size: 14px; font-weight: 600; color: var(--text2); }
+.tm-as-imgs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.tm-as-imgs img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; display: block; }
+.tm-as-empty { padding: 18px 0; text-align: center; }
+@media (pointer: coarse) { .tm-info-all, .tm-as-back { min-height: 44px; } }
 
 
 /* 0.191.0 (owner, 16/10/2026): drag the list edge narrow enough and the column becomes a strip of avatars only
@@ -3894,7 +4392,8 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 @media (min-width: 901px) {
   .wspage.ws-mini > .ws-left { padding: 12px 8px; gap: 10px; }
   .wspage.ws-mini .ws-filters, .wspage.ws-mini .ws-empty, .wspage.ws-mini .ws-item-text,
-  .wspage.ws-mini .ws-item-end, .wspage.ws-mini .ws-item-more, .wspage.ws-mini .ws-grp-more { display: none; }
+  .wspage.ws-mini .ws-item-end, .wspage.ws-mini .ws-item-more, .wspage.ws-mini .ws-item-info,
+  .wspage.ws-mini .ws-grp-more { display: none; }
   .wspage.ws-mini .ws-seg { flex-direction: column; gap: 4px; }
   .wspage.ws-mini .ws-seg button, .wspage.ws-mini .ws-left-foot .ws-btn { font-size: 0; gap: 0; padding: 8px 0;
     justify-content: center; }
@@ -3970,6 +4469,10 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 button.tm-quote-ref { width: 100%; text-align: left; font: inherit; font-size: 14px; color: var(--text2); border: 1px solid transparent;
   cursor: pointer; margin: 0 0 8px; }
 button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var(--accent-line); outline: none; }
+/* 2026-11-14: the quote on top of the owner's message is a button too: it scrolls back to the words it quotes. */
+button.tm-quote-src { width: 100%; text-align: left; font: inherit; font-size: 14px; color: var(--text2); border: 1px solid transparent;
+  cursor: pointer; -webkit-tap-highlight-color: transparent; }
+button.tm-quote-src:hover, button.tm-quote-src:focus-visible { border-color: var(--accent-line); outline: none; }
 .tm-replying { border-left: 0; padding: 6px 6px 6px 6px; background: var(--bg3); border: 1px solid var(--border); }
 .tm-replying-ico { flex: none; width: 34px; height: 34px; border-radius: 6px; display: inline-flex; align-items: center;
   justify-content: center; background: var(--bg); color: var(--accent); }
@@ -3984,6 +4487,19 @@ button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var
 .tm-msg-flash .tm-bubble { animation: tm-flash 1.6s ease; }
 @keyframes tm-flash { 0%, 40% { background: var(--accent-wash-2); } 100% { background: inherit; } }
 @media (prefers-reduced-motion: reduce) { .tm-msg-flash .tm-bubble { animation: none; outline: 2px solid var(--accent); } }
+/* 18/11/2026 (owner): the round button at the TOP right of a team chat ("nút nó phải ở phía trên", like Zalo: the
+   messages it leads to are above), an up arrow, "@" and the number of messages calling the owner under it (red like
+   every unread count). The list's first child, sticky to the top; the negative bottom margin takes back its height, so
+   showing or hiding it never moves the messages being read. */
+.tm-at-jump { position: sticky; top: 10px; align-self: flex-end; margin: 10px 12px -50px 0; z-index: 3; flex: none;
+  display: none; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border-radius: 50%;
+  background: var(--panel-solid); border: 1px solid var(--border); color: var(--text2); box-shadow: var(--shadow-2); cursor: pointer; }
+.tm-at-jump.show { display: inline-flex; }
+.tm-at-jump svg { width: 22px; height: 22px; }
+.tm-at-jump:hover { background: var(--accent-wash-2); border-color: var(--accent); color: var(--accent); }
+.tm-at-jump .tm-at-n { position: absolute; bottom: -7px; left: 50%; transform: translateX(-50%); min-width: 18px; height: 18px;
+  padding: 0 5px; font-size: 11px; font-weight: 700; box-shadow: none; background: var(--red); color: #fff; }
+@media (max-width: 760px) { .tm-at-jump { width: 44px; height: 44px; margin-bottom: -54px; } }
 /* 0.192.0: pinned strip on top of the team chat. */
 .tm-pinbar { border-bottom: 1px solid var(--border); padding: 6px 12px; background: var(--bg2); display: flex; flex-direction: column;
   gap: 4px; max-height: 40vh; overflow: auto; }
@@ -4105,6 +4621,9 @@ button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var
    the navbar bell's .notification-badge). A muted team keeps its count, in grey. */
 .tm-team { position: relative; }
 .tm-unread { flex: none; height: 20px; min-width: 20px; border-radius: 10px; font-size: 12px; box-shadow: none; }
+/* 0.491.0: red means unread everywhere (the chat history rows carry a red dot), so the count of a team or partner chat
+   that still wants the owner is red too; a muted one stays grey. */
+.tm-unread:not(.is-muted) { background: var(--red); color: #fff; }
 .tm-unread.is-muted { background: var(--surface-2); color: var(--text2); }
 /* 0.204.0: was ".tm-at", the same class as the @mentions in messages, which it squeezed into a 20px circle. */
 .tm-at-badge { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
@@ -4116,16 +4635,23 @@ button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var
 .tm-mini-unread { display: none; }
 /* 0.205.0: a private partner chat shows its unread count and the bell-off mark in the row's corner cluster, like a
    team row; an unread row reads in full ink. */
-.ws-item-end .tm-unread { margin-left: 2px; }
+/* 2026-11-18 (owner): the count moved onto the avatar's bottom left corner. It stays inside the row's padding, so it never
+   touches the orange bar of a pinned row; a long "99+" grows to the right along the avatar's foot, and a ring in the
+   list colour lifts it off the picture. Same spot in the collapsed avatar strip. */
+.ws-item-ic { position: relative; }
+.ws-av-unread { position: absolute; left: -4px; bottom: -4px; top: auto; right: auto; height: 18px; min-width: 18px; padding: 0 5px;
+  border-radius: 9px; font-size: 11px; line-height: 18px; box-shadow: 0 0 0 2px var(--bg2); pointer-events: none; }
+/* On a picture the pale muted grey vanished (dark theme above all): a solid mid grey still reads as muted. */
+.ws-av-unread.is-muted { background: var(--text3); color: var(--bg2); }
 .ws-item-wrap.has-unread .ws-item-top strong, .ws-item-wrap.has-unread .ws-item small { color: var(--text); font-weight: 700; }
 @media (min-width: 1061px) {
   .tm-page.tm-mini .tm-mini-unread { display: flex; gap: 2px; position: absolute; top: 0; right: 2px; pointer-events: none; }
 }
 
 /* 0.207.0: approval request card in the team chat (teams.js approvalCardHtml) */
-.tm-ap { align-self: stretch; max-width: 640px; margin: 6px auto; padding: 12px 14px; border: 1px solid var(--hairline);
-  border-left: 3px solid var(--accent, #d97706); border-radius: 10px; background: var(--surface-2); font-size: 16px;
-  line-height: 1.5; display: flex; flex-direction: column; gap: 6px; }
+.tm-ap { align-self: stretch; max-width: 640px; margin: 6px auto; padding: 14px 14px 12px; border: 1px solid var(--hairline);
+  border-left: 3px solid var(--accent, #d97706); border-radius: 16px; background: var(--bg2); font-size: 16px;
+  line-height: 1.5; display: flex; flex-direction: column; gap: 10px; }
 .tm-ap-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .tm-ap-head svg { width: 18px; height: 18px; }
 .tm-ap-row { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -4138,6 +4664,76 @@ button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var
 .tm-ap-approved, .tm-ap-consumed { border-left-color: var(--ok, #16a34a); }
 .tm-ap-rejected, .tm-ap-expired, .tm-ap-revoked { border-left-color: var(--danger, #dc2626); }
 .tm-ap-superseded, .tm-ap-cancelled, .tm-ap-changes_requested { border-left-color: var(--text3); }
+
+/* 17/11/2026: the approval card can be answered (teams.js approvalCardHtml). Head with the shield in a soft square, a
+   waiting pill and the time left; the title on its own line; the lines in one bordered list with a quote button each;
+   evidence and calls fold away; two 48px buttons (Approve, Reply); the reply box opens inside the card. */
+.tm-ap .tm-ap-head { gap: 8px; color: var(--text2); }
+.tm-ap-ico { width: 32px; height: 32px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-wash-2); color: var(--accent-ink); flex: none; }
+.tm-ap-ico svg { width: 18px; height: 18px; }
+.tm-ap-pill { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 999px; background: var(--danger-wash);
+  color: var(--danger-ink); font-size: 16px; }
+.tm-ap-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.tm-ap-due { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--text3); font-size: 16px; white-space: nowrap; }
+.tm-ap-due svg { width: 16px; height: 16px; }
+.tm-ap-title { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.45; color: var(--text); overflow-wrap: anywhere; }
+.tm-ap-rows { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.tm-ap-rows .tm-ap-row { display: flex; flex-wrap: nowrap; gap: 4px; align-items: flex-start; padding: 8px 4px 8px 12px; background: var(--surface-1); }
+.tm-ap-rows .tm-ap-row + .tm-ap-row { border-top: 1px solid var(--border); }
+.tm-ap-rows .tm-ap-row-sel { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
+.tm-ap-row-b { flex: 1; min-width: 0; }
+.tm-ap-row-b .tm-ap-k { display: block; min-width: 0; }
+.tm-ap-v { display: block; overflow-wrap: anywhere; }
+.tm-ap-q { flex: none; width: 44px; height: 44px; margin: -4px 0; border: 0; border-radius: 10px; background: none; color: var(--text3);
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.tm-ap-q svg { width: 18px; height: 18px; }
+.tm-ap-q:hover, .tm-ap-q:focus-visible, .tm-ap-row-sel .tm-ap-q { color: var(--accent-ink); background: var(--accent-wash); }
+.tm-ap-more { border: 1px solid var(--border); border-radius: 12px; background: var(--surface-1); }
+.tm-ap-more summary { list-style: none; cursor: pointer; min-height: 44px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  color: var(--text2); }
+.tm-ap-more summary::-webkit-details-marker { display: none; }
+.tm-ap-more summary svg { width: 18px; height: 18px; flex: none; }
+.tm-ap-more summary svg:last-child { margin-left: auto; transition: transform .15s; }
+.tm-ap-more[open] summary svg:last-child { transform: rotate(180deg); }
+.tm-ap-n { color: var(--text3); }
+.tm-ap-more ul { margin: 0; padding: 0 12px 10px 38px; }
+.tm-ap-more li { overflow-wrap: anywhere; }
+.tm-ap-more code { font-size: 16px; word-break: break-all; }
+.tm-ap-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.tm-ap-acts .ws-btn { min-height: 48px; border-radius: 12px; justify-content: center; gap: 8px; font-size: 16px; font-weight: 500;
+  color: var(--text); background: var(--bg2); }
+.tm-ap-acts .ws-btn svg, .tm-ap-rp-foot .ws-btn svg { width: 20px; height: 20px; }
+.tm-ap-acts .tm-ap-ok, .tm-ap-rp-foot .tm-ap-send { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); font-weight: 600; }
+.tm-ap-acts .tm-ap-ok:hover, .tm-ap-rp-foot .tm-ap-send:hover { color: var(--on-accent); filter: brightness(1.06); }
+.tm-ap-acts .tm-ap-reply-on { border-color: var(--accent-line); background: var(--accent-wash-2); color: var(--accent-ink); }
+.tm-ap-rp-foot .tm-ap-send-rej { background: var(--red); border-color: var(--red); }
+.tm-ap-rp { border: 1px solid var(--accent-line); border-radius: 14px; background: var(--bg); padding: 10px; display: flex;
+  flex-direction: column; gap: 10px; }
+.tm-ap-seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: 12px; background: var(--surface-2); }
+.tm-ap-seg-b { min-height: 44px; border: 0; border-radius: 9px; background: none; color: var(--text2); display: inline-flex; align-items: center;
+  justify-content: center; gap: 5px; font: inherit; font-size: 16px; cursor: pointer; padding: 0 2px; white-space: nowrap; min-width: 0; }
+.tm-ap-seg-b svg { width: 18px; height: 18px; flex: none; }
+.tm-ap-seg-b span { overflow: hidden; text-overflow: ellipsis; }
+.tm-ap-seg-b[aria-checked="true"] { background: var(--bg2); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
+.tm-ap-seg-rej[aria-checked="true"] { color: var(--danger-ink); }
+.tm-ap-qchip { display: flex; gap: 8px; align-items: flex-start; padding: 6px 4px 6px 8px; border-radius: 10px; background: var(--accent-wash);
+  color: var(--text2); }
+.tm-ap-qbody { flex: 1; min-width: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tm-ap-qbody b { color: var(--text); font-weight: 600; }
+.tm-ap-qx { flex: none; width: 36px; height: 36px; margin: -4px 0; border: 0; background: none; color: var(--text3); border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.tm-ap-qx svg { width: 16px; height: 16px; }
+.tm-jr-ta, .tm-ap-ta { width: 100%; min-height: 104px; resize: vertical; border: 1px solid var(--border); border-radius: 10px; background: var(--bg2);
+  color: var(--text); padding: 10px 12px; font: inherit; font-size: 16px; line-height: 1.5; box-sizing: border-box; }
+.tm-ap-ta:focus, .tm-jr-ta:focus { outline: 2px solid var(--accent-line); border-color: var(--accent); }
+.tm-ap-sugs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tm-ap-sug { min-height: 36px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg2); color: var(--text2);
+  font: inherit; font-size: 16px; cursor: pointer; }
+.tm-ap-rp-foot { display: flex; gap: 8px; align-items: center; }
+.tm-ap-rp-foot .ws-btn { min-height: 48px; border-radius: 12px; padding: 0 14px; font-size: 16px; gap: 8px; }
+.tm-ap-rp-foot .tm-ap-cancel { border-color: transparent; }
+.tm-ap-rp-foot .tm-ap-send { margin-left: auto; }
 .tm-wm .tm-radio { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; font-size: 16px; }
 
 /* 0.208.0: department mandate section (teams.js mandateHtml) and opportunity card (reuses .tm-ap) */
@@ -4165,8 +4761,174 @@ button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var
 .tm-quality-form .ws-btn, .tm-template-form .ws-btn { font-size: 16px; min-height: 40px; }
 .tm-quality-form select, .tm-template-form textarea { width: 100%; min-width: 0; }
 .tm-task-quality { flex-basis: 100%; min-width: 0; width: 100%; }
-.tm-filterbar:has(.tm-task-quality) { flex-wrap: wrap; }
 .tm-task-quality .tm-sec { overflow-wrap: anywhere; }
+
+/* ───────────── Team Jobs tab: job cards, steps, pager, strip, icon tabs (16/11/2026) ─────────────
+   Owner: "cải tiến phần việc của team giống trải nghiệm của trang nhiệm vụ ... ux ui có nhiều icon ít button". The card
+   follows the row of the Tasks page (tasks.css .nv-item / .nv-row): status icon, title, a meta line, icon buttons on
+   the right. Written here, not borrowed from tasks.css, because that file loads with the Tasks page only. */
+.tm-jb { margin-bottom: 6px; padding: 4px 4px 6px 10px; border: 1px solid var(--hairline); border-radius: 12px; background: var(--surface-1); }
+.tm-jb[hidden] { display: none; }
+:root[data-theme="light"] .tm-jb { background: var(--panel-solid); }
+.tm-jb-ask { border-color: var(--accent-line); }
+.tm-jb-done:not(.is-open) { background: transparent; }
+.tm-jb-head { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: start; }
+.tm-jb-lead { display: grid; place-items: center start; min-height: 36px; }
+.tm-jb-title { min-width: 0; padding: 7px 4px 7px 0; border: 0; background: none; color: var(--text); font: inherit; font-size: 16px;
+  line-height: 1.4; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.tm-jb-title:hover { color: var(--accent-ink); }
+.tm-jb-ask .tm-jb-title { font-weight: 650; }
+.tm-jb-done:not(.is-open) .tm-jb-title { color: var(--text2); }
+.tm-jb-acts { display: inline-flex; }
+.tm-jb-ic { display: grid; place-items: center; flex: none; width: 30px; height: 36px; padding: 0; border: 0; border-radius: 8px;
+  background: none; color: var(--text2); cursor: pointer; }
+.tm-jb-ic[hidden] { display: none; }
+.tm-jb-ic .ic { width: 17px; height: 17px; }
+.tm-jb-ic:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.tm-jb-ic.tm-jb-bad:hover, .tm-jb-ic.tm-jb-bad:focus-visible { color: var(--red); }
+.tm-jb-ic:disabled { opacity: .3; cursor: default; }
+.tm-jb-star { color: var(--text3); }
+/* The same yellow as the priority star of the Tasks page (tasks.css .nv-starb.on), in both themes. */
+.tm-jb-star.is-on { color: #eab308; }
+.tm-jb-star.is-on .ic { fill: currentColor; }
+.tm-jb-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; margin: -2px 4px 2px 26px; font-size: 14px; color: var(--text3); }
+.tm-jb-m { display: inline-flex; align-items: center; gap: 5px; }
+.tm-jb-m .ic { width: 14px; height: 14px; flex: none; }
+.tm-jb .tm-ava, .tm-sr .tm-ava { width: 18px; height: 18px; font-size: 10px; }
+.tm-jb-fold { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; margin: 0 -6px; padding: 0 6px; border: 0; border-radius: 8px;
+  background: none; color: inherit; font: inherit; font-size: 14px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.tm-jb-fold:hover { background: var(--surface-2); color: var(--text); }
+.tm-jb-fold .ic { width: 14px; height: 14px; }
+.tm-jb-why { margin: 2px 8px 0 26px; font-size: 14.5px; line-height: 1.45; color: var(--warn-ink); }
+.tm-jb-go, .tm-sr-go { display: flex; flex-wrap: wrap; gap: 8px; }
+.tm-jb-go { margin: 8px 8px 4px 26px; }
+.tm-side .tm-jb-go .ws-btn { min-height: 40px; padding: 0 16px; border-radius: 10px; font-size: 15px; }
+/* 19/11/2026: Reply on a "Waiting for you" job opens its reply box (the approval card's box, two modes). */
+.tm-jr-open { gap: 6px; }
+.tm-jr-open svg { width: 18px; height: 18px; }
+.tm-jr-open.tm-ap-reply-on { border-color: var(--accent-line); background: var(--accent-wash-2); color: var(--accent-ink); }
+.tm-jr-rp { margin: 8px 8px 4px 26px; }
+.tm-jr-seg { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tm-jb-steps { margin: 6px 6px 0 26px; border-top: 1px solid var(--hairline); }
+.tm-jb-step { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 0 10px; align-items: start; padding: 9px 0;
+  border-bottom: 1px solid var(--hairline); }
+.tm-jb-step:last-child { border-bottom: 0; }
+.tm-jb-step .tm-jb-lead { min-height: 22px; }
+.tm-jb-stext { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tm-jb-who { display: flex; align-items: flex-start; gap: 6px; font-size: 15px; }
+.tm-jb-who > .tm-ava, .tm-jb-who > .tm-face { flex: none; margin-top: 1px; }
+.tm-jb-who > span:not(.tm-face):not(.tm-ava) { min-width: 0; overflow-wrap: anywhere; }
+/* The role of a step (Chia việc, Làm, Hỗ trợ, Tổng hợp) is a small tag that never breaks (owner, 17/11/2026: "làm kiểu
+   tag trông cho đẹp, chia việc trên 1 dòng thôi"), the size of the tag chips of the Tasks page. */
+.tm-jb-who small { flex: none; margin: 1px 0 0 auto; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--text2);
+  font-size: 13px; font-weight: 600; line-height: 1.5; white-space: nowrap; }
+.tm-jb-what { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; font-size: 15px;
+  line-height: 1.45; color: var(--text2); overflow-wrap: anywhere; }
+.tm-jb-step-done .tm-jb-what, .tm-jb-step-wait .tm-jb-what, .tm-jb-step-off .tm-jb-what { color: var(--text3); }
+.tm-jb-step-wait .tm-jb-who, .tm-jb-step-off .tm-jb-who { color: var(--text2); }
+.tm-jb-s { display: inline-grid; }
+.tm-jb-s .ic { width: 20px; height: 20px; }
+.tm-jb-step .tm-jb-s .ic { width: 18px; height: 18px; }
+.tm-jb-s-run { color: var(--info-ink); }
+.tm-jb-s-run .ic { animation: tm-spin 1s linear infinite; }
+.tm-jb-s-ask { color: var(--warn-ink); }
+.tm-jb-s-done { color: var(--green); }
+.tm-jb-s-off, .tm-jb-arch .tm-jb-s-done { color: var(--text3); }
+@media (prefers-reduced-motion: reduce) { .tm-jb-s-run .ic { animation: none; } }
+.tm-jb-ring { display: inline-block; box-sizing: border-box; width: 18px; height: 18px; border: 2px solid var(--text3); border-radius: 50%; }
+.tm-jb-step .tm-jb-ring { width: 16px; height: 16px; border-width: 1.5px; }
+.tm-jb-pos { display: grid; place-items: center; box-sizing: border-box; width: 20px; height: 20px; border: 1.5px solid var(--text3);
+  border-radius: 50%; font-size: 12px; font-weight: 600; color: var(--text2); font-variant-numeric: tabular-nums; }
+.tm-side .tm-qhead.tm-jb-h { display: flex; align-items: center; gap: 8px; margin: 16px 2px 6px; color: var(--text); font-size: 15px;
+  font-weight: 700; text-transform: none; letter-spacing: 0; }
+.tm-side .tm-qhead.tm-jb-h:first-child { margin-top: 8px; }
+.tm-side .tm-qhead.tm-jb-h-ask { color: var(--warn-ink); }
+.tm-jb-h .tm-qn { min-width: 0; padding: 0; background: none; color: var(--text3); font-size: 14px; font-weight: 500; }
+.tm-jb-h .tm-arch-toggle { gap: 6px; color: inherit; font-weight: inherit; }
+.tm-jb-pg { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; }
+.tm-jb-pgn { min-width: 34px; text-align: center; font-size: 14px; font-weight: 500; color: var(--text2); font-variant-numeric: tabular-nums; }
+.tm-jb-pg .tm-jb-ic { width: 32px; height: 32px; }
+.tm-jb-search { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; padding: 0 12px; border: 1px solid var(--hairline);
+  border-radius: 12px; background: var(--surface-1); }
+.tm-jb-search .ic { flex: none; width: 18px; height: 18px; color: var(--text3); }
+.tm-side .tm-jb-search input { flex: 1; min-width: 0; min-height: 44px; padding: 0; border: 0; background: none; color: var(--text);
+  font: inherit; font-size: 16px; outline: none; }
+.tm-jb-danger { margin: 10px 2px 0; padding-top: 10px; border-top: 1px solid var(--hairline); }
+.tm-jb-delall { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0; border: 0; background: none; color: var(--red);
+  font: inherit; font-size: 15px; cursor: pointer; }
+.tm-jb-delall .ic { width: 16px; height: 16px; }
+.tm-jb-note { padding: 8px 2px; font-size: 14.5px; color: var(--text3); }
+.tm-jb-sub { margin: 12px 0 4px; font-size: 13.5px; font-weight: 600; color: var(--text3); }
+.tm-jb-more { display: inline-flex; align-items: center; gap: 2px; padding: 4px 0; border: 0; background: none; color: var(--accent-ink);
+  font: inherit; font-size: 14.5px; cursor: pointer; }
+.tm-jb-more .ic { width: 14px; height: 14px; }
+.tm-jb .tm-report { margin: 8px 8px 4px 26px; padding: 10px 0 0; border: 0; border-top: 1px solid var(--hairline); border-radius: 0; background: none; }
+.tm-jb .tm-report-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 14px; }
+.tm-jb .tm-report-body { max-height: none; overflow: visible; font-size: 15.5px; line-height: 1.6; overflow-wrap: anywhere; }
+.tm-report-body.is-clamped { max-height: 6.4em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent);
+  mask-image: linear-gradient(#000 70%, transparent); }
+.tm-jb .tm-report .tm-jb-steps { margin: 0; border-top: 0; }
+.tm-jb .tm-report .tm-jb-step:first-child { padding-top: 4px; }
+
+/* The job pill above the composer and its details (17/11/2026). The pill, dot, caret and pop-up come from style.css
+   (.bg-strip, the main chat's background-work pill); these are the rows of a team job inside the pop-up. */
+.tm-jobs.bg-strip { margin: 6px 12px 6px; }
+.tm-jobs .bg-pop { width: min(420px, calc(100vw - 32px)); }
+.tm-sr { display: flex; flex-direction: column; gap: 4px; }
+.tm-sr-head { display: flex; align-items: flex-start; gap: 8px; }
+.tm-sr-head > .tm-jb-s { padding-top: 3px; }
+.tm-sr-head > .tm-jb-s .ic { width: 18px; height: 18px; }
+.tm-sr-title { flex: 1; min-width: 0; padding: 2px 0; border: 0; background: none; color: var(--text); font: inherit; font-size: 15px;
+  line-height: 1.4; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.tm-sr-title:hover { color: var(--accent-ink); }
+.tm-sr-ask .tm-sr-title { font-weight: 650; }
+.tm-sr .tm-jb-ic { width: 30px; height: 30px; }
+.tm-sr-why { margin-left: 26px; font-size: 14px; line-height: 1.45; color: var(--warn-ink); overflow-wrap: anywhere; }
+.tm-sr-go { margin: 4px 0 2px 26px; }
+.tm-sr-go .ws-btn { min-height: 36px; padding: 0 14px; border-radius: 10px; font-size: 14.5px; }
+.tm-sr-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-left: 26px; font-size: 14px; color: var(--text3); }
+.tm-sr-meta .ic { width: 14px; height: 14px; }
+/* Role badges in the member list: one line, never squeezed by a long name (owner, 17/11/2026: "chữ phó nhóm trên 1 dòng
+   thôi đừng 2 dòng"). */
+.tm-info-members .tm-info-badge { flex: none; white-space: nowrap; }
+/* As wide as the private chat button of the other rows (32px, 44px on a phone): the generic span rule of this list would
+   squeeze it to nothing. */
+.tm-info-members li > span.tm-info-chat.tm-info-gap { visibility: hidden; min-width: 32px; }
+.tm-info-members .tm-info-badge + .tm-info-chat { margin-left: 4px; }
+
+/* Tabs of the side panel: icon, word, count (owner: "menu thông tin, việc team cũng nên có icon"), the look of the tabs
+   on the Tasks page. */
+/* The three tabs share the width left of the close button, so they fit the 360px panel and never run under it. */
+.tm-side-bar .tm-tabs { flex: 1 1 auto; min-width: 0; gap: 2px; padding: 4px; border-radius: 12px; background: var(--surface-2); }
+.tm-side .tm-tab { display: inline-flex; flex: 1 1 auto; align-items: center; justify-content: center; gap: 6px; min-width: 0; min-height: 36px;
+  padding: 0 5px; border-radius: 9px; font-size: 14.5px; font-weight: 600; white-space: nowrap; }
+.tm-tab > span:not(.tm-tab-n) { min-width: 0; overflow: hidden; }
+.tm-tab .ic { flex: none; width: 17px; height: 17px; }
+.tm-side .tm-tab[aria-selected="true"] { background: var(--panel-solid); color: var(--text); box-shadow: var(--shadow-1); }
+.tm-tab-n { padding: 0 7px; border-radius: 999px; background: var(--surface-2); font-size: 12.5px; font-weight: 700; line-height: 1.6; }
+.tm-tab[aria-selected="true"] .tm-tab-n { background: var(--accent-wash); color: var(--accent-ink); }
+@media (max-width: 760px) {
+  .tm-jb-ic { width: 36px; height: 44px; }
+  .tm-jb-lead { min-height: 44px; }
+  .tm-jb-title { padding: 11px 4px 11px 0; }
+  .tm-jb-fold { min-height: 36px; }
+  .tm-jb-step { padding: 11px 0; }
+  .tm-jb-pg .tm-jb-ic { width: 40px; height: 44px; }
+  .tm-side .tm-jb-go .ws-btn { min-height: 48px; }
+  .tm-jb-delall, .tm-jb-more { min-height: 44px; }
+  .tm-sr .tm-jb-ic { width: 40px; height: 44px; }
+  .tm-info-members li > span.tm-info-chat.tm-info-gap { min-width: 44px; }
+  .tm-sr-go .ws-btn { min-height: 44px; }
+  .tm-filterbar { min-height: 44px; font-size: 16px; }
+  .tm-jobs .bg-pill { min-height: 40px; }
+  .tm-side-bar .tm-tabs { padding: 3px; }
+  .tm-side .tm-tab { gap: 5px; min-height: 44px; }
+  .tm-side .tm-qhead.tm-jb-h, .tm-jb-h .tm-qn { font-size: 16px; }
+  /* A phone reads this panel at 16px like the rest of the team page (0.358.0); only the count pills stay small. */
+  .tm-jb-meta, .tm-jb-fold, .tm-jb-why, .tm-jb-who, .tm-jb-what, .tm-jb-pgn, .tm-jb-note, .tm-jb-sub, .tm-jb-more,
+  .tm-jb-delall, .tm-jb .tm-report-meta, .tm-jb .tm-report-body, .tm-side .tm-jb-go .ws-btn,
+  .tm-sr-title, .tm-sr-why, .tm-sr-meta, .tm-sr-go .ws-btn { font-size: 16px; }
+}
 
 /* 0.358.0 (owner, 27/10/2026: "uxui nhìn điện thoại trong phần team loạn lắm"): a calmer Team chat on a phone. Fewer
    boxes and lines, more width for the words, rich answers read as a chat message instead of a document. Text stays 16px. */
@@ -4174,6 +4936,8 @@ button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var
   /* Header: one slim row of plain icon buttons, no boxed borders. */
   .tm-chat-head { min-height: 48px; padding: 2px 4px; gap: 2px; }
   .tm-chat-head .ws-btn.tm-icon, .tm-chat-head .tm-back { border-color: transparent; background: none; box-shadow: none; }
+  /* Square icon buttons (2026-11-09) keep the 44px touch target on a phone. */
+  .ws-btn.tm-icon { width: 44px; height: 44px; min-width: 44px; }
   .tm-chat-head .tm-ava, .tm-chat-head .tm-gava { flex: none; }
   /* Messages: no outline around an assistant's message, tighter spacing, more room for the text. */
   .tm-msgs { padding: 8px 8px 12px; gap: 4px; }
@@ -4212,3 +4976,53 @@ button.tm-quote-ref:hover, button.tm-quote-ref:focus-visible { border-color: var
 .kho-goc svg { width: 14px; height: 14px; flex: none; }
 .kho-goc a { color: var(--accent); text-decoration: none; font-weight: 600; overflow-wrap: anywhere; }
 .kho-goc a:hover { text-decoration: underline; }
+
+/* 0.454.0: the Reorder box (reorder-dialog.js) for projects, pinned chats and tags. Rows reuse the brain picker's. */
+.ro-box { width: min(440px, calc(100vw - 24px)); max-height: min(80vh, 640px); display: flex; flex-direction: column; }
+.ro-hint { padding: 0 16px 8px; font-size: 16px; color: var(--text2); }
+.ro-list { flex: 1 1 auto; overflow-y: auto; padding: 0 8px; }
+.ro-ic { flex: none; display: inline-flex; color: var(--text2); }
+.ro-ic svg { width: 16px; height: 16px; }
+.ro-err { padding: 6px 16px 0; font-size: 16px; color: var(--red, #d64545); }
+.ro-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px 16px; }
+.cside-group { display: flex; align-items: center; }
+.cside-reorder { margin-left: auto; border: 0; background: none; color: var(--text3); width: 26px; height: 22px; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.cside-reorder:hover { color: var(--text); background: var(--bg3); }
+.cside-reorder svg { width: 14px; height: 14px; }
+@media (hover: none), (pointer: coarse) {
+  .ro-box .bp-row { min-height: 58px; }
+  .ro-box .bp-arrow { width: 42px; height: 42px; }
+  .ro-box .bp-grip { width: 38px; height: 44px; }
+  .ro-hint { font-size: 17px; }
+  .cside-reorder { width: 34px; height: 30px; }
+}
+
+
+/* 17/11/2026: the Team tab without Advanced (teams.js teamTabHtml). Every field saves itself; Archive and Delete stand
+   apart at the end in a red-edged box (design-style 9: the danger zone is last). */
+.tm-pause-row { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.tm-danger-zone { margin-top: 18px; padding: 12px; border: 1px solid var(--danger-line); border-radius: 14px; }
+.tm-danger-zone .tm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tm-danger-zone .ws-btn { min-height: 44px; padding: 0 14px; }
+.tm-danger-zone .ws-btn.tm-danger { color: var(--danger-ink); border-color: var(--danger-line); }
+.tm-danger-zone .ws-btn svg { width: 18px; height: 18px; }
+/* The two outside-action choices are choice cards like the three levels above them: one look, one left edge. */
+.tm-wm .tm-radio { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; margin: 0 0 6px; border: 1px solid var(--border);
+  border-radius: 12px; cursor: pointer; }
+.tm-wm .tm-radio:has(input:checked) { border-color: var(--accent); background: var(--accent-wash); }
+.tm-wm .tm-radio input { margin: 3px 0 0; flex: none; }
+
+/* 2026-11-19 (owner: "tạo team với nhập team ở trên 1 hàng thôi đừng xuống dòng 2 hàng... nếu kéo về thu nhỏ quá thì chỉ
+   hiện icon thôi"): the team list bar never wraps and a label never breaks inside its button. When the two labels do not
+   fit, teams.js (fitListBar) adds .tm-chi-icon and both buttons keep only their icons. The folded strip (.tm-mini) shows
+   Import as an icon too, under Create. */
+.tm-list-bar { flex-wrap: nowrap; }
+.tm-list-bar .ws-btn { white-space: nowrap; flex: none; }
+.tm-list-bar.tm-chi-icon .tm-new, .tm-list-bar.tm-chi-icon .tm-import { font-size: 0; gap: 0; padding: 8px; }
+.tm-list-bar.tm-chi-icon .ws-btn svg, .tm-list-bar.tm-chi-icon .ws-btn .ic { width: 18px; height: 18px; }
+@media (min-width: 1061px) {
+  .tm-page.tm-mini .tm-list-bar { flex-direction: column; gap: 6px; }
+  .tm-page.tm-mini .tm-new, .tm-page.tm-mini .tm-import { font-size: 0; gap: 0; padding: 8px; margin-left: 0; }
+  .tm-page.tm-mini .tm-import svg, .tm-page.tm-mini .tm-import .ic { width: 18px; height: 18px; }
+}

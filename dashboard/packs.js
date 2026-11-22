@@ -192,8 +192,9 @@
   // Loại năng lực, thứ chia lưới kho thành các tab. Thứ tự ở đây LÀ thứ tự chip trên màn
   // hình, đi từ thứ người dùng hiểu nhanh nhất (trợ lý) tới thứ kỹ thuật nhất (kết nối).
   //
-  // `bundle` cố ý KHÔNG có chip riêng: nó là chỗ rơi của mục khai loại lạ, và một chip tên
-  // "Khác" chỉ mời người ta bấm vào để thấy lưới rỗng. Mục bundle vẫn hiện ở tab Tất cả.
+  // `bundle` (a pack made of several kinds, and where an unknown kind lands) gets its tab only while the list
+  // holds such a pack: an always-on tab would mostly open an empty grid. Until 2026-11-11 it had no
+  // tab at all, so `javis.crm`, the one bundle in the Store, could not be found or installed from this page.
   //
   // Icon lấy ĐÚNG icon trang tương ứng ở thanh bên (`console.js` VIEW_ICON), không chọn lại
   // cho đẹp: người dùng nhận ra "cái này là kỹ năng" bằng hình họ đã thấy hàng ngày.
@@ -209,10 +210,19 @@
     // Recommended (0.370.0, "Recommended repos" until 0.376.0): not a kind but a tab of its own, listing every Store entry that follows
     // its author's GitHub repo (`upstream`), whatever its kind. It only shows when the Store has one.
     repo:      { nhan: "store.kind.repo",      icon: "git-branch", trang: "" },
+    // All (owner, 2026-11-16: "the Store must have an All tab, to see every app, skill and workflow, easy to
+    // search"): not a kind either. Always the first tab, it lists every pack, so its search box covers the whole
+    // Store and nobody has to guess a pack's kind before looking for it.
+    all:       { nhan: "store.kind.all",       icon: "package",    trang: "" },
   };
   const THU_TU_LOAI = ["agent", "skill", "workflow", "tool", "connector"];
   const theoGoc = g => !!(g && g.upstream && g.upstream.repo);
-  const trongTab = (g, loai) => loai === "repo" ? theoGoc(g) : (g.kind || "bundle") === loai;
+  const trongTab = (g, loai) => loai === "all" ? true
+    : loai === "repo" ? theoGoc(g) : (g.kind || "bundle") === loai;
+  // The tabs to draw for this catalog, in screen order: All always first, then Recommended, and Bundle last, those
+  // two only when they have a pack.
+  const tabKinds = ds => ["all"].concat(ds.some(theoGoc) ? ["repo"] : [], THU_TU_LOAI,
+    ds.some(g => trongTab(g, "bundle")) ? ["bundle"] : []);
 
   // Trần dung lượng tệp .zip, do server nói (`/packs` trả `max_mb`). Giữ ở module để hộp thoại
   // chọn tệp nói đúng con số ngay cả khi nó mở lại sau một lần lỗi, lúc không còn `d` trong tay.
@@ -304,6 +314,14 @@
             + tw("store.inspect.already.body",
                  { ver: '<b>' + esc(d.da_cai.version || "?") + '</b>' })
             + '</div></div>' : "")
+      // Vá bảo mật 2026-11-05: gói khai `replaces` sẽ gỡ gói cũ và nhận dữ liệu plugin của nó. Màn hình đồng ý
+      // trước đây chỉ nói "đang chạy bản X", người cài không biết gói nào bị thay.
+      + (Array.isArray(d.replaces) && d.replaces.length
+          ? '<div class="pkm-canh vang"><div class="pkm-canh-tieu">' + ic("info")
+            + tw("store.inspect.replaces.title") + '</div><div>'
+            + tw("store.inspect.replaces.body",
+                 { ids: d.replaces.map(function (x) { return '<code>' + esc(x) + '</code>'; }).join(", ") })
+            + '</div></div>' : "")
       + (d.warning
           ? '<div class="pkm-canh vang"><div class="pkm-canh-tieu">' + ic("info")
             + tw("store.inspect.skipped.title") + '</div><div>' + esc(d.warning)
@@ -380,7 +398,22 @@
       dong();
       if (typeof tuy.sauKhiCai === "function") tuy.sauKhiCai(r);
       else veLai(el);
+      baoDoiTen(d, r);
     };
+  }
+
+  // The brain already had an item with this name (the user renamed or edited the pack's copy, then
+  // uninstalled and installed again). The pack's copy went in under a new name: say which, or the user
+  // looks for the old name on the Partners page and thinks the install did nothing.
+  function baoDoiTen(d, r) {
+    const ds = ((r && r.vault) || {}).doi_ten || [];
+    if (!ds.length) return;
+    modal(pkmDau(d, esc(tw("store.installed_renamed.title")), esc(nn(d.name, d.id)))
+      + '<div class="pkm-than"><p class="pkm-mota">' + esc(tw("store.installed_renamed.body")) + '</p><ul>'
+      + ds.map(x => '<li>' + tw("store.installed_renamed.row",
+          { goc: '<code>' + esc(x.goc || "") + '</code>', moi: '<code>' + esc(x.slug || "") + '</code>' }) + '</li>').join("")
+      + '</ul></div><div class="pkm-chan"><button class="mp-btn primary" data-act="close">'
+      + tw("common.close") + '</button></div>', true);
   }
 
   async function tuUrl(el, url, expect, tin, tuy) {
@@ -409,7 +442,8 @@
   async function caiGoiKho(id, tuy) {
     tuy = tuy || {};
     let ds;
-    try { ds = await (await fetch("/packs/store")).json(); } catch (e) { ds = null; }
+    try { ds = await (await fetch("/packs/store" + brainQuery("?"))).json(); } catch (e) { ds = null; }
+    if (ds && ds.need_password) return "need_password";   // no sign-in password yet: say so, not "not found"
     const g = ((ds && ds.packs) || []).find(x => x && x.id === id && x.nguon !== "app");
     if (!g || !g.download || !g.download.url) return "khong_co";
     if (g.installed) return g.enabled === false ? "da_tat" : "da_cai";
@@ -508,6 +542,13 @@
   // sẽ khoá người dùng ở đúng cái bản vừa bị rút.
   //
   // Connector đi kèm app không bao giờ tính: chúng không tải từ đâu cả (`download.url` rỗng).
+  // The brain open now, as a query string for the Store routes (#1308): a pack's assistants and skills live in ONE
+  // brain, and the server says so when that is not this one.
+  function brainQuery(prefix) {
+    const b = (typeof currentBrainPath === "function" ? currentBrainPath() : "") || "";
+    return b ? prefix + "brain=" + encodeURIComponent(b) : "";
+  }
+
   function coBanMoi(g) {
     return !!(g && g.nguon !== "app" && g.installed && g.installed_version && g.version
               && g.installed_version !== g.version);
@@ -524,6 +565,10 @@
       return { nhan: tw("store.btn.update_to", { ver: esc(g.version) }),
                lop: "kho-btn kho-btn-chinh", act: "cai" };
     }
+    // Installed in another brain, nothing of it in this one (16/11/2026): install it here too.
+    if (g.installed && g.add_to_brain) {
+      return { nhan: tw("store.btn.add_to_brain"), lop: "kho-btn kho-btn-chinh", act: "addbrain", tat: true };
+    }
     if (g.installed) {
       return { nhan: tw("store.btn.uninstall"), lop: "kho-btn kho-btn-go", act: "go", tat: true };
     }
@@ -533,18 +578,30 @@
   // Dòng trạng thái dưới mô tả. Nói ĐỦ HAI SỐ khi có bản mới, vì "đang chạy cái gì" và "kho
   // có cái gì" là hai câu hỏi khác nhau và người dùng cần cả hai để quyết định có bấm không.
   function dongDaCai(g) {
-    if (!g.installed) return "";
+    // Owner report 2026-11-04: the user deleted the pack's agents in the app, so the server stopped
+    // calling it installed. Say why the card offers Install again.
+    if (!g.installed) {
+      return g.removed_from_brain
+        ? '<div class="kho-daicai">' + ic("info") + ' ' + tw("store.removed_from_brain") + '</div>' : "";
+    }
     if (g.nguon === "app" || !g.installed_version) {
       return '<div class="kho-daicai">' + ic("check") + ' ' + tw("store.installed_here")
-        + '</div>';
+        + '</div>' + dongBrainKhac(g);
     }
     if (coBanMoi(g)) {
       return '<div class="kho-daicai moi">' + ic("arrow-up") + ' '
         + tw("store.running_store_has",
-             { cai: esc(g.installed_version), kho: esc(g.version) }) + '</div>';
+             { cai: esc(g.installed_version), kho: esc(g.version) }) + '</div>' + dongBrainKhac(g);
     }
     return '<div class="kho-daicai">' + ic("check") + ' '
-      + tw("store.installed_latest", { ver: esc(g.installed_version) }) + '</div>';
+      + tw("store.installed_latest", { ver: esc(g.installed_version) }) + '</div>' + dongBrainKhac(g);
+  }
+
+  // #1308: installed for the machine, but the pack's assistants and skills are only in another brain.
+  function dongBrainKhac(g) {
+    return g.items_brain
+      ? '<div class="kho-daicai">' + ic("info") + ' '
+        + tw("store.items_other_brain", { brain: esc(g.items_brain) }) + '</div>' : "";
   }
 
   // "Updated from the author" line: the author's GitHub repo as a link, and the day the Store last took a new
@@ -558,7 +615,8 @@
       + (u.synced ? ' · ' + esc(tw("store.upstream_synced", { ngay: u.synced })) : "") + '</div>';
   }
 
-  function theKho(g) {
+  // `showKind`: the card says its kind. Only the All tab asks for it, the one place where the open tab does not.
+  function theKho(g, showKind) {
     const lo = LOAI[g.kind] || LOAI.bundle;
     const n = nutThe(g);
     // Số hiệu KHÔNG nằm ở đây khi gói đã cài. Dòng meta lấy `g.version` (số của KHO), nên thẻ
@@ -581,6 +639,8 @@
       + '<div class="kho-dau">' + veAvatar(g)
       + '<span class="kho-chips">'
       + (g.tier === "code" ? '<span class="kho-chip-ma">' + tw("store.tier.code") + '</span>' : "")
+      // A pack with no group already shows its kind in the group chip below: not twice.
+      + (showKind === true && g.nhom ? '<span class="kho-nhom">' + esc(tw(lo.nhan)) + '</span>' : "")
       + '<span class="kho-nhom">' + esc(g.nhom ? nhanNhom(g.nhom) : tw(lo.nhan)) + '</span>'
       + '</span></div>'
       + '<div class="kho-ten">' + esc(nn(g.name, g.id))
@@ -606,7 +666,8 @@
 
   // Trạng thái lưới kho. Để ở module vì mọi lần bấm tab, bấm nhóm hay đổi trang đều chỉ VẼ LẠI
   // từ dữ liệu đã tải, không gọi lại mạng.
-  let _kho = { dl: null, loai: "connector", nhom: "Tất cả", trang: 1, tim: "", sap: "" };
+  // Opens on All (owner, 2026-11-16) unless the caller asks for a kind (`moKho`).
+  let _kho = { dl: null, loai: "all", nhom: "Tất cả", trang: 1, tim: "", sap: "" };
   // Sort box (owner, 0.407.0). Only orders that need no server: install counts and stars wait for
   // a central server (owner, 2026-10-29: later, with the business edition). The choice is a
   // per-device convenience, so it lives in localStorage and the page works without it.
@@ -638,8 +699,13 @@
   async function veKho(el, host, lamMoi, loaiDau, timDau) {
     host.innerHTML = '<div class="mp-empty">' + tw("store.catalog_loading") + '</div>';
     let d;
-    try { d = await (await fetch("/packs/store" + (lamMoi ? "?refresh=1" : ""))).json(); }
+    try { d = await (await fetch("/packs/store" + (lamMoi ? "?refresh=1" + brainQuery("&") : brainQuery("?")))).json(); }
     catch (e) { d = { ok: false, error: String(e) }; }
+    if (d && d.need_password) {
+      host.innerHTML = '<div class="mp-empty">' + esc(d.error || "") + '</div>';
+      showNeedPassword(host);
+      return;
+    }
     if (!d || !d.ok) {
       // Kho không tới được thì KHÔNG phải là hỏng cả trang: cài từ tệp vẫn chạy như thường.
       host.innerHTML = '<div class="mp-empty">'
@@ -665,7 +731,7 @@
     // bản về sau không đè lên thứ mới hơn.
     const tuoi = d.fetched_at ? (Date.now() / 1000 - Number(d.fetched_at)) : 0;
     if (!lamMoi && tuoi > CU_QUA) {
-      fetch("/packs/store?refresh=1")
+      fetch("/packs/store?refresh=1" + brainQuery("&"))
         .then(r => r.json())
         .then(d2 => {
           if (d2 && d2.ok && _kho.dl === d) { _kho.dl = d2; veLuoi(el, host); }
@@ -715,7 +781,8 @@
   function veLuoi(el, host) {
     const d = _kho.dl || { packs: [] };
     const ds = d.packs || [];
-    if (_kho.loai === "repo" && !ds.some(theoGoc)) _kho.loai = "skill";
+    const dsLoai = tabKinds(ds);
+    if (!dsLoai.includes(_kho.loai)) _kho.loai = "skill";
     const cungLoai = ds.filter(g => trongTab(g, _kho.loai));
     const daCai = cungLoai.filter(g => g.installed);
     // Đếm bản mới trên MỌI loại, không chỉ tab đang mở. Đây là chỗ sửa cái lỗi nặng nhất của
@@ -739,13 +806,17 @@
     const laMoi = _kho.nhom === "Có bản mới";
     const q = _kho.tim.trim().toLowerCase();
     if (!SAP[_kho.sap]) _kho.sap = docSap();
+    const matches = g => !q || (nn(g.name, g.id) + " " + nn(g.description) + " " + g.id).toLowerCase().includes(q);
     const hop = sapXep(cungLoai, _kho.sap).filter(g =>
       (_kho.nhom === "Tất cả"
         || (laDaCai ? g.installed
             : laMoi ? coBanMoi(g)
             : laCongDong ? !g.verified
             : (g.nhom || "Khác") === _kho.nhom))
-      && (!q || (nn(g.name, g.id) + " " + nn(g.description) + " " + g.id).toLowerCase().includes(q)));
+      && matches(g));
+    // Typed words that find nothing here but would on the All tab: the empty grid offers that search, with the
+    // count, instead of leaving the user to think the Store does not have it.
+    const elsewhere = (q && !hop.length && _kho.loai !== "all") ? ds.filter(matches).length : 0;
 
     let gioLay = "";
     try {
@@ -760,14 +831,15 @@
     _kho.trang = trang;
     const hienThi = hop.slice((trang - 1) * MOI_TRANG, trang * MOI_TRANG);
 
-    const dsLoai = (ds.some(theoGoc) ? ["repo"] : []).concat(THU_TU_LOAI);
     // The same kinds as a <select> for phones (owner, 2026-10-28: a dropdown fits a phone better
     // than six squeezed buttons). Each option keeps its count and its "N new" badge as text.
     const chonLoai = dsLoai.map(k => {
       const trong = ds.filter(g => trongTab(g, k));
       const nMoi = trong.filter(coBanMoi).length;
+      // On a phone this select sits beside the group select, whose first option is also "All": two boxes reading
+      // the same word. So here the All tab is spelled out as "All kinds".
       return '<option value="' + k + '"' + (k === _kho.loai ? " selected" : "") + '>'
-        + esc(tw(LOAI[k].nhan)) + ' (' + trong.length + ')'
+        + esc(tw(k === "all" ? "store.kind.all_kinds" : LOAI[k].nhan)) + ' (' + trong.length + ')'
         + (nMoi ? ' · ' + esc(tw("store.tab_new_count", { count: nMoi })) : "") + '</option>';
     }).join("");
     const tabLoai = dsLoai.map(k => {
@@ -795,7 +867,7 @@
       ? '<div class="kho-bao-moi">' + ic("arrow-up")
         + '<span><b>' + tw("store.updates_count", { count: capNhat.length }) + '</b> '
         + tw("store.updates_tail") + '</span>'
-        + THU_TU_LOAI.filter(k => capNhat.some(g => (g.kind || "bundle") === k))
+        + dsLoai.filter(k => k !== "repo" && capNhat.some(g => (g.kind || "bundle") === k))
             .map(k => '<button class="kho-chip" data-kho-moi="' + k + '">'
               + esc(tw(LOAI[k].nhan)) + ' ('
               + capNhat.filter(g => (g.kind || "bundle") === k).length + ')</button>').join("")
@@ -860,11 +932,16 @@
          : laCongDong ? tw("store.count_community", { count: hop.length })
          : tw("store.count_items", { count: hop.length })) + '</span>'
       + '</div>'
-      + '<div class="cat-grid" id="pkGrid">' + hienThi.map(theKho).join("") + '</div>'
+      + '<div class="cat-grid" id="pkGrid">' + hienThi.map(g => theKho(g, _kho.loai === "all")).join("") + '</div>'
       + (hienThi.length ? "" : '<div class="mp-empty">'
           + (laDaCai ? tw("store.empty_installed", { loai: esc(tw(LOAI[_kho.loai].nhan)) })
              : laMoi ? tw("store.empty_updates", { loai: esc(tw(LOAI[_kho.loai].nhan)) })
-             : tw("store.empty_filter")) + '</div>')
+             : tw("store.empty_filter"))
+          + (elsewhere
+              ? '<div class="kho-search-all"><button class="kho-btn kho-btn-phu" data-kho-search-all="1">'
+                + esc(tw("store.search_all", { count: elsewhere })) + '</button></div>'
+              : "")
+          + '</div>')
       + (soTrang > 1
           ? '<div class="kho-trang"><span class="prov-meta">'
             + tw("store.paging", { tu: ((trang - 1) * MOI_TRANG + 1),
@@ -892,7 +969,11 @@
     traConTro(host, nhoConTro);
 
     const lai = () => veLuoi(el, host);
-    const doiLoai = (k) => { _kho.loai = k; _kho.nhom = "Tất cả"; _kho.trang = 1; _kho.tim = ""; lai(); };
+    const doiLoai = (k, keepSearch) => {
+      _kho.loai = k; _kho.nhom = "Tất cả"; _kho.trang = 1;
+      if (keepSearch !== true) _kho.tim = "";
+      lai();
+    };
     host.querySelectorAll("[data-kho-loai]").forEach(b => b.onclick = () => doiLoai(b.dataset.khoLoai));
     const sl = host.querySelector ? host.querySelector("#pkLoai") : null;
     if (sl) sl.onchange = () => doiLoai(sl.value);
@@ -904,6 +985,8 @@
       _kho.loai = b.dataset.khoMoi; _kho.nhom = "Có bản mới";
       _kho.trang = 1; _kho.tim = ""; lai();
     });
+    // Same typed words, on the All tab.
+    host.querySelectorAll("[data-kho-search-all]").forEach(b => b.onclick = () => doiLoai("all", true));
     host.querySelectorAll("[data-kho-trang]").forEach(b => b.onclick = () => {
       _kho.trang = Number(b.dataset.khoTrang); lai(); lenDauLuoi(host);
     });
@@ -946,6 +1029,16 @@
       const act = b.dataset.khoAct;
       if (act === "cai") return tuUrl(el, g.download.url, g.download.sha256, g);
       if (act === "go") return hopGo(el, g.id);
+      if (act === "addbrain") {
+        b.disabled = true;
+        return postJson("/packs/add-to-brain", {
+          id: g.replaces_installed || g.id,
+          brain: (typeof currentBrainPath === "function" ? currentBrainPath() : "") || "brain",
+        }).then(r => {
+          if (r && r.ok) veKho(el, host, false, _kho.loai);
+          else { b.disabled = false; alert((r && r.error) || tw("store.add_to_brain_failed")); }
+        });
+      }
       if (act === "tat") {
         return postJson("/packs/toggle", { id: g.id, enabled: g.enabled === false }).then(r => {
           if (r && r.ok) veKho(el, host, false, _kho.loai);
@@ -1204,7 +1297,7 @@
     dangCho(tw("store.rm.title"), tw("store.rm.checking"));
     let d;
     try {
-      d = await (await fetch("/packs/uninstall-plan?id=" + encodeURIComponent(pid))).json();
+      d = await (await fetch("/packs/uninstall-plan?id=" + encodeURIComponent(pid) + brainQuery("&"))).json();
     } catch (e) { d = { ok: false, error: String(e) }; }
     if (!d || !d.ok) {
       manHinhLoi(tw("store.rm.title"), (d && d.error) || tw("store.rm.read_failed"), d && d.stage);
@@ -1212,6 +1305,7 @@
     }
     const kn = d.connections || [];
     const xoa = (d.vault || {}).xoa || [];
+    const vaultBrain = String((d.vault || {}).brain_name || "");
     const giu = (d.vault || {}).giu || [];
     modal(pkmDau(d, tw("store.rm.heading", { ten: esc(nn(d.name, d.id)) }),
                  '<code>' + esc(d.id) + '</code>')
@@ -1230,9 +1324,14 @@
             + '<div class="pkm-o-phu">' + tw("store.rm.conns_note") + '</div>'
             + '</li>' : "")
       + (xoa.length
-          ? '<li>' + tw("store.rm.vault", { count: xoa.length })
+          ? '<li>' + (vaultBrain ? tw("store.rm.vault_in", { count: xoa.length, brain: esc(vaultBrain) })
+                                 : tw("store.rm.vault", { count: xoa.length }))
             + ' <span style="opacity:.65">('
-            + xoa.map(x => esc(x.slug)).join(", ") + ')</span></li>' : "")
+            + xoa.map(x => esc(x.slug)).join(", ") + ')</span>'
+            // Another brain than the one open: the items go from a place the user is not looking at. Say it.
+            + ((d.vault || {}).other_brain
+                ? '<div class="pkm-o-phu"><b>' + tw("store.rm.vault_other") + '</b></div>' : "")
+            + '</li>' : "")
       + '</ul></div>'
       // Thứ người dùng đã sửa thì KHÔNG bị xoá, và phải nói ra - nếu không họ sẽ tưởng mất.
       + (giu.length
@@ -1266,6 +1365,25 @@
     };
   }
 
+  // A local install with no password: every other page is open, but the Store needs a real session and
+  // none can exist until a password is set (owner report 2026-11-17). The server says so with
+  // `need_password`; this adds the one button that fixes it, straight to the Account page.
+  function showNeedPassword(box) {
+    const btn = document.createElement("button");
+    btn.className = "mp-btn primary";
+    btn.type = "button";
+    btn.id = "pkSetPassword";
+    btn.style.marginTop = "12px";
+    btn.textContent = tw("store.set_password");
+    btn.onclick = () => {
+      const s = window.Alpine && Alpine.store("nav");
+      if (s && s.go) s.go("account");
+    };
+    const msg = box.firstElementChild || box;
+    msg.appendChild(document.createElement("br"));
+    msg.appendChild(btn);
+  }
+
   // console.js gọi hàm này MỖI LẦN điều hướng vào trang kho, và chỉ lúc đó. Nên đây là chỗ
   // đúng để chốt đường về của lượt mới: lấy thứ `moKho` vừa đặt (nếu vào bằng tab), hoặc
   // không có gì (nếu vào từ thanh bên).
@@ -1276,7 +1394,7 @@
   }
 
   async function veLai(el) {
-    el.innerHTML = '<div class="cview-placeholder">' + tw("sess.loading") + '</div>';
+    el.innerHTML = '<div class="pg-loading pg-page">' + esc(tw("sess.loading")) + '</div>';
     let d;
     try { d = await (await fetch("/packs")).json(); }
     catch (e) {
@@ -1285,6 +1403,7 @@
     }
     if (d && d.error) {
       el.innerHTML = '<div class="cview-placeholder">' + esc(d.error) + '</div>';
+      if (d.need_password) showNeedPassword(el);
       return;
     }
     // Bộ lọc loại thì lấy rồi XOÁ NGAY: nó là ý định của MỘT lần bấm tab. Giữ lại thì lần sau
@@ -1350,5 +1469,6 @@
                         coBanMoi: coBanMoi, nutThe: nutThe, theKho: theKho,
                         ghiConTro: ghiConTro, traConTro: traConTro, veKho: veKho,
                         caiGoiKho: caiGoiKho, caiPluginZip: caiPluginZip,
+                        showNeedPassword: showNeedPassword,
                         pluginZipView: pluginZipView };
 })();

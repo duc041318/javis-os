@@ -82,8 +82,8 @@ check("a bot chip names the bot", V.activeChips({ bot: "b1" }, [], [{ id: "b1", 
 
 // ---- 4. conversations.js: layout, Info panel ----
 check("three columns: list | chat | Info", /<div class="ht-listcol">[\s\S]*<div class="ht-thread">[\s\S]*<div class="ht-info" hidden><\/div>/.test(CV));
-check("rows: coloured edge by who, avatar with the channel logo, 'A.I.:' or 'You:' before the last message",
-  /'<button type="button" class="ht-item w-' \+ who/.test(CV) && /'<span class="ib-kl">' \+ logoKenh\(c\.channel, "21px"\)/.test(CV) &&
+check("rows: coloured edge by who, avatar with the channel logo (a comment or an Instagram chat gets its own), 'A.I.:' or 'You:' before the last message",
+  /'<button type="button" class="ht-item w-' \+ who/.test(CV) && /'<span class="ib-kl">' \+ badgeOf\(c, "21px"\)/.test(CV) && /return logoKenh\(c\.channel, size\);/.test(CV) &&
   /c\.last_sender_type === "ai" \? window\.t\("ib\.pre_ai"\)/.test(CV));
 check("rows name the nick or Page only when several are in view", /var many = _accs\.length !== 1;/.test(CV));
 check("Info stays closed until asked (owner, 2026-10-29), the choice kept in this browser on wide screens only",
@@ -99,6 +99,22 @@ check("bot-wide settings say so once, and go through the bot's own update route"
   /api\("\/chatbots\/" \+ encodeURIComponent\(botId\) \+ "\/update"/.test(CV));
 check("the note is saved when the box loses focus, and typing survives the 5-second redraw", /note\.onblur = function \(\) \{ saveNote\(c\.id\); \};/.test(PI) &&
   /_noteEdit && _noteEdit\.id === c\.id \? _noteEdit\.text/.test(PI) && /\/note", \{ method: "POST", body: fd\(\{ note: text \}\) \}/.test(CV));
+// 2026-11-12: in a private chat the note box IS the customer profile (the background model writes it, the bot reads it).
+// 2026-11-13: a group and a public comment thread are not one person; the server says which chats have a profile.
+check("Info: a private chat shows the customer profile in its own section, a group or a comment thread keeps the plain note",
+  /var prof = hasProfile\(c\)/.test(PI) && /function hasProfile\(c\) \{ return !!\(c && c\.profile_chat\); \}/.test(CV) &&
+  /class="ib-sec ib-prof"/.test(PI) && /\(prof \? "" : noteBox\)/.test(PI) &&
+  /t\(prof \? "ib\.i_profile_ph" : grp \? "ib\.i_note_group_ph" : "ib\.i_note_ph"\)/.test(PI) && /data-profile="1" rows="8"/.test(PI) &&
+  /maxlength="4000"/.test(PI) && /hasProfile\(_conv\) \? "ib\.t_profile" : "ib\.t_note"/.test(CV));
+check("a group's note box says it is about the group, in both languages",
+  VI["ib.i_note_group"] === "Ghi chú về nhóm" && EN["ib.i_note_group"] === "Note about the group" && !!VI["ib.i_note_group_ph"] && !!EN["ib.i_note_group_ph"]);
+check("the profile's explanation sits behind the (i) button, and the panel says when the A.I. last wrote it",
+  /JI\.body\(esc\(t\("ib\.i_profile_info"\)\)\)/.test(PI) && /c\.profile_at \? '<p class="ib-hint ib-prof-at">'/.test(PI) &&
+  /c\.note \|\| "", c\.profile_at \|\| 0/.test(CV));
+check("profile strings exist in both languages and name the bot's 30 messages",
+  VI["ib.i_profile"] === "Hồ sơ khách hàng" && EN["ib.i_profile"] === "Customer profile" && /30 tin/.test(VI["ib.i_profile_info"]) &&
+  /30 messages/.test(EN["ib.i_profile_info"]) && !!VI["ib.i_profile_ph"] && !!EN["ib.i_profile_ph"] && !!VI["ib.t_profile"] && !!EN["ib.t_profile"] &&
+  /\{time\}/.test(VI["ib.i_profile_at"]) && /\{time\}/.test(EN["ib.i_profile_at"]));
 check("'Open the settings of bot X' asks the Bot tab to open that bot, which says so when it lives in another brain",
   /javis:chatbot-open", \{ detail: \{ bot_id: c\.bot_id \} \}/.test(CV) && /addEventListener\("javis:chatbot-open"/.test(CB) && /ib\.bot_other_brain/.test(CB));
 check("every change from the chat or Info shows a toast; Undo where it can be put back", /function toast\(text, undo\)/.test(CV) &&

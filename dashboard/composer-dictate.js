@@ -14,7 +14,36 @@
    page iOS hit-tests a fixed layer away from where it draws it: a tap on X or stop landed on the box instead (the
    "AutoFill" bubble in the owner's screenshot). On a touch screen the box now gives up focus while recording (and
    cannot take it back), stop no longer pops the keyboard, and mobile-chat.js slides the page back once the keyboard
-   is down even when something is still focused. */
+   is down even when something is still focused.
+
+   Enter while recording (owner 2026-11-05: "bật mic ghi âm thành chữ thì ấn Enter phải gửi luôn, không cần ấn tắt"):
+   it stops and sends in one press, like the send button. Pressing the mic moves the focus to the mic, and the bar then
+   hides that button, so the focus fell back to the page: Enter landed on <body> and the old check (only the text box)
+   ignored it, leaving stop as the only way out. Enter now sends from the text box, the page itself or the composer
+   buttons; X and stop, when reached with Tab, keep their own meaning, and another field elsewhere keeps its Enter.
+
+   2026-11-05: the words appear only after the recording ends, like a voice memo (owner, same day: "no need to copy the
+   text onto the screen as I speak; press it like a recorder, then the text comes out"). While recording the box keeps
+   what was typed before; the heard text is held in S.heard and written once, when the run is idle (stop, send, or the
+   5-minute limit). X still drops everything.
+
+   2026-11-06: a computer gets the faded live bubble back. While the owner speaks, the words show in a faded dashed
+   bubble at the foot of the chat (app.js nhapGiong, the same bubble the voice chat uses), so the owner can see the
+   recognizer is hearing. The box still stays still until the recording ends. A phone gets no bubble: Android phones
+   resend the whole sentence on every result, and the bubble repeated it. Tablets count as computers here.
+
+   2026-11-06 (later): the bubble is gone. Owner: in the old version the words appeared right in the chat box, not up
+   above like an answer. A computer writes them into the box while speaking again; when the recording ends the main
+   brain rewrites the whole sentence in context (dictate.js polish, server/transcript_fix.py) and THAT sentence lands
+   in the box, or is sent when Send or Enter ended the recording. A phone still gets the text only at the end.
+
+   2026-11-08: a hidden tab no longer stops the recording (see dictate.js for how the background is handled).
+
+   2026-11-22: the wave always moves while the phone hears (owner: "không nhìn thấy cái sóng âm" on a phone). A phone
+   with no ear runs the browser's recognizer alone and may not open a second mic capture for the meter (0.339.0), so
+   there was no level to draw and the wave stayed a flat dotted line. With no analyser the bars now follow the
+   recognizer's own events (dictate.js onHeard): they rise while it hears sound or hands back words and fall when it
+   reports silence, so a wave that never moves means the phone is not hearing at all. waveLevel is pure for node tests. */
 (function () {
   "use strict";
 
@@ -36,7 +65,31 @@
     return v < 0 ? 0 : v > 1 ? 1 : v;
   }
 
-  var pure = { fmtTime: fmtTime, levelOf: levelOf, MAX_SECONDS: MAX_SECONDS };
+  // Whether Enter pressed on `target` while recording means "stop and send". `ids` names the composer's own elements
+  // ({ input, cancel, stop }), `card` is the composer card. Pure apart from DOM reads, so node tests can run it.
+  function enterSendsFrom(target, ids, card) {
+    if (!target) return true;
+    var id = target.id || "";
+    if (id && id === ids.input) return true;
+    if (id && (id === ids.cancel || id === ids.stop)) return false;
+    var tag = String(target.tagName || "").toUpperCase();
+    if (tag === "BODY" || tag === "HTML") return true;
+    if (card && card.contains && card.contains(target)) return true;
+    return false;
+  }
+
+  // One bar of the wave when there is no mic stream to measure (2026-11-22): from the recognizer's events, not the mic.
+  // `voice` the recognizer says it hears sound now, `since` ms since its last result. A soft wobble, never random, so
+  // the same moment always draws the same bar.
+  function waveLevel(voice, since, now) {
+    var on = voice || (since >= 0 && since < 700);
+    if (!on) return 0;
+    var wobble = Math.abs(Math.sin(now / 97)) * 0.45 + Math.abs(Math.sin(now / 41)) * 0.25;
+    return Math.min(1, 0.3 + wobble);
+  }
+
+  var pure = { fmtTime: fmtTime, levelOf: levelOf, waveLevel: waveLevel, enterSendsFrom: enterSendsFrom,
+    MAX_SECONDS: MAX_SECONDS };
   if (typeof module !== "undefined" && module.exports) module.exports = pure;
   if (typeof document === "undefined") return;
   window.JavisComposerDictate = pure;
@@ -52,9 +105,15 @@
   }
   function $(id) { return document.getElementById(id); }
 
+  // The last messages of the main chat, for the rewrite's context.
+  function chatContext() {
+    var D = window.JavisDictate;
+    return D && D.recentMessages ? D.recentMessages($("chatArea"), ".msg-user:not(.msg-nhap-giong) .utext, .msg-javis > .bubble", 4) : [];
+  }
+
   // state: "idle" | "listening" | "transcribing"
-  var S = { dict: null, state: "idle", base: "", sendAfter: false, startedAt: 0, clock: null,
-    ctx: null, src: null, analyser: null, buf: null, raf: 0, levels: [], lastPush: 0 };
+  var S = { dict: null, state: "idle", base: "", heard: "", sendAfter: false, startedAt: 0, clock: null,
+    ctx: null, src: null, analyser: null, buf: null, raf: 0, levels: [], lastPush: 0, voice: false, resultAt: 0 };
 
   function note(key) {
     try { if (window.JavisNoteFlash) window.JavisNoteFlash(tw(key)); } catch (e) {}
@@ -83,7 +142,8 @@
       var AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
       if (!S.ctx) S.ctx = new AC();
-      if (S.ctx.state === "suspended" && S.ctx.resume) S.ctx.resume();
+      // iOS also reports "interrupted" after another app took the audio: any state but running needs a resume.
+      if (S.ctx.state !== "running" && S.ctx.resume) S.ctx.resume();
       S.src = S.ctx.createMediaStreamSource(stream);
       S.analyser = S.ctx.createAnalyser();
       S.analyser.fftSize = 512;
@@ -102,9 +162,14 @@
     if (S.state !== "listening") return;
     var cv = $("dictWave");
     if (cv && cv.clientWidth) {
-      if (S.analyser && now - S.lastPush > 70) {
-        S.analyser.getByteTimeDomainData(S.buf);
-        S.levels.push(levelOf(S.buf));
+      if (now - S.lastPush > 70) {
+        if (S.analyser) {
+          S.analyser.getByteTimeDomainData(S.buf);
+          S.levels.push(levelOf(S.buf));
+        } else {
+          // No mic stream (a phone on the browser's recognizer): the recognizer's own events move the wave.
+          S.levels.push(waveLevel(S.voice, S.resultAt ? Date.now() - S.resultAt : -1, now));
+        }
         S.lastPush = now;
       }
       var dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight || 28;
@@ -181,10 +246,14 @@
   }
 
   function finished() {
-    var inp = $("chatInput"), send = S.sendAfter;
+    var inp = $("chatInput"), send = S.sendAfter, D = window.JavisDictate;
     S.dict = null;
     S.sendAfter = false;
-    earTip(window.JavisDictate, inp);
+    // The rewritten sentence (or the words as heard when the rewrite failed) lands now, in one piece.
+    var words = S.heard;
+    S.heard = "";
+    if (words && D) writeInput(D.joinText(S.base, words));
+    earTip(D, inp);
     if (!inp) return;
     inp.readOnly = false;
     if (send && inp.value.trim()) {
@@ -205,13 +274,26 @@
     var inp = $("chatInput");
     letGo(inp);
     S.base = inp ? inp.value : "";
+    S.heard = "";
     S.sendAfter = false;
     S.levels = [];
+    S.voice = false;
+    S.resultAt = 0;
+    var live = !(D.isPhoneUA && D.isPhoneUA());
     S.dict = D.create({
-      onText: function (text) {
+      // A computer shows the words in the box while speaking; the final (rewritten) text is written by finished().
+      onText: function (text, final) {
         if (S.state === "idle") return;
-        writeInput(D.joinText(S.base, text));
+        S.heard = String(text || "");
+        if (!final && live && S.state === "listening") writeInput(D.joinText(S.base, S.heard));
       },
+      context: chatContext,
+      onHeard: function (kind) {
+        if (kind === "result") S.resultAt = Date.now();
+        else S.voice = kind === "sound";
+      },
+      // The open chat: a partner's chat (or one pinned to a model) is heard by that model's vendor (2026-11-08).
+      session: function () { return window.JavisChatApi && window.JavisChatApi.sid ? window.JavisChatApi.sid() : ""; },
       onState: function (st) {
         var was = S.state;
         S.state = st;
@@ -223,7 +305,7 @@
         var ios = D.isIOS && D.isIOS();
         note(code === "denied" ? (ios ? "dict.denied_ios" : "dict.denied")
           : code === "service" ? (ios ? "dict.service_ios" : "dict.service") : code === "unsupported" ? "dict.unsupported"
-          : code === "nothing" ? "dict.nothing" : "dict.failed");
+          : code === "nothing" ? (D.nothingKey ? D.nothingKey() : "dict.nothing") : "dict.failed");
       },
       onStream: onStream
     });
@@ -252,6 +334,7 @@
     if (!S.dict) return;
     var base = S.base;
     S.sendAfter = false;
+    S.heard = "";
     writeInput(base);
     S.dict.cancel();
     writeInput(base);
@@ -276,18 +359,25 @@
       e.preventDefault(); e.stopPropagation();
       sendNow();
     }, true);
-    // Enter sends, Esc drops the recording (and does not stop a running answer, which is what Esc does otherwise).
+    // Enter stops and sends at once, Esc drops the recording (and does not stop a running answer, which is what Esc
+    // does otherwise).
     window.addEventListener("keydown", function (e) {
       if (S.state === "idle") return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); return; }
       // Enter follows the chat's own rule (JavisActs.enterSends): a phone's Enter stays a new line here too.
       var sends = window.JavisActs ? window.JavisActs.enterSends(e, false) : e.key === "Enter" && !e.shiftKey;
-      if (sends && e.target === $("chatInput")) {
+      // Not only from the text box: the focus usually sits on the page (see the note at the top).
+      if (sends && enterSendsFrom(e.target, { input: "chatInput", cancel: "dictCancel", stop: "dictStop" }, card)) {
         e.preventDefault(); e.stopPropagation(); sendNow();
       }
     }, true);
-    // A phone that locks or a tab switched away cuts the mic: keep what was heard instead of losing it.
-    document.addEventListener("visibilitychange", function () { if (document.hidden) stop(); });
+    // 2026-11-08: switching tab or app no longer stops the recording (owner: Alt Tab cut it off). It keeps going in
+    // the background; dictate.js picks up whatever the browser cut when the page comes back. Here only the level meter
+    // wakes up again: iOS suspends its AudioContext while the page is away.
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden || S.state !== "listening" || !S.ctx) return;
+      try { if (S.ctx.state !== "running" && S.ctx.resume) S.ctx.resume(); } catch (e) {}
+    });
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

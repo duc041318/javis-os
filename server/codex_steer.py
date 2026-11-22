@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import AsyncIterator, Dict, List, Optional
 
 import steer_inbox
+import turn_plan
 import turn_lane
 import warm_pool
 
@@ -395,7 +396,7 @@ def _args(cli, turn_key: Optional[str]) -> List[str]:
     _acct_home = getattr(cli, "codex_home", None)   # extra ChatGPT account (plan_accounts, 0.353.0)
     overrides = profile_overrides(cli.profile, Path(_acct_home) if _acct_home else cc._codex_home())
     args = [cli.cli_path]
-    for c in overrides + list(cli.extra_config or []):
+    for c in overrides + list(cli.extra_config or []) + cc.codex_windows_sandbox_config(cli.sandbox, _acct_home):
         args += ["-c", c]
     if turn_key:
         args += ["-c", turn_key]
@@ -418,13 +419,16 @@ def _turn_key(cli, lane) -> Optional[str]:
         return None
 
 
-def _spawn(args: List[str], cwd: str, acct_home):
+def _spawn(args: List[str], cwd: str, acct_home, tag: str = ""):
     import claude_cli as cc
+    env = cc.codex_env(acct_home)
+    if tag:
+        env = cc._mark_env(env, tag)    # what its commands leave running is adopted (tien_trinh_nen.ENV_MARK)
     return subprocess.Popen(
         args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, text=True,
         encoding="utf-8", errors="replace", bufsize=1,
         creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
-        start_new_session=(os.name != "nt"), env=cc.codex_env(acct_home))
+        start_new_session=(os.name != "nt"), env=env)
 
 
 async def run(cli, prompt: str) -> AsyncIterator[dict]:
@@ -438,6 +442,12 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
     sid = steer_inbox.current_sid()
     _acct_home = getattr(cli, "codex_home", None)
     warm_key = str(getattr(cli, "warm_key", "") or "")
+    try:
+        # A warm app-server keeps the mark of its conversation from its start: this turn still has to look for it.
+        import tien_trinh_nen
+        tien_trinh_nen.note_mark(cli.tag, tien_trinh_nen.mark_for(cli.tag))
+    except Exception:  # noqa: BLE001
+        pass
     if cli.session_id and cli.instructions and not carries_instructions(cli.session_id):
         prompt = cli.instructions.strip() + "\n\n" + prompt   # a thread from before 0.382.0: as before
     lane = None
@@ -496,7 +506,7 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
         if lane is not None:
             lane.attach()
         try:
-            proc = _spawn(args, cli.cwd, _acct_home)
+            proc = _spawn(args, cli.cwd, _acct_home, cli.tag)
         except Exception as e:
             if lane is not None:
                 lane.close()
@@ -546,11 +556,14 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
         yield {"type": "session", "session_id": thread_id, "warm": slot is not None}
 
         IDLE = tran_watchdog("JAVIS_CLAUDE_IDLE_TIMEOUT", "0")
-        TOOL_IDLE = tran_watchdog("JAVIS_CLAUDE_TOOL_TIMEOUT", "3600")
+        TOOL_IDLE = tran_watchdog("JAVIS_CLAUDE_TOOL_TIMEOUT", "0")
         last = time.monotonic()
         busy = 0
         final_text = ""
         messages = []          # this turn's agent messages; `final` leaves the lead-ins out (cc.codex_answer_text)
+        from subscription_usage import CodexUsage
+        baseline = getattr(slot.handle, "usage_total", None) if slot else getattr(cli, "_usage_total", None)
+        usage = CodexUsage(baseline if resume_requested else {"input": 0, "cache": 0, "output": 0})
         tok_in = tok_out = tok_cache = 0
         error_msg = ""
         sandbox_broken = False
@@ -640,6 +653,10 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
             elif method == "item/completed":
                 it = p.get("item") or {}
                 t = it.get("type")
+                if t == "contextCompaction":
+                    # Codex summarised the thread: earlier tool results may be gone (tool_result_reuse).
+                    import tool_result_reuse
+                    tool_result_reuse.forget_current_turn()
                 if t == "agentMessage":
                     txt = engine_mod.strip_provider_markers(it.get("text") or "")
                     if txt.strip():
@@ -657,6 +674,11 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
                     yield {"type": "tool_call", "name": cc._codex_tool_name(ei), "item": ei, "id": ei["id"]}
                 elif t and t not in _QUIET_TYPES:
                     yield {"type": "item", "item": exec_item(it)}
+            elif method == "turn/plan/updated":
+                # The plan Codex keeps for this turn (its update_plan tool): the chat draws it as a checklist.
+                pev = turn_plan.from_codex_notification(p)
+                if pev:
+                    yield pev
             elif method == "account/rateLimits/updated":
                 try:   # 0.329.0: the plan's 5-hour and weekly meters, for the composer ring
                     import plan_limits
@@ -664,10 +686,9 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
                 except Exception:  # noqa: BLE001
                     pass
             elif method == "thread/tokenUsage/updated" and p.get("turnId") == turn_id:
-                lu = ((p.get("tokenUsage") or {}).get("last") or {})
-                tok_in += int(lu.get("inputTokens") or 0)
-                tok_out += int(lu.get("outputTokens") or 0)
-                tok_cache += int(lu.get("cachedInputTokens") or 0)   # 0.345.0: đã nằm trong inputTokens
+                usage.observe(p.get("tokenUsage") or {})
+                cli._usage_total = usage.previous
+                tok_in, tok_cache, tok_out = usage.input, usage.cache, usage.output
             elif method == "error":
                 e = p.get("error") or {}
                 msg = str(e.get("message") or "")
@@ -694,7 +715,8 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
                     except Exception as e:
                         print(f"[anh codex] {type(e).__name__}: {e}", file=sys.stderr)
                     yield {"type": "final", "content": final_text, "session_id": thread_id,
-                           "tokens_in": tok_in, "tokens_cache_read": tok_cache, "tokens_out": tok_out}
+                           "tokens_in": tok_in, "tokens_cache_read": tok_cache, "tokens_out": tok_out,
+                           "usage_telemetry": usage.summary(), "request_usage": usage.requests}
                 elif status == "failed":
                     msg = str(((turn.get("error") or {}).get("message")) or error_msg or "turn failed")
                     yield {"type": "error", "content": "Codex: " + msg,
@@ -717,12 +739,14 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
             rpc.detach()
             fp_now = _fingerprint(cli, args)    # the session id is this thread now
             if slot is not None:
+                slot.handle.usage_total = usage.previous
                 warm_pool.POOL.release(slot, fingerprint=fp_now)
                 handled = True
             else:
                 new = warm_pool.POOL.admit(warm_key, "codex", fp_now, CodexHandle(proc, rpc, thread_id, lane),
                                            recipe=_recipe(cli, args, _acct_home, thread_id))
                 if new is not None:
+                    new.handle.usage_total = usage.previous
                     warm_pool.POOL.release(new)
                     handled = True
         elif slot is not None:
@@ -744,13 +768,17 @@ async def run(cli, prompt: str) -> AsyncIterator[dict]:
 def _recipe(cli, args: List[str], acct_home, thread_id: str):
     """How to reopen this process for a prewarm: same argv, same thread, resumed. The instructions live on the thread."""
     cwd, params = cli.cwd, {**_thread_params(cli), "threadId": thread_id, "excludeTurns": True}
-    lane_arg = next((a for a in args if a.startswith("mcp_servers.javis.http_headers.")), None)
+    tag = str(getattr(cli, "tag", "") or "")
+    import turn_context
+    # Match the turn header ONLY. The flattened hub profile also puts `...http_headers.Authorization=` (and
+    # `X-Javis-Mode`, `X-Javis-Vault`) in args, ahead of the turn key: matching the bare `http_headers.` prefix swapped
+    # the hub Bearer for the lane key, so every prewarmed process got 401 from /hub/mcp and ran without Javis tools (#1220).
+    lane_arg = next((a for a in args if a.startswith(turn_context.CODEX_HEADER_KEY + "=")), None)
 
     async def _open() -> CodexHandle:
-        import turn_context
         lane = turn_lane.Lane() if lane_arg else None
         argv = [(f'{turn_context.CODEX_HEADER_KEY}="{lane.key}"' if (lane and a == lane_arg) else a) for a in args]
-        proc = _spawn(argv, cwd, acct_home)
+        proc = _spawn(argv, cwd, acct_home, tag)
         rpc = _Rpc(proc, asyncio.get_running_loop())
         rpc.keep_reading = True
         try:

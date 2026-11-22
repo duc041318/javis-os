@@ -1,8 +1,14 @@
 <div align="center">
 
-# 🧠 Javis OS
+<a href="https://javisos.com"><img src="../../assets/social-preview.png" width="100%" alt="Javis OS: Your AI Workforce. Never miss the best AI. Mã nguồn mở, tự host, javisos.com"></a>
 
-**AI agentic đổi được bộ não + Second Brain - chạy trên model nào bạn muốn (Claude Code, ChatGPT/Codex, Antigravity CLI, OpenRouter, OpenAI, Gemini, Anthropic API, Groq, Ollama), có giọng nói, đồ thị tri thức, và tự thông minh dần lên.**
+# Javis OS
+
+### Xây dựng đội ngũ AI của bạn. Không bao giờ lỡ AI tốt nhất.
+
+Javis OS biến **Claude, ChatGPT, Gemini, Grok** và các model bạn chọn thành một đội ngũ làm việc 24/7 ngay trên máy hoặc server của bạn. Mỗi cộng sự có vai trò riêng, dùng chung trí nhớ và công cụ, và vẫn làm tiếp ở chế độ nền. Là AI agentic đổi được bộ não: có model mới tốt hơn thì đổi, mọi thứ đội đã học vẫn còn nguyên.
+
+**🌐 Website: [javisos.com](https://javisos.com)** · Mã nguồn mở · Tự host · 14 nhà cung cấp AI
 
 <!-- flags:start -->
 <p align="center">
@@ -59,7 +65,7 @@ Javis OS **không phải** một chatbot. Nó là một **AI agentic tự host**
 <img src="../../../docs/assets/diagrams/swappable-brain.svg" width="100%" alt="Hình động: lõi Javis ở giữa, bộ đồ nghề (MCP Hub, Skills, Second Brain, Tasks, Schedules, Plugins) bao quanh, 12 bộ não lần lượt lắp vào mà mọi công cụ vẫn sáng nguyên">
 </p>
 
-> **Lưu ý khi cho gói subscription chạy việc nền.** Anthropic chỉ tính gói Claude Pro/Max cho việc dùng **cá nhân, thông thường** của Claude Code. Chạy nền liên tục (loop, nhắc hẹn, việc Kanban, chatbot), chạy trên VPS, hoặc nhiều người dùng chung một tài khoản đều nằm ngoài phạm vi đó nên có nguy cơ **bị khoá tài khoản**, dù tới nay Javis chưa ghi nhận trường hợp nào. Nếu bạn gặp, hãy báo cho nhà phát triển qua [Issues](https://github.com/blogminhquy/javis-os/issues/new/choose). Javis không tự đọc token đăng nhập của bạn (đường đó đã gỡ ở 0.26.17) - nó chạy qua đúng binary `claude`, nhưng như vậy vẫn không làm việc chạy nền 24/7 trở thành hợp lệ. Muốn yên tâm: ở trang **Models**, đặt Claude Code chạy bằng **API key**, hoặc trỏ **model việc nền** sang một provider khác. Xem `server/claude_auth.py`.
+> **Lưu ý khi cho gói subscription chạy việc nền.** Anthropic chỉ tính gói Claude Pro/Ultra cho việc dùng **cá nhân, thông thường** của Claude Code. Chạy nền liên tục (loop, nhắc hẹn, việc Kanban, chatbot), chạy trên VPS, hoặc nhiều người dùng chung một tài khoản đều nằm ngoài phạm vi đó nên có nguy cơ **bị khoá tài khoản**, dù tới nay Javis chưa ghi nhận trường hợp nào. Nếu bạn gặp, hãy báo cho nhà phát triển qua [Issues](https://github.com/blogminhquy/javis-os/issues/new/choose). Javis không tự đọc token đăng nhập của bạn (đường đó đã gỡ ở 0.26.17) - nó chạy qua đúng binary `claude`, nhưng như vậy vẫn không làm việc chạy nền 24/7 trở thành hợp lệ. Muốn yên tâm: ở trang **Models**, đặt Claude Code chạy bằng **API key**, hoặc trỏ **model việc nền** sang một provider khác. Xem `server/claude_auth.py`.
 
 > Triết lý: **năng lực nằm ở Javis, không nằm ở model.** Mọi bộ não đều được cấp cùng bộ đồ nghề qua trung tâm kết nối (MCP Hub) chung - MCP đã đấu, tool đọc/ghi brain, skill, việc Kanban, agent/workflow/loop/nhắc hẹn. Khác biệt duy nhất: hai engine CLI chạy thêm được **lệnh máy**. Đổi từ Claude sang Gemini không làm Javis mất chức năng nào ngoài chuyện đó.
 
@@ -113,7 +119,7 @@ Nhờ vậy:
 | Tự cải thiện | Không | **Vòng lặp tự chạy nền** + hàng đợi việc do AI tự vận hành |
 | Giao diện | Khung chat | Dashboard + đồ thị tri thức + **giọng nói rảnh tay** + Telegram |
 | Công việc của bạn | Nằm trên máy chủ nhà cung cấp, theo định dạng của họ | **File thường trên máy bạn**: lịch sử, trí nhớ, skill, agent, workflow mang sang được mọi model mới |
-| Triển khai | Khoá vào 1 nhà cung cấp | **Tự host**: [Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) 1-click / Docker / VPS bất kỳ |
+| Triển khai | Khoá vào 1 nhà cung cấp | **Tự host**: [Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) 1-click / Docker / VPS bất kỳ |
 
 > 💡 **Triết lý:** Javis *biên dịch một lần* tri thức từ ghi chú thô → Wiki, rồi *duy trì* nó sống cùng mỗi nguồn mới. Tri thức **tích luỹ**, không tái phát hiện mỗi lần.
 
@@ -131,6 +137,9 @@ Nhờ vậy:
 - 🗂️ **Quản lý tệp tin** - duyệt, **sửa file `.md`/`.txt` trực tiếp** trong trình duyệt, tìm file theo tên hoặc theo nội dung, tải lên/về.
 - 🧩 **Skills** - gom nhóm, tìm kiếm, **bật/tắt từng skill**, thêm/sửa/xoá, nhập/xuất gói; Javis tự xếp skill mới vào đúng nhóm.
 - 🧰 **Plugins** - thả một thư mục Python vào là có thêm **tool/hook native** cho MỌI engine, không phải sửa lõi.
+- 🧑‍🤝‍🧑 **Cộng sự** (trang Partners) - mỗi cộng sự AI một vai trò, một model, prompt và skill riêng; bật **Auto** là cộng sự tự làm tiếp không cần bạn.
+- 👥 **Nhóm (Teams)** - gom nhiều cộng sự vào một phòng chat: trưởng nhóm chia việc, các thành viên trả lời nhau, và cả nhóm chia sẻ được bằng một file.
+- 💬 **Chatbot đa kênh** - đặt một cộng sự chăm khách trên WhatsApp, Messenger, Instagram, Telegram, Slack, Lark, Threads, WeChat, Zalo và Zalo OA, chung một hộp thư bạn nhảy vào trả lời được.
 - 🤖 **Agents & Workflows** - tạo trợ lý chuyên biệt (có bộ nhớ riêng) + chuỗi tự động nhiều bước, có bước kiểm chứng.
 - ♻️ **Việc định kỳ & nhắc hẹn** - nhiều vòng lặp chạy nền song song, mỗi vòng làm đúng một việc bạn mô tả rồi tự kiểm chứng; kèm nhắc hẹn theo giờ cố định hoặc cron.
 - 🗃️ **Việc (Kanban)** - giao một "goal" bằng lời, AI tự đặc tả, chọn worker, chạy nền và chỉ gọi bạn khi có ngoại lệ.
@@ -155,9 +164,20 @@ Nhờ vậy:
 
 > ⚠️ **Quan trọng về bảo mật:** Javis chạy bộ não AI với **toàn quyền** trên máy. Khi chạy public (Docker/VPS/Hostinger), Javis **tự bắt buộc đăng nhập** - mở app ra là màn tạo tài khoản / đăng nhập, không ai điều khiển được khi chưa có mật khẩu.
 
+> 💻 **Cài trên máy tính Windows hoặc Mac của bạn?** Javis cài như mọi ứng dụng: tự kiểm tra máy thiếu gì (Git, Python, Node, các bộ não AI), tự cài, rồi để lại biểu tượng JAVIS OS để bấm.
+>
+> - **Windows 10/11:** tải [JavisOS-Setup.exe](https://github.com/blogminhquy/javis-os/releases/download/desktop/JavisOS-Setup.exe) về rồi mở.
+> - **macOS 11+:** mở **Terminal** (Launchpad, gõ Terminal), dán dòng này rồi Enter. Cài cách này macOS không hiện cảnh báo:
+>   ```
+>   curl -fsSL https://raw.githubusercontent.com/blogminhquy/javis-os/main/packaging/macos/get-javis.sh | bash
+>   ```
+>   Thích tải file hơn? [JavisOS-macOS.dmg](https://github.com/blogminhquy/javis-os/releases/download/desktop/JavisOS-macOS.dmg) cài ra đúng app đó. File chưa ký bằng Apple Developer ID, nên lần mở đầu macOS sẽ chặn cho tới khi bạn vào **System Settings → Privacy & Security** bấm **Open Anyway**.
+>
+> Các bước: [QUICKSTART.md](../../../QUICKSTART.md).
+
 ### Cách 1 - Hostinger Docker Manager (tên miền + HTTPS) ⚡
 
-> 🛒 **Chưa có VPS?** [Đăng ký VPS Hostinger tại đây](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). VPS có sẵn Docker Manager nên cài Javis đúng một cú bấm. Thuê xong quay lại làm các bước dưới.
+> 🛒 **Chưa có VPS?** [Đăng ký VPS Hostinger tại đây](https://www.hostinger.com?REFERRALCODE=JAVISOS). VPS có sẵn Docker Manager nên cài Javis đúng một cú bấm. Thuê xong quay lại làm các bước dưới.
 
 VPS Hostinger → **Docker Manager → Compose → URL** → dán **file Hostinger** rồi **Deploy**:
 ```
@@ -188,7 +208,7 @@ Deploy → đợi 1-3 phút Traefik cấp SSL → mở `https://<DOMAIN_NAME>`. 
 
 ### Cách 2 - Docker trên VPS bất kỳ (pull image, không cần clone)
 
-> 🛒 **Cần thuê VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) chạy được cả cách này.
+> 🛒 **Cần thuê VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) chạy được cả cách này.
 
 ```bash
 # Cần Docker (chưa có?  curl -fsSL https://get.docker.com | sh)
@@ -341,6 +361,8 @@ Danh sách đầy đủ mọi biến: [docs/16 - Cấu hình .env](../../../docs
 - **Plugin do bạn cài được tải mặc định, nhưng từng plugin vẫn tắt cho tới khi bạn bật nó trong app**; đặt `JAVIS_ENABLE_USER_PLUGINS=false` nếu muốn tắt hết.
 - Truy cập từ xa nên qua **HTTPS** (Hostinger `*.hstgr.cloud` hoặc Cloudflare Tunnel) - đừng phơi cổng thô.
 
+[Code signing policy](../../code-signing-policy.md) (chính sách ký số bộ cài) · [Privacy policy](../../../PRIVACY.md) (chính sách quyền riêng tư)
+
 ---
 
 ## 🔄 Cập nhật
@@ -463,6 +485,8 @@ Không tiện donate cũng không sao - dùng Javis, góp ý, hay gửi một Pu
 ---
 
 <div align="center">
+
+**[javisos.com](https://javisos.com)**
 
 Made with ☕ by **[Minh Quý](https://minhquy.vn)** · Repo: `github.com/blogminhquy/javis-os`
 

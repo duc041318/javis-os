@@ -24,8 +24,25 @@ def _khop(danh_sach: Any, chat_id: str) -> bool:
     return bool(cid) and cid in {str(x).strip() for x in (danh_sach or [])}
 
 
+def _khoa_tk(accounts: List[dict]) -> List[str]:
+    """Inbox account keys ("<channel>:<id>") of the channel accounts."""
+    return [conversations._tai_khoan_id(str(a.get("channel") or ""), str(a.get("id") or ""))
+            for a in (accounts or []) if isinstance(a, dict) and a.get("channel") and a.get("id")]
+
+
+def ten_da_chon(accounts: List[dict], chat_ids: Any) -> Dict[str, str]:
+    """`{chat_id: display name}` of the chats the form has ticked (or the bot saved), whatever the search box or the
+    page size. The form uses it for a ticked row the current list does not hold, which it used to draw as a bare id
+    (owner, 18/11/2026: "lúc thì hiện tên lúc chỉ hiện id"). Never raises."""
+    try:
+        return {cid: v["ten"] for cid, v in conversations.ten_theo_chat_id(_khoa_tk(accounts), list(chat_ids or [])).items()}
+    except Exception:       # noqa: BLE001 - a name is a nicety, never a reason to fail the picker
+        return {}
+
+
 def danh_sach(accounts: List[dict], q: str = "", limit: int = 60,
-              cho: Optional[List[dict]] = None, bot: Optional[dict] = None) -> List[Dict[str, Any]]:
+              cho: Optional[List[dict]] = None, bot: Optional[dict] = None, *,
+              chat_type: str = "") -> List[Dict[str, Any]]:
     """Các cuộc chat đã biết của `accounts` (bản công khai của tài khoản kênh, có `id` và `channel`).
 
     `cho`: hàng đợi duyệt của bot (`chatbot_runtime.nhom_cho`). `bot`: bản ghi bot, để đánh dấu
@@ -33,6 +50,7 @@ def danh_sach(accounts: List[dict], q: str = "", limit: int = 60,
     """
     q = str(q or "").strip()
     n = max(1, min(int(limit or 60), 200))
+    chat_type = chat_type if chat_type in ("group", "private") else ""
     groups = (bot or {}).get("groups") or []
     people = (bot or {}).get("people") or []
     out: Dict[str, Dict[str, Any]] = {}
@@ -55,7 +73,7 @@ def danh_sach(accounts: List[dict], q: str = "", limit: int = 60,
         if not (kenh and aid):
             continue
         try:
-            ds = conversations.cuoc_chat_cua_tai_khoan(kenh, aid, q, n)
+            ds = conversations.cuoc_chat_cua_tai_khoan(kenh, aid, q, n, chat_type=chat_type)
         except Exception:
             ds = []
         for c in ds:
@@ -68,20 +86,42 @@ def danh_sach(accounts: List[dict], q: str = "", limit: int = 60,
 
     hom = q.lower()
     for g in (cho or []):
+        loai = "private" if g.get("loai") == "private" else "group"
+        if chat_type and loai != chat_type:
+            continue
         cid = str(g.get("chat_id") or "")
         ten = str(g.get("ten") or "")
         if not cid or (hom and hom not in ten.lower() and hom not in cid.lower() and cid not in out):
             continue
-        loai = "private" if g.get("loai") == "private" else "group"
         _them(cid, loai, ten or cid, "", g.get("ts"), True)
         out[cid]["cho"] = True
 
-    for loai, ds in (("group", groups), ("private", people)):
+    # A saved id the page above did not bring (older than the `n` latest chats, or the search matched it only by name)
+    # takes its name straight from the inbox, so it never shows as a bare id.
+    saved_by_type = {"group": groups, "private": people}
+    if chat_type:
+        saved_by_type = {chat_type: saved_by_type[chat_type]}
+    luu = [str(c).strip() for ids in saved_by_type.values() for c in ids
+           if str(c).strip() and str(c).strip() not in out]
+    try:
+        biet = conversations.ten_theo_chat_id(_khoa_tk(accounts), luu) if luu else {}
+    except Exception:       # noqa: BLE001
+        biet = {}
+    for loai, ds in saved_by_type.items():
         for cid in ds:
             cid = str(cid).strip()
-            if cid and cid not in out and (not hom or hom in cid.lower()):
-                _them(cid, loai, cid, "", 0, False)
+            if not cid or cid in out:
+                continue
+            v = biet.get(cid) or {}
+            ten = str(v.get("ten") or cid)
+            if hom and hom not in cid.lower() and hom not in ten.lower():
+                continue
+            tk = str(v.get("tk") or "")
+            _them(cid, loai, ten, tk.split(":", 1)[0] if tk else "", v.get("luc") or 0, False,
+                  tk.split(":", 1)[1] if ":" in tk else "")
 
     dong = list(out.values())
     dong.sort(key=lambda d: (not d["cho"], -float(d.get("luc") or 0)))
-    return dong[:n]
+    # Ticked rows are never cut by the page size: past it they would fall back to a bare id in the form.
+    giu = {id(d) for d in dong[:n]} | {id(d) for d in dong if d["da_chon"]}
+    return [d for d in dong if id(d) in giu]

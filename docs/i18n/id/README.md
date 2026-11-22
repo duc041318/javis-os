@@ -1,13 +1,15 @@
 <!-- translated-from: README.md sha256:2e10ad3d2a86 -->
 <div align="center">
 
-<img src="../../../dashboard/logo.svg" width="88" alt="Logo Javis OS">
+<a href="https://javisos.com"><img src="../../assets/social-preview.png" width="100%" alt="Javis OS: Your AI Workforce. Never miss the best AI."></a>
 
 # Javis OS
 
-### Agen AI self-hosted Anda dengan otak yang bisa diganti, dan Second Brain yang makin pintar setiap hari.
+### Tim AI Anda. Jangan pernah ketinggalan AI terbaik.
 
-Jalankan di laptop atau VPS kecil. Ajak bicara dengan suara. Pasang Claude, ChatGPT, Grok, Gemini atau salah satu dari 12 provider, semua tool tetap ada saat Anda berganti, dan biarkan ia bekerja di background selagi Anda tidur.
+Javis OS mengubah **Claude, ChatGPT, Gemini, Grok** dan model pilihan Anda menjadi satu tim yang bekerja 24/7 di mesin atau server Anda sendiri. Setiap rekan punya peran, berbagi memori dan tool yang sama, dan terus bekerja di background. Saat model yang lebih baik rilis, cukup ganti dan semua yang sudah dipelajari tim tetap ada.
+
+**🌐 Situs web: [javisos.com](https://javisos.com)** · Open source · Self-hosted · 14 penyedia AI
 
 [![GitHub stars](https://img.shields.io/github/stars/blogminhquy/javis-os?style=flat&logo=github&label=stars)](https://github.com/blogminhquy/javis-os/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](../../../LICENSE)
@@ -117,7 +119,7 @@ Apa yang Anda dapatkan dari situ:
 | **Pekerjaan** | Menjawab, lalu menunggu | **Loop background, pengingat, dan antrean tugas yang dijalankan AI** yang melapor kembali ke Anda |
 | **Antarmuka** | Kotak chat | Dashboard + knowledge graph + **suara hands-free** + Telegram, Slack, WhatsApp, Zalo + CLI |
 | **Hasil kerja Anda** | Tertinggal di server vendor, dalam format vendor | **File biasa di mesin Anda**: riwayat, memori, skill, agent, dan workflow ikut pindah ke model baru mana pun |
-| **Deployment** | Cloud milik orang lain | **Self-hosted**: [Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) sekali klik, Docker, atau VPS apa pun |
+| **Deployment** | Cloud milik orang lain | **Self-hosted**: [Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) sekali klik, Docker, atau VPS apa pun |
 
 > 💡 **Filosofinya: kemampuan ada di Javis, bukan di model.** Setiap otak mendapat kotak peralatan yang sama lewat satu hub koneksi bersama (MCP Hub). Beralih dari Claude ke Gemini tidak membuat Anda kehilangan apa pun kecuali akses shell, yang hanya dimiliki engine CLI.
 
@@ -247,7 +249,7 @@ flowchart LR
 <details open>
 <summary><b>Opsi 1: Hostinger Docker Manager (domain + HTTPS, sekali klik)</b></summary>
 
-> 🛒 **Belum punya VPS?** [Sewa VPS Hostinger di sini](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). Docker Manager sudah tersedia, jadi Javis terpasang sekali klik. Setelah siap, kembali ke langkah di bawah.
+> 🛒 **Belum punya VPS?** [Sewa VPS Hostinger di sini](https://www.hostinger.com?REFERRALCODE=JAVISOS). Docker Manager sudah tersedia, jadi Javis terpasang sekali klik. Setelah siap, kembali ke langkah di bawah.
 
 VPS Hostinger → **Docker Manager → Compose → URL** → tempel file Hostinger lalu tekan **Deploy**:
 
@@ -275,7 +277,7 @@ Detail dan pemecahan masalah: [DEPLOY.en.md](../../../DEPLOY.en.md).
 <details>
 <summary><b>Opsi 2: Docker di VPS apa pun (tanpa clone)</b></summary>
 
-> 🛒 **Butuh VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) juga bisa menjalankan opsi ini.
+> 🛒 **Butuh VPS?** [VPS Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) juga bisa menjalankan opsi ini.
 
 ```bash
 # Docker required (don't have it?  curl -fsSL https://get.docker.com | sh)
@@ -507,5 +509,6 @@ Tidak bisa berdonasi? Menggunakan Javis, mengirim masukan, atau membuka pull req
 
 <div align="center">
 <br>
+<b><a href="https://javisos.com">javisos.com</a></b><br>
 Dibuat dengan ☕ di Vietnam oleh <b><a href="https://minhquy.vn">Minh Quý</a></b>
 </div>

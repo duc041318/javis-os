@@ -89,7 +89,9 @@ check("CANARY: thả Space KHÔNG tắt loa", !/JavisTts/.test(keyup));
 // 10 từ 0.65.28: chỗ thứ 10 cũng HOÃN - câu nói lúc Javis đang trả lời trong cuộc gọi, gửi khi lượt xong.
 // 11 từ 0.203.0: chỗ thứ 11 là cú bấm Nghe trên thẻ cuộc gọi hẹn giờ (người bấm, không phải mic tự gửi).
 // 10 từ 0.349.0: nút "Gửi lại câu này" thành nút Tua lại, chỉ đưa câu hỏi về ô nhập chứ không tự gửi.
-check("có 10 chỗ (thêm cú bấm Nghe cuộc gọi hẹn giờ, bớt nút Gửi lại) gọi sendMessage", (app.match(/(?<!function )\bsendMessage\(/g) || []).length === 10,
+// 11 từ 06/11/2026: chỗ thứ 11 cũng HOÃN - câu đang nói dở lúc ChatGPT Live hết lượt, gửi qua đường Cơ bản (chuyenSangCoBan).
+// 12 từ 19/11/2026: chỗ thứ 12 cũng HOÃN - tin có "/ten" lạ giữa câu, nạp lại danh sách skill/cộng sự rồi gửi.
+check("có 12 chỗ (thêm tin chờ nạp lại danh sách lệnh /) gọi sendMessage", (app.match(/(?<!function )\bsendMessage\(/g) || []).length === 12,
   (app.match(/(?<!function )\bsendMessage\(/g) || []).length);
 
 // ---- 5. Mic là công tắc DUY NHẤT (chủ repo chốt 02/09: "không cần nút bật tắt loa nữa") ----

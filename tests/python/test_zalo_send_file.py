@@ -166,16 +166,24 @@ zalo = find_zalo(cat)
 # 0.334.0: v1.7.0 (emoji reactions in the live feed, zalo_add_reaction, cliMsgId on every message).
 # 0.346.0: v1.8.0 (group note-list, note-edit keeps the pin: the Store tools zalo_list_notes / zalo_edit_note).
 # 0.414.0: v1.9.0 (zalo_send_typing for "đang soạn tin", styles on zalo_send_message).
+# v1.9.1: replayed messages reach the live feed after a short drop; one bad message no longer drops its frame.
+# v1.10.0: live push, javis-zalo wakes Javis when a message arrives (zalo_push.py), no read on a timer.
+# v1.11.0: zalo_send_message takes replyToMsgId (quote-reply to one earlier text message).
+# v1.12.0: a group joined after start-up gets its name (zalo_list_threads), not a bare id in the inbox.
+# v1.13.0: zalo_send_link, a link goes out as a card with the page's title and thumbnail.
+# v1.14.0: the history keeps a link card's link (attachment), the live feed reports mentions.
 check("CANARY: the three javis-zalo pins agree and are v1.4.0 or later (the first with zalo_send_file)",
-      Z.CLI_PACKAGE == zalo_login._CLI_PACKAGE and Z.CLI_PACKAGE in zalo["args"] and Z.CLI_PACKAGE.endswith("/v1.9.0"),
+      Z.CLI_PACKAGE == zalo_login._CLI_PACKAGE and Z.CLI_PACKAGE in zalo["args"] and Z.CLI_PACKAGE.endswith("/v1.14.0"),
       (Z.CLI_PACKAGE, zalo_login._CLI_PACKAGE, zalo["args"]))
 check("the previous pins are listed as old commands, so existing connections move to the new one",
-      all(Z.CLI_PACKAGE.replace("v1.9.0", v) in [a for c in zalo["lenh_cu"] for a in (c.get("args") or [])]
-          for v in ("v1.3.0", "v1.4.0", "v1.5.0", "v1.6.0", "v1.6.1", "v1.7.0", "v1.8.0")))
+      all(Z.CLI_PACKAGE.replace("v1.14.0", v) in [a for c in zalo["lenh_cu"] for a in (c.get("args") or [])]
+          for v in ("v1.3.0", "v1.4.0", "v1.5.0", "v1.6.0", "v1.6.1", "v1.7.0", "v1.8.0", "v1.9.0", "v1.9.1", "v1.10.0", "v1.11.0", "v1.12.0", "v1.13.0")))
 check("zalo_send_file is in the danger group (it sends, like zalo_send_message)",
       "zalo_send_file" in zalo["tool_meta"]["danger"] and "zalo_send_message" in zalo["tool_meta"]["danger"])
 check("zalo_add_reaction is in the danger group too: the contact sees the reaction",
       "zalo_add_reaction" in zalo["tool_meta"]["danger"])
+check("zalo_send_link is in the danger group: it sends a message (v1.13.0)",
+      "zalo_send_link" in zalo["tool_meta"]["danger"])
 check("zalo_send_typing is in the danger group: the contact sees \"typing\" (0.414.0)",
       "zalo_send_typing" in zalo["tool_meta"]["danger"])
 

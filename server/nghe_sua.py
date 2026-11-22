@@ -28,7 +28,7 @@ Ranh giới của lớp 2, phải giữ để không sửa bừa:
   - Sửa xong chạy lại phải ra đúng chuỗi đó (idempotent), vì câu có thể đi qua lớp này hai lần
     (endpoint /stt rồi lại WebSocket).
 
-Module này KHÔNG đọc settings: nhận chữ + bộ từ vựng, trả chữ. `tu_vung(cfg)` ở dưới chỉ là
+Module này KHÔNG đọc settings: nhận chữ + bộ từ vựng, trả chữ. `vocabulary(cfg)` ở dưới chỉ là
 hàm tiện ích rút bộ từ vựng từ settings cho chỗ gọi, để ba cửa nghe (mic dashboard, Telegram,
 Zalo) dùng cùng một danh sách.
 """
@@ -38,8 +38,13 @@ import unicodedata
 
 # Tên trợ lý luôn có mặt, không cần người dùng khai. Bộ từ vựng người dùng thêm nằm ở
 # settings `voice.hotwords` (chuỗi, ngăn bằng dấu phẩy hoặc xuống dòng).
-TU_VUNG_GOC = ("Javis",)
-MAX_TU_VUNG = 60          # Whisper chỉ nhìn ~224 token cuối của prompt; hơn nữa là vô ích
+BASE_VOCABULARY = ("Javis",)
+# Thuật ngữ AI và sản phẩm hay bị nghe nhầm, đưa vào LỚP SỬA luôn (không chỉ mồi Whisper). Mỗi tên
+# phải tự khác âm với các tên còn lại, nếu không lớp sửa sẽ đổi nhầm: "Groq" và "Grok" đều có,
+# nên nói "Groq" vẫn giữ nguyên, còn "Grox" mới được sửa thành "Grok" (2026-11-06).
+AI_TERMS = ("Javis OS", "Groq", "Grok", "Claude", "ChatGPT", "Gemini", "OpenAI", "OpenRouter",
+             "DeepSeek", "Ollama", "Whisper", "Codex", "Antigravity", "Anthropic", "Telegram")
+MAX_VOCABULARY = 60          # Whisper chỉ nhìn ~224 token cuối của prompt; hơn nữa là vô ích
 MAX_GHEP = 3              # ghép tối đa 3 tiếng liền nhau làm một ứng viên ("Gia vít", "Open Router")
 MAX_GOI_Y = 600           # trần độ dài prompt gửi Whisper (stt.groq_nghe cũng cắt ở mức này)
 
@@ -86,6 +91,16 @@ thêm bớt tăng giảm mua bán đặt đọc ghi lưu sửa xong chỉ trừ 
 một hai ba bốn tư năm sáu bảy tám chín mười mươi trăm nghìn ngàn triệu tỷ
 no not never don't stop cancel enable disable open close delete send transfer
 one two three four five six seven eight nine ten hundred thousand million
+""".split())
+# Everyday Vietnamese function words, compared WITH their tone marks (2026-11-13). A group of two or three syllables
+# that holds one of them is ordinary speech far more often than a misheard name: "đã viết" has nearly the sound key of
+# "Javis" and "cần và" exactly that of "Canva", so "rồi đã viết xong" became "rồi Javis xong" and "anh cần và em" became
+# "anh Canva em". Such a group is only taken when it is already spelled like the term; the rewrite model, which reads
+# the whole sentence and its context, decides the rest. One syllable alone ("David") is never held back by this.
+COMMON_WORDS = frozenset("""
+đã sẽ đang vì và cần có là mà thì để khi nếu như nhưng hay hoặc cũng rất lại còn vẫn đều được bị phải nên muốn
+biết làm đi đến ra vào lên xuống về ở trong ngoài trên dưới đó kia ấy đây thế vậy gì sao ai tôi anh em mình chị
+bạn nó họ các những cái việc người
 """.split())
 # Khối ngữ cảnh dashboard chèn TRƯỚC lời nói: FILE ĐANG MỞ (đang mở file trong trình sửa) rồi
 # NGỮ CẢNH GIAO DIỆN. Cả hai không phải lời nói. 0.65.29: trước chỉ nhận khối sau, nên khi đang mở
@@ -145,7 +160,28 @@ def do_giong(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def tach_tu_vung(chuoi) -> list:
+def similar_from(a: str, b: str, floor: float) -> float:
+    """`do_giong(a, b)` when it reaches `floor`, else 0.0, without paying for the full comparison.
+
+    `sua` only ever asks "is this at least 0.8 alike", and nearly every pair it tries is nowhere near. The two cheap
+    upper bounds difflib offers (lengths, then shared letters) settle those, so the costly matcher runs for the few
+    pairs that can pass. Measured 2026-11-13 with 90 terms: an 80-word dictation took 3.5 s and now takes 0.01 s,
+    a 400-word one took 17.8 s and now takes 0.04 s. The old loop also froze every other request meanwhile."""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    la, lb = len(a), len(b)
+    if 2.0 * min(la, lb) / (la + lb) < floor:
+        return 0.0
+    sm = difflib.SequenceMatcher(None, a, b)
+    if sm.quick_ratio() < floor:
+        return 0.0
+    r = sm.ratio()
+    return r if r >= floor else 0.0
+
+
+def split_vocabulary(chuoi) -> list:
     """Chuỗi người dùng gõ ở ô cài đặt -> danh sách từ, giữ thứ tự, bỏ trùng (không phân biệt hoa thường)."""
     ra, da = [], set()
     for phan in re.split(r"[,\n;]+", str(chuoi or "")):
@@ -160,16 +196,31 @@ def tach_tu_vung(chuoi) -> list:
     return ra
 
 
-def tu_vung(cfg: dict) -> list:
+def vocabulary(cfg: dict) -> list:
     """Bộ từ vựng hiệu lực: tên trợ lý + từ người dùng khai ở `voice.hotwords`."""
     v = (cfg or {}).get("voice") or {}
-    ra = list(TU_VUNG_GOC)
+    ra = list(BASE_VOCABULARY)
     da = {t.lower() for t in ra}
-    for t in tach_tu_vung(v.get("hotwords")):
+    for t in split_vocabulary(v.get("hotwords")):
         if t.lower() not in da:
             da.add(t.lower())
             ra.append(t)
-    return ra[:MAX_TU_VUNG]
+    return ra[:MAX_VOCABULARY]
+
+
+def fix_vocabulary(cfg: dict) -> list:
+    """Bộ từ vựng cho LỚP SỬA LUẬT: `vocabulary` cộng thuật ngữ AI (AI_TERMS).
+
+    Tách khỏi `vocabulary` vì danh sách đó cũng là mồi cho Whisper, mà Whisper chỉ giữ phần CUỐI prompt:
+    đưa thuật ngữ AI vào đó sẽ đẩy từ người dùng khai (Pancake, Webcake) ra xa âm thanh (2026-11-06).
+    """
+    ra = list(vocabulary(cfg))
+    da = {t.lower() for t in ra}
+    for t in AI_TERMS:
+        if t.lower() not in da:
+            da.add(t.lower())
+            ra.append(t)
+    return ra[:MAX_VOCABULARY + len(AI_TERMS)]
 
 
 def goi_y_whisper(tv, ky_thuat=TU_TIENG_ANH_MOI) -> str:
@@ -187,6 +238,9 @@ def goi_y_whisper(tv, ky_thuat=TU_TIENG_ANH_MOI) -> str:
     moi = [t for t in (ky_thuat or ()) if t and t.lower() not in da]
     while moi and len(", ".join(moi + ds)) + 1 > MAX_GOI_Y:
         moi.pop()
+    # Still too long: drop from the FRONT, the end sits next to the audio (stt keeps the last part too).
+    while len(ds) > 1 and not moi and len(", ".join(ds)) + 1 > MAX_GOI_Y:
+        ds.pop(0)
     ds = moi + ds
     return (", ".join(ds) + ".") if ds else ""
 
@@ -236,9 +290,23 @@ def _ten_rieng_hai_chu(toks, i, n, s, term) -> bool:
     return w[:1].isupper() and w.lower() not in _KET_GOI
 
 
+# Ca nghe nhầm ĐÃ BIẾT, sửa theo đúng chính tả, không cần so âm. Tên Javis hay bị máy nghe ra
+# "Jarvis" (2026-11-06, chủ dự án báo: nói "Javis OS" mà chép thành "Jarvis OS").
+KNOWN_MISHEARINGS = (("Jarvis OS", "Javis OS"), ("Jarvis", "Javis"))
+_KNOWN_MISHEARINGS_RE = [(re.compile(r"(?<!\w)" + re.escape(a) + r"(?!\w)", re.IGNORECASE), b)
+                 for a, b in KNOWN_MISHEARINGS]
+
+
+def fix_known_mishearings(text) -> str:
+    s = str(text or "")
+    for rx, rep in _KNOWN_MISHEARINGS_RE:
+        s = rx.sub(rep, s)
+    return s
+
+
 def sua(text, tv) -> str:
     """Sửa những từ nghe nhầm thành từ trong bộ từ vựng `tv`. Không có gì để sửa thì trả y nguyên."""
-    s = str(text or "")
+    s = fix_known_mishearings(text)
     prefix, speech = split_ui_context(s)
     if prefix:
         return prefix + sua(speech, tv)
@@ -250,17 +318,29 @@ def sua(text, tv) -> str:
         return s
     dem = frozenset(bo_dau(x) for x in (_MO_DAU | _KET_GOI | _NGOI_THU_BA))
     verbatim = [(m.start(), m.end()) for m in VERBATIM.finditer(s)]
+    # Per syllable, worked out once: its sound key, its plain form, and whether a rule holds it back.
+    words = [t.group(0) for t in toks]
+    lower = [w.lower() for w in words]
+    is_filler = [bo_dau(w) in dem for w in words]
+    is_protected = [w in PROTECTED_WORDS for w in lower]
+    is_common = [unicodedata.normalize("NFC", w) in COMMON_WORDS for w in lower]
+    joined_terms = ["".join(t.lower().split()) for t, _, _ in ds]
+    solo = {}
 
     def _diem_don(j):
-        """Điểm cao nhất của RIÊNG tiếng thứ j so với cả bộ từ vựng."""
-        k = khoa_am(toks[j].group(0))
-        return max((do_giong(k, kt) for _, kt, _ in ds), default=0.0) if len(k) >= 3 else 0.0
+        """Điểm cao nhất của RIÊNG tiếng thứ j so với cả bộ từ vựng (0 khi dưới ngưỡng gọi tên: không ai cần số đó)."""
+        if j not in solo:
+            k = khoa_am(words[j])
+            solo[j] = (max((similar_from(k, kt, NGUONG_GOI_TEN) for _, kt, _ in ds), default=0.0)
+                       if len(k) >= 3 else 0.0)
+        return solo[j]
 
     ra, pos, i, doi = [], 0, 0, False
     while i < len(toks):
         # Xét mọi cách ghép n tiếng từ vị trí i, lấy cách TRÙNG NHẤT (hoà thì cụm ngắn hơn).
         # Duyệt theo thứ tự "n dài trước" rồi lấy khớp đầu tiên là sai: "hey David" ghép hai
         # tiếng trùng 0,91 thắng "David" một tiếng trùng 1,0, và cả "hey" bị nuốt vào tên.
+        # A candidate under NGUONG_GOI_TEN can never be taken, so it is not scored at all (similar_from).
         best = None      # (d, n, term)
         for n in range(1, min(MAX_GHEP, len(toks) - i) + 1):
             uv = _ung_vien(toks, i, n, s)
@@ -271,23 +351,31 @@ def sua(text, tv) -> str:
             k = khoa_am(uv)
             if len(k) < 3:
                 continue
+            span = range(i, i + n)
             if n >= 2:
                 # Cụm ghép không được chứa tiếng đệm ("hey", "ơi", "cho"), và không tiếng nào
                 # trong cụm tự nó trùng tốt hơn cả cụm: "ơn David" 0,83 thua "David" 1,0.
-                if any(bo_dau(toks[j].group(0)) in dem for j in range(i, i + n)):
+                if any(is_filler[j] for j in span):
                     continue
-            for term, kt, so_tieng in ds:
-                if (any(toks[j].group(0).lower() in PROTECTED_WORDS for j in range(i, i + n))
-                        and "".join(uv.lower().split()) != "".join(term.lower().split())):
+            uv_lower = uv.lower()
+            uv_joined = "".join(uv_lower.split())
+            # A command or number word, or (in a group) an everyday word: only a group already spelled like the term.
+            held = any(is_protected[j] for j in span) or (n >= 2 and any(is_common[j] for j in span))
+            for (term, kt, so_tieng), term_joined in zip(ds, joined_terms):
+                if held and uv_joined != term_joined:
                     continue
                 if n > so_tieng + 1:
                     continue           # không ghép quá số tiếng của từ vựng (+1 cho ca bị tách)
-                d = 1.0 if uv.lower() == term.lower() else do_giong(k, kt)
+                exact = uv_lower == term.lower()
+                d = 1.0 if exact else similar_from(k, kt, NGUONG_GOI_TEN)
+                if d < NGUONG_GOI_TEN:
+                    continue
                 if d < 1.0 and len(k) < KHOA_MIN_MO:
                     continue
-                if n >= 2 and any(_diem_don(j) >= d for j in range(i, i + n)):
+                if n >= 2 and any(_diem_don(j) >= d for j in span):
                     continue
-                if best is None or d > best[0]:
+                # Hoà điểm (hai tên cùng khoá âm, như Groq và Grok): ưu tiên tên viết ĐÚNG như máy nghe.
+                if best is None or d > best[0] or (d == best[0] and exact and best[2].lower() != uv_lower):
                     best = (d, n, term, uv)
         if best is None or best[0] < NGUONG_GOI_TEN:
             i += 1

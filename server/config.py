@@ -4,6 +4,7 @@ Gồm: workspace, tài khoản admin (mật khẩu hash), model engine, telegram
 Auth CHỈ bật khi đã đặt mật khẩu → bản local chưa đặt vẫn chạy như cũ.
 """
 import json
+import kept
 import os
 import threading
 import time
@@ -41,13 +42,15 @@ _DEFAULT = {
     # Ngôn ngữ và locale. TÁCH BA BIẾN có chủ ý (spec đa ngôn ngữ mục 4.1):
     #   ui_lang     chữ trên màn hình      - "" = chưa ai chọn: dashboard đoán theo trình duyệt
     #               rồi ghi lại đây (0.66.0). Bản cài cũ đã lưu "vi" nên không bị đổi.
-    #   reply_lang  Javis trả lời          - "auto" = bám theo ngôn ngữ người dùng đang viết
+    #   reply_lang  Javis trả lời          - always "auto" since 2026-11-15: Javis follows whoever writes and
+    #               Settings only set the interface (owner). Kept because the improvement trials read it; a pin
+    #               saved before moves into the profile at startup (main.migrate_reply_lang_to_profile).
     #   tz/currency locale, KHÁC ngôn ngữ  - người dùng tiếng Anh ở VN vẫn xài UTC+7 và VND
     # Gộp ba cái làm một là chặn đứng ca dùng đáng tiền nhất: chủ Việt, giao diện Việt, brain
     # Việt, nhưng chatbot đối ngoại trả lời tiếng Nhật.
     "locale": {
         "ui_lang": "",
-        "reply_lang": "auto",              # auto | vi | en
+        "reply_lang": "auto",              # always "auto", see above
         "tz": "Asia/Ho_Chi_Minh",
         "currency": "VND",
     },
@@ -71,7 +74,7 @@ _DEFAULT = {
         # cho `ear` ở đây: khoá thiếu nghĩa là "auto", còn stt_provider = "groq" người dùng đã
         # lưu thì voice_ear.setting vẫn coi là đã chọn Groq. Có mặc định thì mất phân biệt đó.
         "stt_provider": "browser",     # browser (Web Speech) | groq (Whisper, key model.groq_api_key)
-        "stt_model": "",               # rỗng = whisper-large-v3 (stt.STT_MODEL_MAC_DINH)
+        "stt_model": "",               # rỗng = Whisper mới nhất Groq có (stt_models), ghim tên nào thì dùng đúng tên đó
         "live_provider": "gemini",     # gemini | openai (đều cần API key ở trang Models)
         "live_model": "",              # rỗng = gợi ý trong voice_live.PROVIDERS
         "live_voice": "",
@@ -123,6 +126,11 @@ _DEFAULT = {
         #       chỉ định cho sản phẩm bên thứ ba (xem claude_auth.CANH_BAO_SUBSCRIPTION).
         # Đổi ở trang Models. Cả hai đều giữ NGUYÊN năng lực: Bash, WebFetch, MCP, nối phiên cũ.
         "claude_auth": "subscription",
+        # "token" (2026-11-22): the plan signed in with a long-lived token from `claude setup-token`, handed to
+        # `claude` as CLAUDE_CODE_OAUTH_TOKEN (claude_auth.py). Encrypted at rest; `_at` is when it was saved,
+        # since the token lives one year from then.
+        "claude_oauth_token": "",
+        "claude_oauth_token_at": 0,
         # Daily `claude update` (claude_update.py). The switch sits on the Claude Code card of the
         # Models page; env JAVIS_CLAUDE_AUTO_UPDATE=0 still forces it off over this value.
         "claude_auto_update": True,
@@ -175,15 +183,15 @@ _DEFAULT = {
             # Alias đứng trước vì alias luôn trỏ bản mới nhất của dòng; id đầy đủ đứng sau để
             # `_claude_api_model` dịch được alias sang tên thật.
             "claude": ["fable", "opus", "sonnet", "haiku",
-                       "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
-                       "claude-opus-5", "claude-sonnet-5",
+                       "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+                       "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5",
                        "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-            "anthropic-api": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
-                              "claude-opus-5", "claude-sonnet-5",
+            "anthropic-api": ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+                              "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5",
                               "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
             "openai": ["gpt-4o", "gpt-4o-mini", "o3-mini"],                        # OpenAI API
             "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],  # Google Gemini API (picker load động)
-            "groq": ["llama-3.3-70b-versatile", "qwen3-32b", "openai/gpt-oss-120b"],  # Groq (picker load động)
+            "groq": ["openai/gpt-oss-120b", "qwen3-32b"],  # Groq (picker load động)
             "deepseek": ["deepseek-flash", "deepseek-v4-pro"],                     # DeepSeek (picker load động)
             # Không ghim model Codex: /provider/models lấy catalog LIVE bằng
             # codex app-server model/list và nhớ lại lần thành công gần nhất.
@@ -236,6 +244,10 @@ _DEFAULT = {
     # Zalo OA (0.412.0): customer bots only, credentials live in the channel-account store. This
     # holds the domain verification codes Zalo gives (served as /zalo_verifier<code>.html).
     "zalo_oa": {"site_codes": []},
+    # WeChat Official Account (customer bots only, credentials live in the channel-account store). This holds the
+    # `Token` of WeChat's server configuration: generated once, pasted into WeChat by the owner, and the key every
+    # webhook signature is checked with, so it is stored as a secret.
+    "wechat": {"webhook_token": ""},
     "discord": {"enabled": False, "bot_token": "", "allow": ""},
     "lark": {"enabled": False, "app_id": "", "app_secret": "", "domain": "lark", "allow": ""},
     # Backup brain lên GitHub (repo RIÊNG TƯ). token = GitHub PAT (fine-grained, quyền Contents).
@@ -245,7 +257,9 @@ _DEFAULT = {
     # không đòi lại dung lượng. Dùng nhiều máy chung repo thì bật trên MỌI máy (dù đã có rào
     # chống máy tắt xoá chéo ảnh của máy bật - xem git_brain._sync_mirror). Khi bật, máy dọn
     # media tự BỎ QUA attachments/ để ảnh vừa backup không bị dọn rồi lệnh xoá lan đi các máy.
-    "backup": {"enabled": False, "repo_url": "", "token": "", "branch": "main",
+    # use_github: the sync rides on the GitHub connection (Connections page) instead of a pasted token
+    # (backup_github.py, 20/11/2026).
+    "backup": {"enabled": False, "repo_url": "", "token": "", "branch": "main", "use_github": False,
                "interval_hours": 6, "sync_images": False,
                "last_backup": 0.0, "last_status": ""},
     "dashboard": {
@@ -531,6 +545,8 @@ _SECRET_PATHS = (
     "model.openrouter_key", "model.anthropic_api_key", "model.openai_api_key", "model.gemini_api_key",
     "model.groq_api_key", "model.deepseek_api_key", "model.ollama_key", "model.ollama_local_key", "model.openai_compat_key",
     "model.anthropic_compat_key",
+    # The long-lived Claude Code token (2026-11-22): it runs the owner's plan for a year, like a password.
+    "model.claude_oauth_token",
     # 0.350.0: keys of every account in a provider card (model_routing). Account ids are generated,
     # so the whole dict is secret.
     "model.account_keys.*",
@@ -539,7 +555,7 @@ _SECRET_PATHS = (
     # Code Assist của tài khoản Google, nên nó ngang hàng mọi secret khác trong danh sách.
     "telegram.token", "zalo_bot.token", "backup.token", "voice.elevenlabs_key",
     "slack.bot_token", "slack.app_token", "whatsapp.access_token", "whatsapp.app_secret",
-    "discord.bot_token", "lark.app_secret",
+    "discord.bot_token", "lark.app_secret", "wechat.webhook_token",
     # Secret TOTP là thứ SINH RA mã đăng nhập, nên nó ngang hàng mật khẩu chứ không phải một
     # tuỳ chọn. Ai đọc được nó thì tự sinh mã 2FA mãi mãi, và chủ máy không hề hay biết.
     "auth.totp.secret",
@@ -582,6 +598,20 @@ def _transform_secret_fields(cfg, fn):
 # (x2 middleware = 10-16ms/request chỉ để check đăng nhập). File đổi (kể cả write_settings
 # ghi đè) thì mtime/size đổi -> tự đọc lại. Trả deep copy để caller sửa thoải mái không bẩn cache.
 _SETTINGS_CACHE = {"sig": None, "cfg": None}
+
+
+def _settings_sig_now():
+    try:
+        st = SETTINGS_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+# 2026-11-13: that one stat ran four times per request on the event loop (both guards, twice each). On a disk that
+# stalls it froze every request, so the loop now reads the signature from memory (kept.py). A save through Javis drops
+# it and shows at once; a hand edit of the file shows on the event loop about a second later.
+_SETTINGS_SIG = kept.Value(lambda: _settings_sig_now(), key=lambda: str(SETTINGS_PATH), name="settings.json")
 
 # Một khoá cho mọi lần đọc-sửa-ghi settings.json (update_settings, write_settings). RLock vì
 # update_settings gọi write_settings bên trong. Chặn hai luồng (endpoint chạy trong threadpool,
@@ -712,6 +742,7 @@ def _ghi_nguyen_tu(text: str) -> None:
                 if lan == 4:
                     raise
                 time.sleep(0.05 * (lan + 1))
+        _SETTINGS_SIG.drop()      # the next read looks at the new file, whichever thread makes it
     finally:
         try:
             if tmp.exists():
@@ -946,11 +977,7 @@ def _ui_lang_ban_cu(cfg: dict, data: dict) -> None:
 
 
 def read_settings():
-    try:
-        st = SETTINGS_PATH.stat()
-        sig = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        sig = None
+    sig = _SETTINGS_SIG.get()
     if sig is not None and sig == _SETTINGS_CACHE["sig"] and _SETTINGS_CACHE["cfg"] is not None:
         return json.loads(_SETTINGS_CACHE["cfg"])
     cfg = json.loads(json.dumps(_DEFAULT))   # deep copy
@@ -1078,7 +1105,133 @@ def _write_settings_full(cfg):
         _giu_secret_khong_giai_duoc(out)
     except Exception as e:      # noqa: BLE001 - tấm che hỏng thì vẫn ghi như cũ, không chặn việc lưu
         print(f"[config] giữ secret khi khoá lệch lỗi: {e}", file=__import__('sys').stderr)
+    try:
+        # Stamp FIRST, then write: a check that runs in between sees the new stamp with the old file for a moment,
+        # which the grace period of auth_guard_check absorbs. Stamping after would leave the same window the other way.
+        _stamp_auth(out.get("auth"))
+    except Exception as e:  # noqa: BLE001 - detection is extra, never a reason to refuse a save
+        print(f"[config] auth stamp: {type(e).__name__}: {e}", file=__import__('sys').stderr)
     _ghi_nguyen_tu(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+# ---- Account block edited outside Javis (owner incident 2026-11-09) ----
+# Someone with a shell on the VPS changed username, password and 2FA by editing settings.json. Every path in Javis that
+# changes a password also ends the other sessions, but an edit of the file ends nothing, so the owner stayed signed in
+# and noticed only by chance. Each write through write_settings records a fingerprint of the account block in
+# .auth_stamp.json; a file whose account block no longer matches was changed by something else (a shell, an editor, an
+# agent writing the file). Javis then ends every session, logs the event and tells the owner.
+# It detects, it does not prevent: whoever can write settings.json can also rewrite the stamp, if they know about it.
+_AUTH_CHECK = {"sig": None, "pending": 0.0}
+AUTH_GUARD_GRACE = 2.0
+
+
+def _stamp_path() -> Path:
+    return SETTINGS_PATH.with_name(".auth_stamp.json")
+
+
+def _auth_parts(a) -> dict:
+    """One hash per part of the raw (on-disk) account block, so a mismatch can say WHAT changed."""
+    a = a if isinstance(a, dict) else {}
+    t = a.get("totp") if isinstance(a.get("totp"), dict) else {}
+    rec = t.get("recovery") if isinstance(t.get("recovery"), list) else []
+
+    def h(*vals):
+        return hashlib.sha256("\x1f".join(str(v or "") for v in vals).encode("utf-8")).hexdigest()[:32]
+    return {"username": h(str(a.get("username") or "").strip().casefold()),
+            "password": h(a.get("password_hash"), a.get("salt")),
+            "2fa": h(bool(t.get("enabled")), t.get("secret"),
+                     *[f"{(m or {}).get('hash')}:{(m or {}).get('salt')}" for m in rec if isinstance(m, dict)])}
+
+
+def _parts_fp(parts: dict) -> str:
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _read_stamp() -> dict:
+    try:
+        d = json.loads(_stamp_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) and d.get("fp") else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _write_stamp(parts: dict) -> None:
+    p = _stamp_path()
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps({"fp": _parts_fp(parts), "parts": parts, "ts": time.time()}), encoding="utf-8")
+    os.replace(tmp, p)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+
+
+def _stamp_auth(raw_auth) -> None:
+    parts = _auth_parts(raw_auth)
+    if _read_stamp().get("fp") != _parts_fp(parts):
+        _write_stamp(parts)
+
+
+def auth_guard_check(grace: float = None):
+    """Compare the account block on disk with the last one Javis wrote. Returns None when nothing is wrong, or
+    {"changed": [parts]} once, the first time an outside change is confirmed (sessions already ended, event logged).
+
+    Cheap on the hot path: nothing is read again while the file's (mtime, size) stays the same. A mismatch must last
+    `grace` seconds before it counts, so a write by another Javis process (stamp first, file a moment later) is
+    never taken for an attack. No stamp yet (first run of this version) = adopt the current block silently."""
+    grace = AUTH_GUARD_GRACE if grace is None else grace
+    with _SETTINGS_LOCK:
+        # The same kept signature as read_settings (2026-11-13): `valid_session` calls this for every signed-in
+        # request, and the stat it made here ran on the event loop each time.
+        sig = _SETTINGS_SIG.get()
+        if sig is None:
+            return None
+        if sig == _AUTH_CHECK["sig"]:
+            return None
+        try:
+            raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - unreadable file: read_settings deals with it, nothing to compare
+            return None
+        if not isinstance(raw, dict):
+            return None
+        parts = _auth_parts(raw.get("auth"))
+        stamp = _read_stamp()
+        if not stamp:
+            try:
+                _write_stamp(parts)
+            except Exception:  # noqa: BLE001
+                return None
+            _AUTH_CHECK.update(sig=sig, pending=0.0)
+            return None
+        if stamp.get("fp") == _parts_fp(parts):
+            _AUTH_CHECK.update(sig=sig, pending=0.0)
+            return None
+        now = time.time()
+        if grace > 0:
+            if not _AUTH_CHECK["pending"]:
+                _AUTH_CHECK["pending"] = now
+                return None
+            if now - _AUTH_CHECK["pending"] < grace:
+                return None
+        old = stamp.get("parts") if isinstance(stamp.get("parts"), dict) else {}
+        changed = [k for k in parts if parts[k] != old.get(k)] or ["auth"]
+        try:
+            _write_stamp(parts)
+        except Exception:  # noqa: BLE001
+            pass
+        _AUTH_CHECK.update(sig=sig, pending=0.0)
+        n = len(SESSIONS)
+        clear_sessions()
+        try:
+            import security_log
+            security_log.record("auth_changed_outside", detail=f"changed={','.join(changed)}; sessions_ended={n}",
+                                source="settings.json")
+            security_log.forget_networks()
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[auth] settings.json: the account block ({', '.join(changed)}) was changed OUTSIDE Javis. "
+              f"All {n} sessions were ended.", file=__import__('sys').stderr)
+        return {"changed": changed}
 
 
 def _giu_secret_khong_giai_duoc(out):
@@ -1418,31 +1571,181 @@ def _save_sessions():
         pass
 
 
-def new_session():
+def new_session(ip: str = "", ua: str = "", remember: bool = True):
+    """A new sign-in session. remember=False is "Keep me signed in" left unticked (see _SHORT_SESSION_IDLE)."""
     t = secrets.token_urlsafe(32)
     SESSIONS[t] = _time.time()
     _save_sessions()
+    if ip or ua:
+        note_session_device(t, ip, ua)
+    if not remember:
+        SESSION_META.setdefault(t, {})["remember"] = False
+        _save_session_meta()
     return t
 
 
+# "Keep me signed in" left unticked (2026-11-14). The owner asked for it to sign in on someone else's device: the
+# cookie then has no max_age, so the browser drops it when it closes. A browser that restores its last session, or a
+# phone browser that never really closes, would keep it anyway, so the server also ends such a session after a few
+# hours with no request from it, and a day after sign-in at the latest. An open dashboard tab polls every few seconds,
+# so the idle limit never hits someone who is using it. The flag lives in SESSION_META (.sessions.json stays
+# {token: ts} for older versions); a session without it is a remembered one, which is every session made before this.
+_SHORT_SESSION_IDLE = 4 * 3600
+_SHORT_SESSION_MAX = 24 * 3600
+
+
+def session_remembered(token) -> bool:
+    return (SESSION_META.get(token) or {}).get("remember") is not False
+
+
+def _short_session_over(token, now: float) -> bool:
+    m = SESSION_META.get(token) or {}
+    if m.get("remember") is not False:
+        return False
+    started = float(m.get("created") or SESSIONS.get(token) or 0)
+    last = float(m.get("last") or started)
+    return now - started > _SHORT_SESSION_MAX or now - last > _SHORT_SESSION_IDLE
+
+
 def valid_session(token):
-    if not token or token not in SESSIONS:
+    if not token:
         return False
-    if _time.time() - SESSIONS.get(token, 0) > _SESSION_TTL:
+    try:
+        auth_guard_check()   # an account block edited outside Javis ends every session (see auth_guard_check)
+    except Exception:  # noqa: BLE001
+        pass
+    if token not in SESSIONS:
+        return False
+    if _time.time() - SESSIONS.get(token, 0) > _SESSION_TTL or _short_session_over(token, _time.time()):
         SESSIONS.pop(token, None)
+        SESSION_META.pop(token, None)
         _save_sessions()
+        _save_session_meta()
         return False
+    return True
+
+
+# Sliding expiry (2026-11-10). A session used to die exactly 30 days after login however often it was used, and the
+# browser dropped the cookie at the same moment (max_age 30 days). An open tab kept chatting over its WebSocket while
+# every HTTP call, chat images included, got 401 with no visible sign. Now a session in use stays alive: at most once
+# a day _auth_guard moves its timestamp forward and re-issues the cookie. One left unused for 30 days still expires.
+# .sessions.json stays {token: ts}, so older versions read it unchanged; the login time moves to SESSION_META.
+_SESSION_RENEW_AFTER = 86400
+
+
+def renew_session(token) -> bool:
+    """Extend a live session whose timestamp is over a day old. True = renewed, the caller re-issues the cookie."""
+    ts = SESSIONS.get(token) if token else None
+    if ts is None or _time.time() - ts < _SESSION_RENEW_AFTER or _time.time() - ts > _SESSION_TTL:
+        return False
+    if not session_remembered(token):
+        return False   # never re-issued: that would hand an unticked sign-in a 30-day cookie
+    SESSION_META.setdefault(token, {}).setdefault("created", ts)
+    SESSIONS[token] = _time.time()
+    _save_sessions()
+    _save_session_meta()
     return True
 
 
 def drop_session(token):
     SESSIONS.pop(token, None)
+    SESSION_META.pop(token, None)
     _save_sessions()
+    _save_session_meta()
 
 
-def clear_sessions():
+def clear_sessions(keep: str = ""):
+    """End every session, or every one but `keep` (the device asking "sign out my other devices")."""
+    kept = SESSIONS.get(keep) if keep else None
+    meta = SESSION_META.get(keep) if keep else None
     SESSIONS.clear()
+    SESSION_META.clear()
+    if kept is not None:
+        SESSIONS[keep] = kept
+        if meta:
+            SESSION_META[keep] = meta
     _save_sessions()
+    _save_session_meta()
+
+
+# ---- Which device each session belongs to (2026-11-09) ----
+# Kept apart from .sessions.json on purpose: that file is {token: created_ts} and older versions read it as such, so a
+# downgrade must not log everyone out. Raw tokens never leave this module: the dashboard sees session_id(token).
+_SESS_META_PATH = STATE_DIR / ".sessions_meta.json"
+_META_SAVE_EVERY = 300.0
+_META_SAVED = [0.0]
+
+
+def _load_session_meta():
+    try:
+        data = json.loads(_SESS_META_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if isinstance(v, dict) and k in SESSIONS}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+SESSION_META = _load_session_meta()
+
+
+def _save_session_meta():
+    try:
+        _SESS_META_PATH.write_text(json.dumps({k: v for k, v in SESSION_META.items() if k in SESSIONS}),
+                                   encoding="utf-8")
+        os.chmod(_SESS_META_PATH, 0o600)
+    except Exception:  # noqa: BLE001
+        pass
+    _META_SAVED[0] = _time.time()
+
+
+def session_id(token) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()[:16]
+
+
+def note_session_device(token, ip: str = "", ua: str = ""):
+    if not token or token not in SESSIONS:
+        return
+    now = _time.time()
+    SESSION_META[token] = {"ip": str(ip or "")[:64], "ua": str(ua or "")[:200], "last": now,
+                           "last_ip": str(ip or "")[:64]}
+    _save_session_meta()
+
+
+def touch_session(token, ip: str = ""):
+    """Last activity of a session. In memory on every request, on disk at most every few minutes."""
+    m = SESSION_META.get(token)
+    if m is None:
+        if token not in SESSIONS:
+            return
+        m = SESSION_META.setdefault(token, {})
+    m["last"] = _time.time()
+    if ip:
+        m["last_ip"] = str(ip)[:64]
+    if _time.time() - _META_SAVED[0] > _META_SAVE_EVERY:
+        _save_session_meta()
+
+
+def list_sessions(current: str = "") -> list:
+    out = []
+    now = _time.time()
+    for tok, created in SESSIONS.items():
+        if now - float(created or 0) > _SESSION_TTL or _short_session_over(tok, now):
+            continue
+        m = SESSION_META.get(tok) or {}
+        out.append({"id": session_id(tok), "created": float(m.get("created") or created or 0), "last": float(m.get("last") or created or 0),
+                    "ip": m.get("ip", ""), "last_ip": m.get("last_ip") or m.get("ip", ""), "ua": m.get("ua", ""),
+                    "remember": session_remembered(tok), "current": bool(current) and tok == current})
+    out.sort(key=lambda x: (not x["current"], -x["last"]))
+    return out
+
+
+def drop_session_by_id(sid: str) -> bool:
+    for tok in list(SESSIONS):
+        if session_id(tok) == str(sid or ""):
+            drop_session(tok)
+            return True
+    return False
 
 
 
@@ -1460,6 +1763,11 @@ TOKEN_PREFIX = "jvs_"
 # Đường mà token scope `chat` được đi. Danh sách TRẮNG, khớp theo tiền tố: thiếu tên nào thì
 # token đó bị từ chối chứ không lọt - fail-closed, đúng nếp của mọi hàng rào khác trong Javis.
 TOKEN_SCOPE_CHAT = ("/chat", "/version", "/health", "/sessions")
+# Scope `sync` (20/11/2026): only saves Claude Code / Codex transcripts (POST /chat/external, see chat_bridge
+# `log_transcript`). Javis Gate mints one when the owner turns Javis Sync on from an outside AI, so connecting Gate is
+# all the setup there is. It can do what javis_chat_note already does and nothing else: no chat turn, no reading.
+TOKEN_SCOPE_SYNC = ("/chat/external",)
+TOKEN_SCOPES = ("full", "chat", "sync")
 
 
 def _load_tokens():
@@ -1494,7 +1802,7 @@ def create_api_token(name: str, scope: str = "full") -> dict:
     item = {
         "id": "tok_" + secrets.token_hex(6),
         "name": (str(name or "").strip() or "không tên")[:60],
-        "scope": "chat" if str(scope) == "chat" else "full",
+        "scope": str(scope) if str(scope) in TOKEN_SCOPES else "full",
         "hash": _token_hash(raw),
         "prefix": raw[:12],
         "created_at": _time.time(),
@@ -1534,8 +1842,13 @@ def verify_api_token(raw: str, path: str = ""):
     h = _token_hash(raw)
     for x in _load_tokens():
         if secrets.compare_digest(str(x.get("hash") or ""), h):
+            if str(x.get("scope")) == "sync" and str(path) not in TOKEN_SCOPE_SYNC:
+                return None
             if str(x.get("scope")) == "chat" and path:
-                if not any(str(path).startswith(p) for p in TOKEN_SCOPE_CHAT):
+                # 2026-11-05 audit: a bare startswith let "/chat" match "/chatbots*" (create, edit, delete bots,
+                # read their logs). A listed path matches itself and what lies under it, nothing that merely
+                # shares its first letters.
+                if not any(str(path) == p or str(path).startswith(p + "/") for p in TOKEN_SCOPE_CHAT):
                     return None
             x["last_used_at"] = _time.time()
             _save_tokens(_load_tokens_touch(x))
@@ -1665,3 +1978,36 @@ def provision_admin_from_env():
     write_settings(cfg)
     clear_sessions()
     return "reset"
+
+
+def reset_2fa_from_env():
+    """JAVIS_RESET_2FA=<any value> at boot turns 2FA off ONCE (owner incident 2026-11-09).
+
+    The owner was locked out by a 2FA that someone else had set up, and the only way back was a Python one-liner in a
+    root terminal. With this variable, the same reset is: add it in the Environment box, redeploy, sign in, remove it.
+    Applied once per value: a salted hash of the value is kept, so a variable left behind does not wipe the 2FA the
+    owner sets up next. To use it again, set a new value (today's date, for instance). "0", "false", "no", "off" and
+    empty do nothing. Every other session is ended and the event is logged.
+    Returns "reset", or "" when nothing was done."""
+    raw = str(os.getenv("JAVIS_RESET_2FA", "") or "").strip()
+    if not raw or raw.lower() in ("0", "false", "no", "off"):
+        return ""
+    cfg = read_settings()
+    a = dict(cfg.get("auth") or {})
+    done = a.get("reset_2fa_applied") if isinstance(a.get("reset_2fa_applied"), dict) else {}
+    if done.get("hash") and secrets.compare_digest(hash_password(raw, str(done.get("salt") or ""))[0],
+                                                   str(done["hash"])):
+        return ""
+    m_salt = secrets.token_hex(16)
+    a["reset_2fa_applied"] = {"hash": hash_password(raw, m_salt)[0], "salt": m_salt, "ts": _time.time()}
+    was_on = totp_enabled(cfg) or totp_hong(cfg) or bool(((a.get("totp") or {}) if isinstance(a.get("totp"), dict)
+                                                          else {}).get("enabled"))
+    if was_on:
+        a["totp"] = {"enabled": False, "secret": "", "recovery": [], "last_step": 0}
+    cfg["auth"] = a
+    write_settings(cfg)
+    if not was_on:
+        return ""
+    clear_sessions()
+    return "reset"
+

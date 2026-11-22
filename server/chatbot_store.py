@@ -17,6 +17,7 @@ Xem docs/dev/2026-08-bot-chuyen-trach-spec.md.
 from __future__ import annotations
 
 import json
+import kept
 import os
 import re
 import threading
@@ -56,7 +57,8 @@ _SLUG_CAM = re.compile(r"[/\\\x00-\x1f\x7f]")           # tách đường dẫn 
 # là chữ số nên đã khớp nhánh đầu.
 # Zalo Bot group ids carry a "zgr-" prefix (e.g. "zgr-72749471121efb40a20f", #875, 0.379.0).
 # Without it here "Allow this group" returned OK while the id was silently dropped.
-_CHAT_ID_RE = re.compile(r"^(-?\d{1,20}|(?:zgr-)?[0-9a-fA-F]{8,40}|[CGDUW][A-Z0-9]{6,20})$")
+# A WeChat follower is an OpenID: "o" then 27 letters, digits, "-" or "_" (e.g. "o6_bmjrPTlm6_2sgVt7hMZOPfL2M").
+_CHAT_ID_RE = re.compile(r"^(-?\d{1,20}|(?:zgr-)?[0-9a-fA-F]{8,40}|[CGDUW][A-Z0-9]{6,20}|o[0-9A-Za-z_-]{20,40})$")
 
 # Kênh nhắn tin của bot. Trường này có từ 0.20.0 nhưng ghim cứng "telegram"; 0.26.5 cho nó
 # thành lựa chọn thật; 0.61.0 đọc từ SỔ ĐĂNG KÝ KÊNH (`channels`) thay vì chép ở đây: kênh nào
@@ -217,11 +219,25 @@ def _now() -> float:
     return time.time()
 
 
+def _read_text():
+    """The store file as text, None when there is none. Any other read error goes to `_load`."""
+    try:
+        return STORE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+# 2026-11-13: same reason as channel_accounts._TEXT. Every bot message looks its bot up, and each lookup read this
+# file on the event loop. The loop gets the text from memory (kept.py); `_save` drops it, so a change shows at once.
+_TEXT = kept.Value(lambda: _read_text(), key=lambda: str(STORE_PATH), name="chatbots.json")
+
+
 def _load() -> dict:
     try:
-        d = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {"version": 1, "bots": []}
+        text = _TEXT.get()
+        if text is None:
+            return {"version": 1, "bots": []}
+        d = json.loads(text)
     except Exception:
         # File hỏng (sửa tay, đĩa đầy giữa chừng): KHÔNG xoá, đổi tên để còn cứu, rồi bắt đầu lại.
         # Mất danh sách bot đã đau, mất luôn bản gốc để dò thì không cứu được nữa.
@@ -229,6 +245,7 @@ def _load() -> dict:
             STORE_PATH.rename(STORE_PATH.with_suffix(".json.hong"))
         except Exception:
             pass
+        _TEXT.drop()
         return {"version": 1, "bots": []}
     if not isinstance(d, dict) or not isinstance(d.get("bots"), list):
         return {"version": 1, "bots": []}
@@ -262,6 +279,7 @@ def _save(d: dict) -> None:
     tmp = STORE_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, STORE_PATH)   # ghi nguyên tử: mất điện giữa chừng không để lại file cụt
+    _TEXT.drop()
 
 
 def _slugify(name: str) -> str:
@@ -396,7 +414,7 @@ def parse_ngoai_le(v: Any) -> tuple[Optional[list], str]:
     "ten": label for the owner, "muc_quyen": a level, "cho_giay": seconds the bot waits for that chat to finish
     typing (personal Zalo only), or None for the channel default}.
 
-    An entry is scoped to ONE channel account (review of #653): one bot can hold up to 20 accounts across channels,
+    An entry is scoped to ONE channel account (review of #653): one bot can hold many accounts across channels,
     and a raw id saved for a personal-Zalo chat must never raise a chat that happens to carry the same string on the
     bot's Telegram, WhatsApp or Messenger account."""
     if v in (None, ""):
@@ -500,6 +518,13 @@ def ap_ngoai_le(cfg: dict, meta: Optional[dict]) -> dict:
 def clean_bat(v: Any) -> bool:
     """Công tắc bật/tắt gửi từ form ("1", "true", "on", True...)."""
     return v is True or str(v if v is not None else "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def group_typing_on(cfg: dict) -> bool:
+    """Personal Zalo: show "đang soạn tin" in groups once the bot has decided to answer (09/11/2026). On when the
+    owner never set it, so existing bots get it without a visit to the form."""
+    v = (cfg or {}).get("group_typing")
+    return True if v is None or str(v).strip() == "" else clean_bat(v)
 
 
 SKIP_LABELS_MAX = 30
@@ -698,6 +723,47 @@ def allow_patch(bot: dict, chat_type: str, chat_id: str, on: bool) -> dict:
     return {"blocked": blocked, key: listed}
 
 
+def parse_chat_ids(chat_id: Any = "", chat_ids: Any = "") -> tuple[List[str], str]:
+    """Chat ids from the allow / ignore forms of the bot card: one (`chat_id`) or many (`chat_ids`, a JSON list, sent
+    when the owner ticks several waiting chats and settles them in one press). Returns `(ids, error)`: ids in the order
+    given, without blanks or repeats; the error is set when `chat_ids` is not a JSON list or no id is left."""
+    ids: List[str] = []
+    raw = str(chat_ids or "").strip()
+    if raw:
+        try:
+            many = json.loads(raw)
+        except ValueError:
+            many = None
+        if not isinstance(many, list):
+            return [], localefmt.chu("Danh sách id không đọc được.", "The id list cannot be read.")
+        ids = [str(x).strip() for x in many if not isinstance(x, (dict, list))]
+    ids.append(str(chat_id or "").strip())
+    out: List[str] = []
+    for x in ids:
+        if x and x not in out:
+            out.append(x)
+    if not out:
+        return [], localefmt.chu("Thiếu id cuộc chat.", "Missing chat id.")
+    return out, ""
+
+
+def set_listed(bot_id: str, key: str, ids: List[str], on: bool) -> tuple[bool, str]:
+    """Put every id of `ids` on the bot's `groups` or `people` list (`on`), or take them off, in ONE write. Many chats
+    settled together must not be many read-change-write rounds: two of those overlapping would drop an id, and each
+    round rewrites the whole bots file."""
+    if key not in ("groups", "people"):
+        return False, localefmt.chu("Danh sách id không đọc được.", "The id list cannot be read.")
+    bot = get_bot(bot_id)
+    if not bot:
+        return False, LOI_KHONG_CO_BOT
+    listed = [str(x) for x in (bot.get(key) or [])]
+    if on:
+        listed += [x for x in ids if x not in listed]
+    else:
+        listed = [x for x in listed if x not in ids]
+    return update_bot(bot_id, {key: listed})
+
+
 # ============================================================
 # Đọc
 # ============================================================
@@ -803,7 +869,32 @@ def _clean_account_ids(v: Any, exclude_bot: str = "") -> tuple[List[str], str]:
                                          f"Account \"{a.get('label')}\" is served by bot \"{b.get('name')}\". "
                                          "One bot per account.")
         out.append(x)
-    return out[:20], ""
+    loi = account_limit_error(out)
+    if loi:
+        return [], loi
+    return out, ""
+
+
+def account_limit_error(ids: List[str]) -> str:
+    """Error text when `ids` holds more accounts of one channel than one bot may serve, else "".
+
+    The cap is per channel (`channels.max_accounts_per_bot`): 100 Facebook Pages (Instagram rides on the Page), 20 for
+    a channel that polls or holds a session per account. Before this the list was cut to its first 20 without a word,
+    so ticking 26 Pages saved 20 and the other 6 were left with no bot while the form said "saved" (owner
+    2026-11-04). Refusing the whole list keeps the bot as it was and tells the owner which channel is over."""
+    dem: Dict[str, int] = {}
+    for x in ids or []:
+        kenh = str((channel_accounts.get_account(x) or {}).get("channel") or "")
+        dem[kenh] = dem.get(kenh, 0) + 1
+    for kenh, n in dem.items():
+        tran = channels.max_accounts_per_bot(kenh)
+        if n > tran:
+            nhan = channels.nhan_giao_dien(kenh) or kenh
+            return localefmt.chu(f"Một bot trực tối đa {tran} tài khoản {nhan}, đang chọn {n}. "
+                                 f"Bỏ bớt {n - tran} tài khoản hoặc giao phần còn lại cho bot khác.",
+                                 f"One bot serves at most {tran} {nhan} accounts, {n} are selected. "
+                                 f"Remove {n - tran} or give the rest to another bot.")
+    return ""
 
 
 # ============================================================
@@ -902,6 +993,15 @@ def create_bot(data: dict) -> tuple[Optional[str], str]:
         return None, loi
     tok = str(data.get("token") or "").strip()
     if tok:
+        # Check the cap BEFORE the account is created, or a refused bot leaves a stray account behind.
+        kenh_moi = _clean_kenh(data.get("channel"))
+        tran = channels.max_accounts_per_bot(kenh_moi)
+        if sum(1 for x in acc if (channel_accounts.get_account(x) or {}).get("channel") == kenh_moi) >= tran:
+            nhan = channels.nhan_giao_dien(kenh_moi) or kenh_moi
+            return None, localefmt.chu(f"Một bot trực tối đa {tran} tài khoản {nhan}. Bỏ bớt một tài khoản đã chọn "
+                                       "hoặc dán token này cho bot khác.",
+                                       f"One bot serves at most {tran} {nhan} accounts. Untick one or give this "
+                                       "token to another bot.")
         aid, loi = channel_accounts.create_account({
             "channel": _clean_kenh(data.get("channel")), "token": tok,
             "label": data.get("account_label") or name,
@@ -942,6 +1042,8 @@ def create_bot(data: dict) -> tuple[Optional[str], str]:
             # Tự nhận lời mời kết bạn và đọc lời giới thiệu (0.172.0, chỉ Zalo cá nhân). Mặc định TẮT: nhận kết bạn
             # là hành động ra ngoài dưới tên chủ, chỉ bật khi chủ chọn.
             "nhan_ket_ban": clean_bat(data.get("nhan_ket_ban")),
+            # "Đang soạn tin" in groups once the bot decided to answer (personal Zalo, 09/11/2026). Default ON.
+            "group_typing": group_typing_on(data),
             # Zalo chat labels the bot stays out of (0.281.0, personal Zalo only), e.g. family and friends.
             "skip_labels": clean_skip_labels(data.get("skip_labels")),
             "handoff_to": str(data.get("handoff_to") or "").strip(),
@@ -985,7 +1087,8 @@ def _nhan_brain_cho_tk(bot: dict) -> None:
 _PATCHABLE = ("name", "icon", "groups", "people", "audience", "reply_when", "handoff_to",
               "agent_slug", "agent_brain", "brain", "bot_username", "token", "enabled",
               "nguon_tra_loi", "muc_quyen", "ngon_ngu", "account_ids", "reply_policy", "gio_truc",
-              "nhuong_tay_phut", "ngoai_le", "nhan_ket_ban", "skip_labels", "blocked")
+              "nhuong_tay_phut", "ngoai_le", "nhan_ket_ban", "skip_labels", "blocked",
+              "group_typing")
 # `channel` CỐ Ý đứng ngoài danh sách trắng. Đổi kênh của một bot đã tạo là đổi sang một CON
 # BOT KHÁC: token khác, danh tính khác, khách khác, và cả đống id nhóm đang lưu lập tức vô
 # nghĩa. Cho sửa tại chỗ thì bản ghi còn nguyên tên và lịch sử của con cũ trong khi nó đã là
@@ -1090,6 +1193,8 @@ def update_bot(bot_id: str, patch: dict) -> tuple[bool, str]:
                     b["ngoai_le"] = ngoai_le_moi     # checked at the top, risk gate included
                 elif k == "nhan_ket_ban":
                     b["nhan_ket_ban"] = clean_bat(v)
+                elif k == "group_typing":
+                    b["group_typing"] = group_typing_on({"group_typing": v})
                 elif k == "skip_labels":
                     b["skip_labels"] = clean_skip_labels(v)
 

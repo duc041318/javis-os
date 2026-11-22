@@ -44,7 +44,9 @@ def _no_window():
 
 
 def has_git() -> bool:
-    return shutil.which("git") is not None
+    # git_setup also finds a git installed after this server started, and adds its folder to PATH (09/11/2026).
+    import git_setup
+    return git_setup.available()
 
 
 def _git_env() -> dict:
@@ -201,6 +203,8 @@ _GITIGNORE_BODY = (
        ".antigravity/",
        ".antigravitycli/",
        ".gemini/",
+       "# Cấu hình MCP của Grok Build - cũng chứa hub token (vá bảo mật 2026-11-05).",
+       ".grok/",
        "# Learned knowledge that carries customer chat text (owner decision 2026-10-25, see",
        "# server/learned_mirror.py): it stays in the brain folder but never goes to the backup.",
        "Javis/learned/**/*.private.json",
@@ -284,8 +288,12 @@ def _ensure_gitignore_lines(root) -> bool:
 _ATTACH_RE = r"^(\d+\s*[-_.]\s*)?attachments$"
 
 
+# Thư mục cấu hình engine mang hub token: brain cũ lỡ commit thì cũng gỡ khỏi index như media.
+_UNTRACK_SECRET_DIRS = (".grok",)
+
+
 def untrack_media(root: str) -> int:
-    """Gỡ attachments/ + inbox/ khỏi INDEX git, GIỮ NGUYÊN file trên đĩa.
+    """Gỡ attachments/ + inbox/ (và .grok/, chứa hub token) khỏi INDEX git, GIỮ NGUYÊN file trên đĩa.
 
     Vì sao cần: .gitignore không có tác dụng với file git ĐÃ theo dõi từ trước, nên brain cũ
     (đã lỡ commit ảnh) vẫn tiếp tục commit ảnh mới dù template ignore đã vá. Phải gỡ một lần.
@@ -302,7 +310,8 @@ def untrack_media(root: str) -> int:
             if not os.path.isdir(os.path.join(root, name)):
                 continue
             ten = name.strip()
-            if ten.lower() != "inbox" and not re.match(_ATTACH_RE, ten, re.IGNORECASE):
+            if (ten.lower() != "inbox" and ten not in _UNTRACK_SECRET_DIRS
+                    and not re.match(_ATTACH_RE, ten, re.IGNORECASE)):
                 continue
             # Hỏi trước bằng ls-files: không có gì được theo dõi thì khỏi gọi git rm, và
             # quan trọng hơn là khỏi đếm nhầm thư mục vốn đã sạch (giữ tính idempotent).
@@ -486,7 +495,7 @@ def list_learn_commits(root: str, n: int = 20) -> List[dict]:
 def revert_last_learn(root: str) -> dict:
     """git revert commit HỌC gần nhất (undo 1-click). Trả {ok, reverted, subject, error}."""
     if not is_git_checkout(root):
-        return {"ok": False, "error": _c("Brain chưa phải git repo", "The brain is not a git repo yet")}
+        return {"ok": False, "error": _c("Brain chưa phải git repository", "The brain is not a git repository yet")}
     try:
         commits = list_learn_commits(root, 1)
         if not commits:
@@ -542,7 +551,7 @@ def remote_reachable(repo_url: str, token: str, timeout: int = 30) -> dict:
     if not has_git():
         return {"ok": False, "error": _c("Máy chưa cài git", "git is not installed on this machine")}
     if not repo_url or not token:
-        return {"ok": False, "error": _c("Thiếu repo URL hoặc token", "Missing repo URL or token")}
+        return {"ok": False, "error": _c("Thiếu repository URL hoặc token", "Missing repository URL or token")}
     try:
         r = subprocess.run(["git", "ls-remote", _auth_url(repo_url, token), "HEAD"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -577,7 +586,11 @@ _BACKUP_SKIP_SUBSTR = ("/memory/conversations/", "/Memory/conversations/",
                        # ĐÚNG file mcp_config.json chứ không chặn cả `.agents/`: thư mục đó
                        # còn là một trong các chỗ chứa skill của brain, phải được sao lưu.
                        "/.agents/mcp_config.json/",
-                       "/.antigravity/", "/.antigravitycli/", "/.gemini/")
+                       "/.antigravity/", "/.antigravitycli/", "/.gemini/",
+                       # Grok Build đọc `<brain>/.grok/config.toml`, file đó mang Bearer hub token,
+                       # đuôi .toml là chữ nên khối 2 mở lại. Sót ở đây tới 2026-11-05 (audit bảo
+                       # mật): token đi lên remote sao lưu và ai cầm nó gọi được hub ở mức full.
+                       "/.grok/")
 
 
 def _raw_kept_out(rel: str) -> bool:
@@ -1065,7 +1078,7 @@ def sync_brains(brains_dir: str, mirror_dir: str, repo_url: str, token: str, bra
         return {"ok": False, "error": _c("Máy chưa cài git (cần cài git để đồng bộ)",
                                          "git is not installed on this machine (git is needed to sync)")}
     if not repo_url or not token:
-        return {"ok": False, "error": _c("Chưa cấu hình repo URL hoặc token", "Repo URL or token is not configured")}
+        return {"ok": False, "error": _c("Chưa cấu hình repository URL hoặc token", "Repository URL or token is not configured")}
     if not Path(brains_dir).is_dir():
         return {"ok": False, "error": _c(f"Thư mục brains không tồn tại: {brains_dir}",
                                          f"The brains folder does not exist: {brains_dir}")}

@@ -9,6 +9,45 @@
     "api_key": {"label": "API key (Composio)", "placeholder": "e.g. ck_..."}
    }
   },
+  "cloudflare": {
+   "description": "The whole Cloudflare API in chat through the official MCP: DNS, Workers, Pages, KV, R2, D1, firewall, SSL, cache, traffic analytics, Zero Trust. Paste an API token and you are done; the token's permissions decide what Javis can do.",
+   "group_line": "Paste an API token: pick permissions per area, shared with the Cloudflare Deploy (Wrangler) pack.",
+   "risk": "Cloudflare's MCP has only 3 tools: docs (search the documentation), search (find the API to call) and execute (run code that calls the real Cloudflare API).\n\nexecute can call EVERY API the permissions you granted allow, from reading analytics to DELETING a domain, editing DNS, deploying a Worker or deleting an R2 bucket.\nJavis cannot tell whether one execute call reads or deletes, so it sits in the dangerous group.\n\nRead-only and Draft: Javis only searches the docs and the API list, without touching your account.\n\nFull access: Javis acts for real. One wrong DNS record takes a website or email down at once; deleting a Worker or bucket loses data.\n\nThe safest setup: if you only want Javis to read figures, create a token with ONLY Read permissions before raising it to Full access. Then even a run of execute cannot change anything.",
+   "guide": "One-time setup:\n1. Go to dash.cloudflare.com > My Profile > API Tokens > Create Token.\n2. For Javis to do everything, pick Create Custom Token.\nAdd Edit for the areas you use (Zone, DNS, Workers Scripts, Pages, Workers KV, R2, D1, Firewall...) plus Account Resources : Read.\nFor viewing only, pick Read.\n3. Under Zone Resources choose All zones or just the domains to manage.\n4. To deploy with the 'Cloudflare Deploy (Wrangler)' pack, the token also needs Workers Scripts : Edit and Cloudflare Pages : Edit.\n5. Do NOT turn on Client IP Address Filtering: Cloudflare's MCP does not support IP-filtered tokens yet.\n6. Create it, copy the token RIGHT AWAY (it is not shown again) and paste it below. Fill Account ID only when the token sees several accounts.\n\nThe token is the real fence: Javis can only do what it allows. If the token leaks, go back to that page and press Roll or Delete.",
+   "fields": {
+    "api_token": {
+     "label": "API token (Cloudflare)",
+     "placeholder": "Paste the API token created at dash.cloudflare.com..."
+    },
+    "account_id": {
+     "label": "Account ID (optional)",
+     "placeholder": "Only needed when the token sees several accounts. Find it on the Cloudflare overview page, right column"
+    }
+   },
+   "steps": [
+    {
+     "text": "Open Cloudflare's API Tokens page and press Create Token.",
+     "link_label": "Open API Tokens"
+    },
+    {
+     "text": "Pick Create Custom Token. For full access grant Edit to the areas you use (Zone, DNS, Workers, Pages, KV, R2, D1, Firewall) and add Account Resources : Read. For viewing only grant Read."
+    },
+    {
+     "text": "Do not turn on IP filtering: Cloudflare's MCP does not accept IP-filtered tokens yet."
+    },
+    {
+     "text": "Copy the token as soon as it appears, paste it below and press Connect.",
+     "link_label": "Cloudflare's guide"
+    }
+   ]
+  },
+  "cloudflare-oauth": {
+   "name": "Cloudflare (web sign-in)",
+   "description": "The same official Cloudflare MCP without creating an API token: press Connect, sign in to Cloudflare and tick the permissions to grant on Cloudflare's own page. Manage DNS, Workers, Pages, KV, R2, D1, firewall, SSL, cache and traffic analytics.",
+   "group_line": "Sign in on the web: one tap, no token. Permissions are ticked at sign-in; connect again to change them.",
+   "risk": "Cloudflare's MCP has only 3 tools: docs (search the documentation), search (find the API to call) and execute (run code that calls the real Cloudflare API).\n\nexecute can call EVERY API the permissions you granted allow, from reading analytics to DELETING a domain, editing DNS, deploying a Worker or deleting an R2 bucket.\nJavis cannot tell whether one execute call reads or deletes, so it sits in the dangerous group.\n\nRead-only and Draft: Javis only searches the docs and the API list, without touching your account.\n\nFull access: Javis acts for real. One wrong DNS record takes a website or email down at once; deleting a Worker or bucket loses data.\n\nThe safest setup: if you only want Javis to read figures, tick ONLY read permissions at sign-in before raising it to Full access. Then even a run of execute cannot change anything.",
+   "guide": "Press Connect, sign in to your Cloudflare account, then choose the permissions to grant Javis on Cloudflare's page.\n\nJavis registers itself through the Cloudflare MCP's standard OAuth, so there is no token to create or key to paste. This is the way Cloudflare recommends.\n\nThe permissions you tick at sign-in are the real fence: to only view figures, tick read permissions only. If something is missing later, press Connect again and tick more.\n\nIf your login has several Cloudflare accounts, say in chat which account to work on.\n\nThe Cloudflare Deploy (Wrangler) pack cannot use this connection yet: it needs the Paste API token way."
+  },
   "zalo": {
    "description": "The javis-zalo MCP (Javis's own Zalo CLI): read new messages and history, find chats, see who joined a group and when, approve join requests, read the tags (labels) set on chats, view media and send messages from a personal Zalo account.",
    "risk": "This connector defaults to FULL ACCESS, which means the send tool is on. To block sending, lower it to Draft or Read-only.\n\njavis-zalo uses Zalo's unofficial API through zca-js. The account MAY be restricted or LOCKED; use a secondary account and do not auto-send in bulk.",
@@ -44,7 +83,7 @@
    "name": "Google Workspace (Gmail, Calendar, Drive, Docs)",
    "description": "Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks... in ONE connection. Create an OAuth client once, about 10 minutes, with step-by-step help. The first time a Google tool is called, a browser opens ON THE MACHINE RUNNING JAVIS for you to approve, so that machine needs a screen.",
    "group_line": "Gmail, Calendar, Drive, Docs and Sheets in ONE connection. Needs a machine with a screen; on a VPS use the separate Calendar and Gmail cards.",
-   "risk": "Draft (the default) lets Javis draft email, create events, create documents, and also EDIT existing documents and MOVE files in Drive.\nCombined tools (manage_event, manage_task...) belong here too, so Javis can edit and delete individual calendar events or to-dos.\n\nFull access adds permission to SEND REAL EMAIL, DELETE files and mail, and RUN Apps Script functions from your Google account.\n\nIf you only need to read, lower it to Read-only.",
+   "risk": "Draft (the default) lets Javis draft email, create events, create documents, and also EDIT existing documents and MOVE files in Drive.\nJavis can also edit Google Form questions, add or rename tabs, append rows to Sheets, and rename or copy Drive files.\nCombined tools (manage_event, manage_task...) belong here too, so Javis can edit and delete individual calendar events or to-dos.\n\nFull access adds permission to SEND REAL EMAIL, DELETE files and mail, and RUN Apps Script functions from your Google account.\nAlso at this level: SHARE files or calendars with others, delete a whole tab, task list or contact group, create Gmail filters, publish Apps Script.\n\nIf you only need to read, lower it to Read-only.",
    "guide": "This connection runs ON THE MACHINE WHERE JAVIS IS INSTALLED: the first time a Google tool is called, that machine's own browser\nopens for you to approve. A machine with no screen (a VPS) should use the separate Calendar and Gmail cards instead,\nwhich sign in right inside the dashboard.\n\nOne-time setup, about 10 minutes:\n1. Go to console.cloud.google.com and create a new project, or reuse the one you made for the Calendar/Gmail cards.\n2. Enable the API for each service you want. The four basics: Gmail API, Google Calendar API,\nGoogle Drive API, Google Docs API.\nTo let Javis touch Sheets, Slides, Forms, Contacts or Tasks, also enable the Google Sheets API,\nGoogle Slides API, Google Forms API, People API and Google Tasks API.\nForget one and only that group of tools errors out; the rest keeps working.\n3. OAuth consent screen: choose External, then add your Google email under Test users.\nSkip this and Google blocks the sign-in right away.\n4. Create an OAuth client of type 'Desktop app'.\nThis type needs NO redirect URI at all, unlike the Calendar/Gmail cards, so an empty section is correct.\n5. Download the client's JSON file and drop it on the box below (it fills in the Client ID and Secret),\nor copy those two values by hand.\n6. Fill in the Google email box too, then press Connect.\n\nThe first time Javis calls a Google tool, a browser opens on the machine running Javis. If you see an 'app isn't\nverified' warning, press Advanced, then Continue: this is your own app. Remember to TICK EVERY permission\nbox: untick one and that group of tools dies.",
    "fields": {
     "client_id": {"label": "OAuth Client ID", "placeholder": "e.g. xxxx.apps.googleusercontent.com"},
@@ -74,7 +113,7 @@
    },
    "steps": [
     {"text": "BEFORE YOU START, read this: this connection runs on the machine where Javis is installed, and the first tool call opens THAT MACHINE'S browser for you to approve. If Javis runs on a VPS with no screen, this route will not work."},
-    {"text": "If Google Workspace or another Google service is already connected, REUSE its key (the button below the input), and only do the enable-API step."},
+    {"text": "If Google Workspace or another Google service is already connected, REUSE its key (the Reuse key row at the top of this box), and only do the enable-API step."},
     {"text": "Create a project in Google Cloud (or use an existing one) and enable the Google Tasks API.", "link_label": "Enable Tasks API"},
     {"text": "OAuth consent screen: choose External, then add your Google email under Test users. Skip this and Google blocks the sign-in right away.", "link_label": "Open consent screen"},
     {"text": "Create an OAuth client of type 'Desktop app'. This type needs NO redirect URI at all, so an empty section is correct.", "link_label": "Create OAuth client"},
@@ -84,12 +123,13 @@
    ]
   },
   "google-ads": {
-   "description": "Google Ads numbers through Google's official MCP (read-only): campaigns, spend, conversions and keywords through GAQL queries. Runs locally; needs a developer token and Google Cloud, a somewhat technical one-time setup.",
-   "guide": "Needed first: nothing to install. Javis fetches Google's latest official release (PyPI) each time it starts.\n\nOne-time setup, about 10 minutes:\n1. Google Ads > MCC manager account > Tools > API Center: get a developer token; Explorer level is enough for reading.\n2. Go to console.cloud.google.com, create a project and enable the Google Ads API.\n3. OAuth consent screen: choose External and add your email under Test users.\n4. Credentials > Create an OAuth client ID of type 'Web application'.\n5. Under 'Authorized redirect URIs', add exactly this address:\nhttp://localhost:7777/connect/oauth/callback\nOn a VPS also add https://<your-domain>/connect/oauth/callback\n6. Fill in the boxes below, then press the sign-in button. A browser opens so you can let Javis read Google Ads.\n\nJavis builds the credentials file itself: NO Google Cloud CLI install and no commands to run.\n\nIf you see an 'app isn't verified' warning, press Advanced > Continue: this is your own app.\n\nAlready ran gcloud yourself? Paste the content of application_default_credentials.json into the last box and Javis uses it as is.",
+   "description": "Google Ads numbers through Google's official MCP: campaigns, spend, conversions, keywords and change history through GAQL queries. Read-only by default. Runs locally; needs a Google Cloud project and an OAuth client, no developer token, about 10 minutes of one-time setup.",
+   "guide": "Needed first: nothing to install. Javis fetches Google's latest official release (PyPI) each time it starts.\n\nOne-time setup, about 10 minutes:\n1. Go to console.cloud.google.com, create a project and enable the Google Ads API.\n2. Open that project's Google Ads API page (button below) and press 'Apply for access' to move up to Explorer.\nThe default Test level only reads test accounts. Explorer reads real accounts and is usually approved within minutes.\n3. Google Auth Platform > Audience: choose External and add your email under Test users.\n4. Google Auth Platform > Clients > Create an OAuth client ID of type 'Web application'.\n5. Under 'Authorized redirect URIs', add exactly this address:\nhttp://localhost:7777/connect/oauth/callback\nOn a VPS also add https://<your-domain>/connect/oauth/callback\n6. Fill in the Client ID and Client Secret below, then press the sign-in button. A browser opens so you can let Javis read Google Ads.\n\nNO developer token and no MCC manager account needed: access is now tied to the Google Cloud project.\nThe developer token box is only for people who still hold an old token.\n\nJavis builds the credentials file itself: NO Google Cloud CLI install and no commands to run.\n\nIf you see an 'app isn't verified' warning, press Advanced > Continue: this is your own app.\n\nWhile the app is still in Testing, Google revokes the sign-in after 7 days: sign in again, or go to Audience > Publish app to keep it.\n\nAlready ran gcloud yourself? Paste the content of application_default_credentials.json into the last box and Javis uses it as is.",
+   "risk": "The Read only level (default) only reads numbers and cannot change anything in the ads account.\n\nThe Draft writes level lets Javis CREATE new assets (headlines, images, sitelinks, callouts) in the Google Ads account.\n\nThe Full access level adds CREATING, EDITING and DELETING labels, attaching or removing labels on campaigns and ad groups, and UPLOADING A VIDEO from this machine to YouTube to use as an asset.\nA deleted label cannot be restored; an uploaded video sits on your YouTube channel.\n\nGoogle's MCP 0.0.6 has no tool that changes budgets, bids or turns campaigns on or off. If a later release adds one, its level will be declared again.",
    "fields": {
     "client_id": {"label": "OAuth Client ID", "placeholder": "e.g. xxxx.apps.googleusercontent.com"},
     "client_secret": {"label": "OAuth Client Secret", "placeholder": "e.g. GOCSPX-..."},
-    "developer_token": {"label": "Developer token (Google Ads API Center)", "placeholder": "22 characters, from the MCC manager account"},
+    "developer_token": {"label": "Developer token (optional: only if you still hold an old one, Google no longer asks for it)", "placeholder": "Leave empty if you have none"},
     "login_customer_id": {"label": "MCC manager account ID (optional: when the ads account sits under an MCC or agency)", "placeholder": "10 digits, no dashes"},
     "adc_json": {"label": "Or paste an ADC file if you already ran gcloud yourself (leave empty if you sign in above)", "placeholder": "e.g. { \"type\": \"authorized_user\", \"refresh_token\": ... }"}
    }
@@ -141,7 +181,7 @@
     "client_secret": {"label": "OAuth Client Secret", "placeholder": "e.g. GOCSPX-..."}
    },
    "steps": [
-    {"text": "If Google Calendar is already connected, REUSE its key (the button below the input) and only do step 2 for Gmail."},
+    {"text": "If Google Calendar is already connected, REUSE its key (the Reuse key row at the top of this box) and only do step 2 for Gmail."},
     {"text": "Enrol in the Google Workspace Developer Preview (free) with EXACTLY the Google account you will sign in with. Skip this and you get a 403 even after a successful sign-in.", "link_label": "Open enrolment page"},
     {"text": "Create a project in Google Cloud (or use an existing one) and enable BOTH APIs: Gmail API and Gmail MCP API.", "link_label": "Enable Gmail MCP API"},
     {"text": "OAuth consent screen: choose External and add your email under Test users.", "link_label": "Open consent screen"},
@@ -155,6 +195,38 @@
      {"label": "Enrol in Developer Preview"},
      {"label": "Enable Gmail MCP API"}
     ]
+   }
+  },
+  "http-api": {
+   "name": "Custom API (API key)",
+   "description": "Connect any service that has a REST API and an API key but no MCP (POS, CRM, shipping, e-invoices...). Paste the base URL and the key and every engine can call that API. The key is encrypted and only the server adds it to calls; the model never sees it.",
+   "risk": "Read-only (the default) lets Javis call GET only, so it can only look at data.\n\nFull access lets Javis call POST, PUT, PATCH and DELETE: create orders, edit, delete and send real messages on that service, which may not be undoable.\nDraft cannot open these methods because Javis cannot know how an unknown API writes.\n\nAn API key has every right of the account that created it: create a separate key for Javis and limit its rights at the service if the service allows it.",
+   "guide": "1. Open the service's API documentation, find the base URL and create an API key.\n2. Check how the docs say the key is sent. The most common is the header Authorization: Bearer, in which case leave Key format empty.\nA service using another header: write X-API-Key: {key}; a query parameter: write ?api_key={key}.\nA name:password key with Authorization: Basic {key} is encoded by Javis.\n3. Paste the docs link and a few notes (endpoints you use often) so Javis calls the right thing from the start.\n\nEach service is its own connection. The key is only sent to the base URL's host. An http:// address only works for a machine on your local network.",
+   "fields": {
+    "base_url": {
+     "label": "API base URL",
+     "placeholder": "e.g. https://api.example.com/v1"
+    },
+    "api_key": {
+     "label": "API key",
+     "placeholder": "Paste the API key..."
+    },
+    "auth_style": {
+     "label": "Key format (optional, empty = Authorization: Bearer)",
+     "placeholder": "e.g. X-API-Key: {key}  or  ?api_key={key}"
+    },
+    "extra_headers": {
+     "label": "Extra headers (optional, one Name: value per line)",
+     "placeholder": "e.g. X-Shop-Id: 12345"
+    },
+    "docs_url": {
+     "label": "API docs link (optional, for Javis to read)",
+     "placeholder": "e.g. https://docs.example.com/api"
+    },
+    "notes": {
+     "label": "Notes for Javis (optional)",
+     "placeholder": "e.g. orders under /orders, stock under /inventory"
+    }
    }
   },
   "substack": {
@@ -212,6 +284,47 @@
      {"label": "Install uv"}
     ]
    }
+  },
+ "asana": {
+  "description": "Tasks and projects in Asana through the official MCP (V2): find tasks, view projects, progress, assignees and due dates, create and update tasks, add comments. Sign in to Asana from the dashboard; works on a VPS too. Needs a one-time Asana MCP app (~5 minutes).",
+  "risk": "The Asana MCP works with the permissions of the Asana account you sign in with.\n\nRead-only: find and read tasks, projects, assignees, progress and comments. Nothing changes.\n\nDraft: also create tasks, edit tasks (name, due date, assignee, done state) and add comments. Teammates see it at once and may get notified.\n\nFull access: also DELETE tasks or projects and remove people from tasks. Asana moves deletions to the trash, but Javis cannot restore them for you.\n\nIn a busy workspace, start at Read-only and raise it step by step.",
+  "guide": "Asana only lets pre-created apps sign in to MCP V2, so you create your own MCP app once, about 5 minutes:\n1. Open Asana's Developer console (button below), press Create new app and choose the MCP app type.\n2. In the app's OAuth section, add exactly this redirect URL:\nhttp://localhost:7777/connect/oauth/callback\nOn a VPS, also add https://<your-domain>/connect/oauth/callback\nThe address must match character for character, port and trailing / included.\n3. Copy the app's Client ID and Client secret into the two boxes below, then press Connect.\n4. Asana's page opens: pick the workspace and press Allow.\n\nJavis sees and does exactly what your Asana account can, nothing more.\nTo let Javis only look, keep it at Read-only.\n\nIf you get 'redirect_uri does not match', check step 2 again: a missing https, a wrong port or an extra / makes Asana refuse.",
+  "fields": {
+   "client_id": {
+    "label": "Client ID (Asana MCP app)",
+    "placeholder": "For example: 1209876543210987"
+   },
+   "client_secret": {
+    "label": "Client secret",
+    "placeholder": "Paste the MCP app's client secret"
+   }
+  },
+  "steps": [
+   {
+    "text": "Open Asana's Developer console, press Create new app and choose the MCP app type.",
+    "link_label": "Open Developer console"
+   },
+   {
+    "text": "In the app's OAuth section, add the address below as a Redirect URL. It must match character for character, port and trailing / included."
+   },
+   {
+    "text": "Copy the app's Client ID and Client secret into the two boxes below, then press Connect."
+   },
+   {
+    "text": "Asana's page opens: pick the workspace and press Allow. If it says 'redirect_uri does not match', check step 2 again. For more detail, see Asana's MCP guide.",
+    "link_label": "Asana's MCP guide"
+   }
+  ],
+  "setup": {
+   "links": [
+    {
+     "label": "Open Asana's Developer console"
+    },
+    {
+     "label": "Asana's MCP guide"
+    }
+   ]
   }
+ }
  }
 }

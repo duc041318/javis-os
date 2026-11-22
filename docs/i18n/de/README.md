@@ -1,13 +1,15 @@
 <!-- translated-from: README.md sha256:2e10ad3d2a86 -->
 <div align="center">
 
-<img src="../../../dashboard/logo.svg" width="88" alt="Javis OS Logo">
+<a href="https://javisos.com"><img src="../../assets/social-preview.png" width="100%" alt="Javis OS: Your AI Workforce. Never miss the best AI."></a>
 
 # Javis OS
 
-### Dein selbst gehosteter KI-Agent mit austauschbarem Gehirn und einem Second Brain, das jeden Tag schlauer wird.
+### Dein KI-Team. Verpasse nie die beste KI.
 
-Lass ihn auf deinem Laptop oder einem kleinen VPS laufen. Sprich mit ihm per Stimme. Schließ Claude, ChatGPT, Grok, Gemini oder einen von 12 Anbietern an, behalte beim Wechsel jedes Tool und lass ihn im Hintergrund arbeiten, während du schläfst.
+Javis OS macht aus **Claude, ChatGPT, Gemini, Grok** und den Modellen deiner Wahl ein Team, das rund um die Uhr auf deinem eigenen Rechner oder Server arbeitet. Jedes Teammitglied hat eine Rolle, teilt dasselbe Gedächtnis und dieselben Tools und arbeitet im Hintergrund weiter. Kommt ein besseres Modell, wechselst du und behältst alles, was das Team gelernt hat.
+
+**🌐 Website: [javisos.com](https://javisos.com)** · Open Source · Selbst gehostet · 14 KI-Anbieter
 
 [![GitHub stars](https://img.shields.io/github/stars/blogminhquy/javis-os?style=flat&logo=github&label=stars)](https://github.com/blogminhquy/javis-os/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](../../../LICENSE)
@@ -117,7 +119,7 @@ Was dir das bringt:
 | **Arbeit** | Antwortet und wartet dann | **Hintergrund-Loops, Erinnerungen und eine von der KI gesteuerte Aufgabenwarteschlange**, die dir Bericht erstatten |
 | **Oberfläche** | Ein Chatfenster | Dashboard + Wissensgraph + **freihändige Sprachsteuerung** + Telegram, Slack, WhatsApp, Zalo + eine CLI |
 | **Deine Arbeit** | Bleibt auf den Servern des Anbieters, im Format des Anbieters | **Einfache Dateien auf deinem Rechner**: Verlauf, Gedächtnis, Skills, Agents und Workflows lassen sich zu jedem neuen Modell mitnehmen |
-| **Bereitstellung** | Die Cloud von jemand anderem | **Selbst gehostet**: [Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) mit einem Klick, Docker oder ein beliebiger VPS |
+| **Bereitstellung** | Die Cloud von jemand anderem | **Selbst gehostet**: [Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) mit einem Klick, Docker oder ein beliebiger VPS |
 
 > 💡 **Die Philosophie: Die Fähigkeiten stecken in Javis, nicht im Modell.** Jedes Gehirn bekommt denselben Werkzeugkasten über einen gemeinsamen Verbindungs-Hub (den MCP Hub). Der Wechsel von Claude zu Gemini kostet dich nichts außer dem Shell-Zugriff, den nur die CLI-Engines haben.
 
@@ -247,7 +249,7 @@ flowchart LR
 <details open>
 <summary><b>Option 1: Hostinger Docker Manager (Domain + HTTPS, ein Klick)</b></summary>
 
-> 🛒 **Noch keinen VPS?** [Hol dir hier einen Hostinger VPS](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). Docker Manager ist eingebaut, Javis installiert sich also mit einem Klick. Sobald er bereit ist, mach mit den Schritten unten weiter.
+> 🛒 **Noch keinen VPS?** [Hol dir hier einen Hostinger VPS](https://www.hostinger.com?REFERRALCODE=JAVISOS). Docker Manager ist eingebaut, Javis installiert sich also mit einem Klick. Sobald er bereit ist, mach mit den Schritten unten weiter.
 
 Hostinger VPS → **Docker Manager → Compose → URL** → füge die Hostinger-Datei ein und klicke auf **Deploy**:
 
@@ -275,7 +277,7 @@ Details und Fehlerbehebung: [DEPLOY.en.md](../../../DEPLOY.en.md).
 <details>
 <summary><b>Option 2: Docker auf einem beliebigen VPS (ohne Klonen)</b></summary>
 
-> 🛒 **Brauchst du einen VPS?** Ein [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) eignet sich auch für diese Option.
+> 🛒 **Brauchst du einen VPS?** Ein [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=JAVISOS) eignet sich auch für diese Option.
 
 ```bash
 # Docker required (don't have it?  curl -fsSL https://get.docker.com | sh)
@@ -507,5 +509,6 @@ Du kannst nicht spenden? Javis zu nutzen, Feedback zu schicken oder einen Pull R
 
 <div align="center">
 <br>
+<b><a href="https://javisos.com">javisos.com</a></b><br>
 Mit ☕ in Vietnam gemacht von <b><a href="https://minhquy.vn">Minh Quý</a></b>
 </div>

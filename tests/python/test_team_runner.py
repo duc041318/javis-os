@@ -305,9 +305,10 @@ tm.set_caps(T["team_id"], {"task_steps": 8, "daily_turns": len(tm.turns(T["team_
 fake.calls.clear()
 sd = r.submit(T["team_id"], "Còn lượt không?", client_msg_id="k3")
 run(r.run_replies(sd))
-check("TC13 hết lượt ngày của nhóm: tin vẫn lưu, không có lượt", sd["created"] and sd["replies"] == []
-      and "daily_cap" in sd["notes"] and fake.calls == [])
-tm.set_caps(T["team_id"], {"daily_turns": 100})
+# 17/11/2026: nhóm không còn trần lượt mỗi ngày. Số gửi lên không lưu, tin vẫn có trả lời.
+check("TC13 không còn trần lượt ngày: số gửi lên không lưu, tin có trả lời", tm.get(T["team_id"])["caps"]["daily_turns"]
+      is None and sd["created"] and sd["replies"] and "daily_cap" not in sd["notes"] and fake.calls,
+      (sd["replies"], sd["notes"], len(fake.calls)))
 
 # ---------- TC18: bị chặn rời chỗ chạy, hàng đi tiếp, nhắc sau 24 giờ ----------
 fake.calls.clear()
@@ -604,7 +605,7 @@ check("0.257.0 trần theo engine: một chỗ thì hai nhóm lần lượt, kh�
 lim = {row["key"]: row["value"] for row in r.limits_table(X["team_id"])}
 check("0.257.0 bảng giới hạn có trần theo engine và số nhóm song song",
       lim.get("engine_slots_api") == 1 and lim.get("engine_slots_cli") == TR.ENGINE_SLOTS_CLI
-      and lim.get("max_parallel_teams") == TR.MAX_PARALLEL_TEAMS, lim)
+      and lim.get("max_parallel_teams") is None and TR.MAX_PARALLEL_TEAMS == 0, lim)   # 17/11/2026: no cap by default
 check("0.257.0 engine gói đăng ký dùng trần CLI, engine khác dùng trần API",
       r.slots_for("anthropic-cli") == TR.ENGINE_SLOTS_CLI and r.slots_for("openrouter") == 1)
 
@@ -667,9 +668,12 @@ tu2 = tm.reserve_turn(T["team_id"], j2["task_id"], st2["step_id"], "ag_hoa", "wo
 tm.mark_engine(tu2, "fake", "fake-model")
 fake.calls.clear()
 rep = r.recover()
-check("TC17 restart sau mốc engine: lượt interrupted tính một lần, việc chặn interrupted, không tự chạy lại",
-      tm.turn(tu2)["status"] == "interrupted" and ts.get_task(j2["task_id"])["block_kind"] == "interrupted"
-      and tm.step(st2["step_id"])["status"] == "interrupted" and fake.calls == [])
+# 16/11/2026 (owner: "sau mỗi lần cập nhật thì các team tự khởi động lại để tiếp tục công việc"): the job is no longer
+# blocked for the owner to press Continue; it carries on with a new step (tests/python/test_team_resume_after_restart.py).
+check("TC17 restart sau mốc engine: lượt interrupted tính một lần, bước interrupted, việc tự làm tiếp bằng một bước mới",
+      tm.turn(tu2)["status"] == "interrupted" and tm.step(st2["step_id"])["status"] == "interrupted"
+      and j2["task_id"] in rep["resumed"] and ts.get_task(j2["task_id"])["status"] == "team_running"
+      and [s["status"] for s in tm.steps(j2["task_id"])].count("queued") == 1 and fake.calls == [])
 
 # ---------- Review Focus 5: khối JAVIS_TEAM sai khuôn ----------
 ss, ts, tm, fake, r, pub, inbox, gone = world("badops")

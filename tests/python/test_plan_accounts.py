@@ -46,7 +46,9 @@ def check(name, cond, extra=""):
 m = {}
 check("a plan card always has account 1, before any list is saved", [a["id"] for a in P.accounts(m, "openai-oauth")] == ["main"])
 check("account 1 runs in the CLI's own folder", P.home("openai-oauth", "main") is None and P.env_for("openai-oauth", None) == {})
-check("Antigravity holds one account only", not P.supported("antigravity-cli"))
+# Owner 05/11/2026: Antigravity holds extra Google accounts too, on Linux only (agy keeps a file login there, with
+# GEMINI_FORCE_FILE_STORAGE; macOS and Windows keep one keyring login per machine).
+check("Antigravity holds extra accounts on Linux only", P.supported("antigravity-cli") == __import__("sys").platform.startswith("linux"))
 P.add(m, "openai-oauth", "acc_b", "Plus phụ")
 P.add(m, "openai-oauth", "acc_c", "")
 check("a new account goes to the end", [a["id"] for a in P.accounts(m, "openai-oauth")] == ["main", "acc_b", "acc_c"])
@@ -133,6 +135,38 @@ c2 = copy.copy(c)
 P.use(c2, "anthropic-cli", "main")
 check("a copy for another account builds its own options (background work)",
       "CLAUDE_CONFIG_DIR" not in (c2._options().env or {}) and c._options().env.get("CLAUDE_CONFIG_DIR") == str(fc))
+
+# ---- 4b. a chat moving to another Claude account does not resume the other account's thread (07/11/2026) ----
+# Claude Code keeps a thread under <config dir>/projects/<cwd>/<id>.jsonl, so account 2 cannot resume account 1's
+# thread: `claude --resume` exits 1 and every turn died with "SDK engine: ProcessError" (owner's report).
+_sid1 = "11111111-2222-4333-8444-555555555555"
+(_FAKE_HOME / ".claude" / "projects" / "-brain").mkdir(parents=True, exist_ok=True)
+(_FAKE_HOME / ".claude" / "projects" / "-brain" / f"{_sid1}.jsonl").write_text("{}\n", encoding="utf-8")
+c3 = FakeClaude()
+c3.session_id = _sid1
+P.use(c3, "anthropic-cli", "main")
+check("account 1 keeps resuming its own thread", c3.session_id == _sid1)
+P.use(c3, "anthropic-cli", "acc_k")
+check("moving to account 2 drops account 1's thread, so the turn primes a new one from history",
+      c3.session_id is None)
+_sid2 = "99999999-2222-4333-8444-555555555555"
+(fc / "projects" / "-brain").mkdir(parents=True, exist_ok=True)
+(fc / "projects" / "-brain" / f"{_sid2}.jsonl").write_text("{}\n", encoding="utf-8")
+c4 = FakeClaude()
+c4.session_id = _sid2
+P.use(c4, "anthropic-cli", "acc_k")
+check("account 2 keeps resuming a thread it wrote itself", c4.session_id == _sid2)
+P.use(c4, "anthropic-cli", "main")
+check("and moving back to account 1 drops account 2's thread", c4.session_id is None)
+c5 = FakeClaude()
+c5.session_id = "aaaaaaaa-0000-4000-8000-000000000000"
+P.use(c5, "anthropic-cli", "acc_k")
+check("a thread found in no account folder is left to Claude Code (dropped only on evidence)",
+      c5.session_id == "aaaaaaaa-0000-4000-8000-000000000000")
+c6 = FakeClaude()
+c6.session_id = "../../etc/passwd"
+P.use(c6, "anthropic-cli", "acc_k")
+check("an id that is not a session id is never globbed", c6.session_id == "../../etc/passwd")
 
 # ---- 5. background: one link per account ---------------------------------------------------------------------
 import aux_engine  # noqa: E402
@@ -308,6 +342,43 @@ check("saving the list keeps order and labels",
       [(a["id"], a["label"]) for a in P.accounts(cfgmod.read_settings()["model"], "openai-oauth")]
       == [("acc_b", "Plus phụ"), ("main", "Pro chính")])
 check("the plan card is never dropped from the usage order by its list", True)
+
+# ---- the card names the account in use: e-mail and plan of an EXTRA account (owner's video, 10/11/2026) ----------
+# The Claude card kept showing account 1's e-mail and plan ("Pro") while chat ran on a Max account. The page needs
+# each extra account's own e-mail and plan, read from what its CLI wrote in its folder: no CLI started, no token read.
+import base64  # noqa: E402
+
+mi = {}
+P.add(mi, "anthropic-cli", "acc_i", "TuanFernel-Max100")
+fi = P.home("anthropic-cli", "acc_i")
+(fi / ".credentials.json").write_text("{}", encoding="utf-8")
+check("account 1 gets no identity here: the card reads its own login", P.identity("anthropic-cli", "main") == {})
+check("an extra Claude account with no profile yet: unknown, never a guess",
+      P.identity("anthropic-cli", "acc_i") == {"email": "", "plan": ""})
+(fi / ".claude.json").write_text(json.dumps({"mcpServers": {}, "oauthAccount": {
+    "emailAddress": "tuan@example.com", "planDisplayName": "Max"}}), encoding="utf-8")
+check("an extra Claude account's e-mail and plan come from its own .claude.json",
+      P.identity("anthropic-cli", "acc_i") == {"email": "tuan@example.com", "plan": "Max"})
+rows = {a["id"]: a for a in P.view(mi, "anthropic-cli")}
+check("the Models page gets them on the account's row", rows["acc_i"].get("email") == "tuan@example.com"
+      and rows["acc_i"].get("plan") == "Max" and "email" not in rows["main"], rows)
+(fi / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "tuan@example.com",
+                                                              "planDisplayName": "<script>"}}), encoding="utf-8")
+check("a plan name that is not a plain name is dropped", P.identity("anthropic-cli", "acc_i")["plan"] == "")
+P.add(mi, "anthropic-cli", "acc_out", "Chưa đăng nhập")
+check("an account that is not signed in carries no identity",
+      "email" not in {a["id"]: a for a in P.view(mi, "anthropic-cli")}["acc_out"])
+P.add(mi, "openai-oauth", "acc_j", "Plus phụ")
+fj = P.home("openai-oauth", "acc_j")
+claims = {"email": "plus@example.com", "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}}
+idt = "x." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".y"
+(fj / "auth.json").write_text(json.dumps({"tokens": {"access_token": "a", "id_token": idt}}), encoding="utf-8")
+ij = P.identity("openai-oauth", "acc_j")
+check("an extra ChatGPT account's e-mail and plan come from its own sign-in", ij["email"] == "plus@example.com"
+      and ij["plan"].lower() == "plus", ij)
+(fj / "auth.json").write_text("not json", encoding="utf-8")
+check("an unreadable folder gives an unknown identity, not an error",
+      P.identity("openai-oauth", "acc_j") == {"email": "", "plan": ""})
 
 print()
 if _fails:

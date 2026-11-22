@@ -29,6 +29,8 @@ import limit_learner
 import localefmt
 import vision_input
 import steer_inbox   # 0.206.0: messages the owner sends while a turn runs
+import tool_result_reuse   # 2026-11-17: repeated results become references, JSON compact
+import section_select   # 2026-11-18: the turn's request, for choosing the parts of a long skill
 
 
 TEAM_REQUEST_OBSERVER = contextvars.ContextVar("team_request_observer", default=None)
@@ -906,7 +908,9 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/compl
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 # Groq đổi tên model khá nhanh (model cũ bị deprecate rồi gỡ). Để một chỗ duy nhất, và
 # picker vẫn nạp danh sách LIVE từ /openai/v1/models nên mặc định này chỉ là lưới an toàn.
-GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+# Groq shut llama-3.3-70b-versatile down on 16/08/2026 (its 404 "does not exist" broke every turn that relied on the
+# default); openai/gpt-oss-120b is the replacement Groq names.
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
 
 # DeepSeek (endpoint OpenAI-compatible). The picker loads the LIVE list from /models; this
 # default is only the safety net. `deepseek-chat` and `deepseek-reasoner` were retired on
@@ -1117,11 +1121,27 @@ def _thinking_rejected(status, body_text):
     return "reasoning_content" in low or "thinking" in low
 
 
+# "gemini-2.5-flash" -> ("2", "5"), "gemini-4-argon" -> ("4", None).
+_GEMINI_VERSION = re.compile(r"(?:^|/)gemini-(\d+)(?:\.(\d+))?(?![\d.])")
+
+
 def _gemini_is_reasoning(model):
-    """Gemini: model 'thinking' (2.5 trở lên) nhận reasoning_effort qua endpoint OpenAI-compat.
-    Model cũ (1.5 / 2.0-flash không thinking) → KHÔNG gửi để tránh 400."""
+    """True when a Gemini model takes `reasoning_effort` on the OpenAI-compatible endpoint.
+
+    Every Gemini from 2.5 on thinks. The old check listed versions by hand ("2.5", "gemini-3"),
+    so Gemini 4 (Hydrogen, Argon, Carbon) was read as a model that cannot think: Javis never sent
+    the Effort level, and the slider silently did nothing on those models. Compare the version
+    number instead, so the next family is covered too. Only 1.x and 2.0 stay out (they answer
+    400 to the field), plus models that carry no Gemini version at all (gemma, learnlm).
+    """
     m = (model or "").lower()
-    return "2.5" in m or "gemini-3" in m or "thinking" in m
+    if "thinking" in m:
+        return True
+    v = _GEMINI_VERSION.search(m)
+    if v:
+        return (int(v.group(1)), int(v.group(2) or 0)) >= (2, 5)
+    # Moving aliases such as "gemini-flash-latest" always point at a current, thinking model.
+    return m.rsplit("/", 1)[-1].startswith("gemini-") and m.endswith("-latest")
 
 
 # ── Ollama (Local): its OWN thinking level, not the shared Effort button (0.95.1) ─────────────────
@@ -1755,9 +1775,19 @@ def _codex_input(messages):
 
 
 async def openai_responses_stream(access_token, account_id, model, messages, reasoning="off"):
-    """ChatGPT plan (OAuth) through the Codex Responses backend; Fast mode with one retry (0.164.0)."""
-    async for ev in _fast_retry("openai-oauth", fast_mode.current(), lambda fast: _openai_responses_stream_once(
-            access_token, account_id, model, messages, reasoning, fast)):
+    """ChatGPT plan through Codex Responses; chatbot calls rotate plan accounts.
+
+    Rotation is scoped to the trusted chatbot turn context. Owner turns and
+    single-account installations keep precisely the existing behavior.
+    """
+    import bot_oauth_rotation
+
+    async def one(token, aid):
+        async for ev in _fast_retry("openai-oauth", fast_mode.current(), lambda fast: _openai_responses_stream_once(
+                token, aid, model, messages, reasoning, fast)):
+            yield ev
+
+    async for ev in bot_oauth_rotation.stream(one, access_token, account_id):
         yield ev
 
 
@@ -1853,6 +1883,19 @@ async def _openai_responses_stream_once(access_token, account_id, model, message
 # ============================================================
 # MCP đa-model - vòng tool-calling để model API/OAuth dùng MCP của Javis (qua mcp_client)
 # ============================================================
+async def _call_tool_for_model(mcp_route, fn, args):
+    """One tool call whose result a MODEL reads next. The hub shapes a connection's result for that reader
+    (tool_result_shaper): a large one is stored whole and replaced by a view with a reference, so the cut below
+    no longer has anything to cut. Internal callers of `call_route` keep getting the untouched result."""
+    import mcp_client
+    try:
+        import tool_result_shaper
+    except Exception:  # noqa: BLE001 - never let an optimisation stop a tool call
+        return await mcp_client.call_route(mcp_route, fn, args)
+    with tool_result_shaper.for_model():
+        return await mcp_client.call_route(mcp_route, fn, args)
+
+
 def _clip_tool_result(result, max_chars: int = 0, head_ratio: float = 0.6, ten: str = "") -> str:
     """Cắt kết quả tool quá dài kiểu head+tail KÈM marker, thay cho hard-cut `[:max]`.
     Tail của kết quả MCP (POS/Ads) hay chứa total/summary/pagination → cắt cụt đầu là
@@ -1875,6 +1918,29 @@ def _clip_tool_result(result, max_chars: int = 0, head_ratio: float = 0.6, ten: 
     return (text[:head_n]
             + f"\n\n… [KẾT QUẢ TOOL BỊ CẮT - bỏ {omitted:,} ký tự giữa / tổng {len(text):,}] …\n\n"
             + text[-tail_n:])
+
+
+def _note_question(messages) -> None:
+    """Remember the request of this turn (the last user message) for section_select, which picks the parts of a long
+    skill this request needs. Text parts only; nothing when there is no user message."""
+    for m in reversed(messages or []):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, list):
+            c = " ".join(str(b.get("text") or "") for b in c
+                         if isinstance(b, dict) and b.get("type") in ("text", "input_text"))
+        if isinstance(c, str) and c.strip():
+            section_select.QUESTION.set(c[-2000:])
+        return
+
+
+def _result_text_for_model(result, fn, args, reuse) -> str:
+    """The text a model gets for one tool result in the tool loop: compact JSON first (so the cut below keeps more),
+    then the usual cut, then a reference instead of a byte-identical repeat (tool_result_reuse)."""
+    fn = fn or ""
+    text = _clip_tool_result(tool_result_reuse.compact_json(str(result), fn), ten=fn)
+    return reuse.text_for(fn, args, text) if reuse is not None else text
 
 
 def _mcp_to_openai_tools(mcp_tools):
@@ -2187,7 +2253,8 @@ async def schedule_cancel_gateway(messages, mcp_tools, mcp_route):
     if not _schedule_cancel_request(messages):
         return None
     names = {t.get("fn") for t in (mcp_tools or [])}
-    if "javis_schedule" not in names:
+    # Lazy tier on: javis_schedule is hidden behind javis_run_tool, and call_route still reaches it.
+    if "javis_schedule" not in names and "javis_run_tool" not in names:
         return {
             "handled": False,
             "error": "javis_schedule không có trong MCP của phiên",
@@ -2226,6 +2293,83 @@ async def schedule_cancel_gateway(messages, mcp_tools, mcp_route):
     }
 
 
+# ── Gọn kết quả tool CŨ khi một lượt chạy dài (05/11/2026) ──
+# Trần vòng của chủ lên 500 thì bức tường kế tiếp của việc dài (dựng video, điền cả trăm dòng
+# sheet) là NGỮ CẢNH: mỗi vòng chở lại toàn bộ kết quả tool từ đầu lượt, tới vòng vài chục là vượt
+# cửa sổ của model (lỗi quá hạn mức giữa chừng) và mỗi vòng đắt dần. Model chỉ cần nguyên văn các
+# kết quả GẦN ĐÂY; kết quả cũ giữ phần đầu là đủ nhớ đã làm gì. Nên khi tổng kết quả tool vượt
+# ngân sách, các kết quả cũ (trừ tối đa GON_GIU_MOI cái mới nhất) bị rút về đoạn đầu kèm dòng báo, tới khi
+# tổng còn dưới 60% ngân sách - gọn một mạch để bộ đệm prompt (prompt cache) không vỡ mỗi vòng.
+# Chỉnh bằng JAVIS_TOOL_LOOP_BUDGET_CHARS (mặc định 200.000 ký tự, 0 = tắt).
+GON_NGAN_SACH = 200_000
+GON_GIU_MOI = 8
+GON_DAU = 1200
+_GON_DAU_HIEU = "[Javis đã rút gọn kết quả tool cũ này"
+
+
+def _gon_ngan_sach() -> int:
+    try:
+        n = int(os.getenv("JAVIS_TOOL_LOOP_BUDGET_CHARS", str(GON_NGAN_SACH)))
+    except (TypeError, ValueError):
+        return GON_NGAN_SACH
+    return max(0, n)
+
+
+def _o_ket_qua_tool(hoi_thoai) -> list:
+    """Các ô (dict, khoá) đang chứa kết quả tool dạng chuỗi, cũ trước mới sau, cho cả ba định dạng:
+    Chat Completions (role=tool), Responses (function_call_output), Anthropic (khối tool_result)."""
+    o = []
+    for m in hoi_thoai or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "tool" and isinstance(m.get("content"), str):
+            o.append((m, "content"))
+        elif m.get("type") == "function_call_output" and isinstance(m.get("output"), str):
+            o.append((m, "output"))
+        elif m.get("role") == "user" and isinstance(m.get("content"), list):
+            for b in m["content"]:
+                if isinstance(b, dict) and b.get("type") == "tool_result" and isinstance(b.get("content"), str):
+                    o.append((b, "content"))
+    return o
+
+
+def _gon_ket_qua_cu(hoi_thoai, ngan_sach: int | None = None) -> int:
+    """Rút gọn tại chỗ kết quả tool cũ khi tổng vượt ngân sách. Trả số ô đã rút gọn."""
+    ngan_sach = _gon_ngan_sach() if ngan_sach is None else ngan_sach
+    if ngan_sach <= 0:
+        return 0
+    o = _o_ket_qua_tool(hoi_thoai)
+    tong = sum(len(d[k]) for d, k in o)
+    if tong <= ngan_sach:
+        return 0
+    dich = int(ngan_sach * 0.6)
+    # Giữ nguyên văn tối đa GON_GIU_MOI kết quả mới nhất, nhưng chỉ chừng nào chúng còn vừa nửa
+    # ngân sách (ít nhất 2): tám lần đọc file 60.000 ký tự liền nhau thì giữ cả tám là vẫn tràn.
+    giu, cong = 0, 0
+    for d, k in reversed(o):
+        if giu >= GON_GIU_MOI or (giu >= 2 and cong + len(d[k]) > ngan_sach // 2):
+            break
+        giu += 1
+        cong += len(d[k])
+    da_gon = 0
+    for d, k in o[:len(o) - giu]:
+        if tong <= dich:
+            break
+        cu = d[k]
+        if len(cu) <= GON_DAU * 2 or _GON_DAU_HIEU in cu:
+            continue
+        # A stored result keeps its reference in the first lines, so the model reads it back instead of calling
+        # the source again (a second call is slow, and for a tool that acts it would act twice).
+        cach_lay_lai = ("Cần lại thì đọc bằng javis_query(ref=...) với ref ở trên, đừng gọi lại tool nguồn."
+                        if "javis_stored_result" in cu[:GON_DAU] else "Cần lại thì gọi lại tool.")
+        moi = (cu[:GON_DAU] + f"\n\n… {_GON_DAU_HIEU} để lượt dài không tràn ngữ cảnh: bỏ "
+               f"{len(cu) - GON_DAU:,} ký tự. {cach_lay_lai}] …")
+        tong -= len(cu) - len(moi)
+        d[k] = moi
+        da_gon += 1
+    return da_gon
+
+
 async def _cc_tool_loop(url, headers, model, messages, mcp_tools, mcp_route, reasoning_extra, label,
                         cache_system=False, thinking_fallback=None):
     """Vòng Chat Completions + tool (OpenAI/OpenRouter). Non-stream từng vòng; yield tool_call + text cuối.
@@ -2246,6 +2390,8 @@ async def _cc_tool_loop(url, headers, model, messages, mcp_tools, mcp_route, rea
     usage_in = usage_out = 0
     thinking_on = thinking_fallback is not None
     guard = _LapGuard()   # phanh chống kẹt vòng lặp (xem _LapGuard)
+    reuse = tool_result_reuse.RepeatResults()   # identical repeated results become references
+    _note_question(messages)
     # Chỉ chờ cửa sổ hạn mức MỘT lần mỗi lượt: chờ hai lần là người dùng ngồi nhìn màn hình
     # đứng im nửa phút mà không hiểu chuyện gì.
     waited_for_window = False
@@ -2314,6 +2460,8 @@ async def _cc_tool_loop(url, headers, model, messages, mcp_tools, mcp_route, rea
     _n_vong = _max_tool_rounds()
     da_hien = False   # đã nhả chữ xem trước ở vòng nào chưa (để chèn dòng trống giữa hai vòng)
     for _vong in range(_n_vong):
+        _gon_ket_qua_cu(msgs)
+        reuse.after_trim()
         payload = {"model": model, "messages": msgs, "stream": False}
         # Bỏ hẳn khoá "tools" khi rỗng: vài endpoint OpenAI-compat từ chối mảng rỗng, và
         # nhánh cứu hộ ở dưới (model vấp cú pháp gọi tool) dựa vào đúng chỗ này.
@@ -2443,12 +2591,15 @@ async def _cc_tool_loop(url, headers, model, messages, mcp_tools, mcp_route, rea
                     args = {}
                 if _schedule_tool_allowed(messages, fn, args):
                     yield {"type": "tool_call", "name": fn, "input": args}
-                    result = await mcp_client.call_route(mcp_route, fn, args)
+                    result = await _call_tool_for_model(mcp_route, fn, args)
                 else:
                     result = _schedule_tool_blocked_result()
-                msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": _clip_tool_result(result, ten=fn)})
+                msgs.append({"role": "tool", "tool_call_id": tc.get("id"),
+                             "content": _result_text_for_model(result, fn, args, reuse)})
+                reuse.remember(fn, args, msgs[-1], "content")
             guard.ghi([((tc.get("function") or {}).get("name"),
-                        (tc.get("function") or {}).get("arguments") or "") for tc in tcs])
+                        (tc.get("function") or {}).get("arguments") or "") for tc in tcs],
+                      [m.get("content") for m in msgs[-len(tcs):]])
             nhac = guard.loi_nhac() + _nhac_sap_het(_vong, _n_vong)
             if nhac:
                 msgs[-1]["content"] += nhac   # nối vào kết quả tool cuối - chỗ chắc chắn model đọc
@@ -2502,16 +2653,29 @@ async def _cc_tool_loop(url, headers, model, messages, mcp_tools, mcp_route, rea
 # (đọc vài file, tra vài nguồn, ghi vài file là hết 8 vòng - người dùng báo hoài, 27/08),
 # trong khi ca kẹt thật thì đặc điểm không phải "nhiều vòng" mà là "lặp Y HỆT": gọi lại
 # đúng tool với đúng tham số hết vòng này sang vòng khác. Nên từ 0.47.1 phanh chính là
-# _LapGuard (soi đúng bệnh, cắt sớm hơn nhiều so với 8), còn trần đếm số chỉ là lưới đỡ
-# xa: mặc định 30, kẹp 1-120, chỉnh bằng JAVIS_MAX_TOOL_ROUNDS.
+# _LapGuard (soi đúng bệnh, cắt sớm hơn nhiều so với 8), còn trần đếm số chỉ là lưới đỡ xa.
 #
-# Phiên Coding (0.256.0) có trần RIÊNG, mặc định 150, kẹp 1-500, chỉnh bằng
-# JAVIS_MAX_TOOL_ROUNDS_CODING: sửa một lỗi là đọc, sửa, chạy test, sửa lại, dễ quá 30 vòng mà
-# không hề kẹt. main bật cờ `_PHIEN_CODING` cho đúng lượt của phiên Coding (`chay_trong_phien_coding`).
+# Hai trần, theo AI ĐANG GIAO VIỆC:
+#   - VIỆC CỦA CHỦ (mọi khung chat của chủ, trang Coding, và từ bản này cả việc nền: task,
+#     loop, workflow, team): mặc định 500, kẹp 1-2000, 0 = không đặt trần (chỉ còn _LapGuard).
+#     Chỉnh bằng JAVIS_MAX_TOOL_ROUNDS_CODING (giữ tên cũ để máy đã đặt biến không bị đổi ý).
+#     Chủ repo chốt 05/11/2026: "khi họ cắm token vào phải làm được việc chứ ko bị giới hạn" -
+#     người dùng báo việc nền điền Google Sheet chạy hết 30 vòng rồi dừng, dựng video cũng vậy.
+#     Engine CLI (Claude Code, Codex) không có trần vòng nào, nên đổi bộ não sang API key mà bị
+#     cắt ở vòng 30 là phá lời hứa "đổi model không đổi năng lực".
+#   - BOT NÓI CHUYỆN VỚI KHÁCH và mọi lượt không rõ chủ (mặc định của cờ): 30, kẹp 1-120, chỉnh
+#     bằng JAVIS_MAX_TOOL_ROUNDS. Người lạ không được phép bắt Javis đốt hàng trăm vòng token.
+# Cờ `_PHIEN_CODING` (tên cũ, nghĩa nay là "lượt này là việc của chủ") do chỗ gọi bật bằng
+# `chay_trong_phien_coding`: main bật cho lượt chat của chủ, aux_engine bật cho việc nền có tool.
 _PHIEN_CODING: contextvars.ContextVar = contextvars.ContextVar("javis_phien_coding", default=False)
+TRAN_CHU_MAC_DINH = 500
+TRAN_CHU_TOI_DA = 2000
+KHONG_TRAN = 1_000_000      # biến = 0: không đặt trần, vòng chỉ dừng khi model chốt hoặc _LapGuard cắt
 CAT_KET_QUA_CODING = 60_000
 CAT_RONG = frozenset({"javis_read_file", "javis_terminal", "javis_process", "javis_search_files",
-                      "javis_edit_file", "javis_web_fetch", "javis_web_search", "javis_run_command"})
+                      "javis_edit_file", "javis_web_fetch", "javis_web_search", "javis_run_command",
+                      # pages its own answer by whole records and honours `max_chars` (tool_result_tools)
+                      "javis_query"})
 # Còn ngần này vòng thì nhắc model chốt việc, để lượt kết thúc bằng một bản tóm tắt chứ không bị
 # cắt ngang giữa chừng.
 NHAC_KHI_CON = 10
@@ -2520,10 +2684,12 @@ NHAC_KHI_CON = 10
 def _max_tool_rounds() -> int:
     if _PHIEN_CODING.get():
         try:
-            n = int(os.getenv("JAVIS_MAX_TOOL_ROUNDS_CODING", "150"))
+            n = int(os.getenv("JAVIS_MAX_TOOL_ROUNDS_CODING", str(TRAN_CHU_MAC_DINH)))
         except (TypeError, ValueError):
-            return 150
-        return max(1, min(n, 500))
+            return TRAN_CHU_MAC_DINH
+        if n <= 0:
+            return KHONG_TRAN
+        return min(n, TRAN_CHU_TOI_DA)
     try:
         n = int(os.getenv("JAVIS_MAX_TOOL_ROUNDS", "30"))
     except (TypeError, ValueError):
@@ -2541,7 +2707,8 @@ def _nhac_sap_het(vong: int, tong: int) -> str:
 
 
 async def chay_trong_phien_coding(tao_gen):
-    """Bọc một generator của vòng tool để mọi vòng bên trong thấy đây là phiên Coding.
+    """Bọc một generator của vòng tool để mọi vòng bên trong thấy đây là việc của chủ (trần vòng
+    của chủ, xem `_max_tool_rounds`). Tên giữ từ thời chỉ trang Coding dùng.
 
     Đặt cờ BÊN TRONG thân generator chứ không ở nơi gọi: cờ đi theo đúng task đang lặp qua
     generator, và hết lượt là trả về, không rò sang lượt sau của cùng kết nối WebSocket."""
@@ -2563,14 +2730,21 @@ def _het_vong_msg() -> str:
     """Chạm trần phải nói ĐƯỢC VIỆC CẦN LÀM. Bản cũ chỉ báo con số rồi im, người dùng không
     biết mình vừa mất gì hay chỉnh ở đâu."""
     n = _max_tool_rounds()
-    bien, tran = (("JAVIS_MAX_TOOL_ROUNDS_CODING", 500) if _PHIEN_CODING.get()
-                  else ("JAVIS_MAX_TOOL_ROUNDS", 120))
+    if _PHIEN_CODING.get():
+        return _c(f"\n\n⚠ Đã chạy hết {n} vòng gọi tool cho lượt này nên phải dừng, câu trả lời ở "
+                  f"trên có thể còn dở. Cách xử lý: nhắn \"làm tiếp\" để Javis chạy nốt phần còn lại, "
+                  f"hoặc nâng trần bằng biến môi trường JAVIS_MAX_TOOL_ROUNDS_CODING (tối đa "
+                  f"{TRAN_CHU_TOI_DA}, đặt 0 là không giới hạn) rồi khởi động lại Javis.",
+                  f"\n\n⚠ All {n} tool-call rounds for this turn were used, so it had to stop; the answer "
+                  f"above may be incomplete. To fix: reply \"continue\" so Javis finishes the rest, or "
+                  f"raise the limit with the environment variable JAVIS_MAX_TOOL_ROUNDS_CODING (up to "
+                  f"{TRAN_CHU_TOI_DA}, 0 means no limit) and restart Javis.")
     return _c(f"\n\n⚠ Đã chạy hết {n} vòng gọi tool cho lượt này nên phải dừng, câu trả lời ở "
               f"trên có thể còn dở. Cách xử lý: chia nhỏ yêu cầu thành từng bước, hoặc nâng trần "
-              f"bằng biến môi trường {bien} (tối đa {tran}) rồi khởi động lại Javis.",
+              f"bằng biến môi trường JAVIS_MAX_TOOL_ROUNDS (tối đa 120) rồi khởi động lại Javis.",
               f"\n\n⚠ All {n} tool-call rounds for this turn were used, so it had to stop; the answer "
               f"above may be incomplete. To fix: split the request into steps, or raise the limit "
-              f"with the environment variable {bien} (up to {tran}) and restart Javis.")
+              f"with the environment variable JAVIS_MAX_TOOL_ROUNDS (up to 120) and restart Javis.")
 
 
 class _LapGuard:
@@ -2578,28 +2752,77 @@ class _LapGuard:
     vòng khác. Đây mới là thứ trần vòng cũ sinh ra để chống, và soi đúng bệnh thì cắt được
     ở vòng thứ 5 thay vì bắt oan mọi việc nhiều bước ở vòng thứ 8.
 
-    Cách dùng (cả ba vòng tool dùng chung): mỗi vòng có tool_calls thì gọi `ghi(calls)` với
-    calls = [(tên tool, chuỗi tham số)] của vòng đó. Lặp y hệt lần thứ NHAC thì `loi_nhac()`
-    trả một câu để NỐI VÀO KẾT QUẢ TOOL cuối (chỗ duy nhất chắc chắn model đọc ở vòng sau,
-    và hợp lệ với cả ba định dạng hội thoại). Vẫn lặp tới lần thứ DUNG thì `ket()` = True,
-    vòng ngoài dừng hẳn bằng `_loi_ket_vong()`.
+    Cách dùng (cả ba vòng tool dùng chung): mỗi vòng có tool_calls thì gọi `ghi(calls, ket_qua)`
+    với calls = [(tên tool, chuỗi tham số)] của vòng đó và ket_qua = các kết quả tool cùng thứ tự
+    (không bắt buộc). Lặp y hệt lần thứ NHAC thì `loi_nhac()` trả một câu để NỐI VÀO KẾT QUẢ TOOL
+    cuối (chỗ duy nhất chắc chắn model đọc ở vòng sau, và hợp lệ với cả ba định dạng hội thoại).
+    Vẫn lặp tới lần thứ DUNG thì `ket()` = True, vòng ngoài dừng hẳn bằng `_loi_ket_vong()`.
 
     Chủ ý chỉ so KHỚP TUYỆT ĐỐI liên tiếp: đọc-sửa-đọc lại cùng file là ba vòng khác nhau
     (vòng giữa khác chữ ký) nên không bao giờ bị bắt oan; chỉ có gọi lại y nguyên - thứ chắc
-    chắn trả cùng kết quả - mới bị đếm."""
+    chắn trả cùng kết quả - mới bị đếm.
+
+    Từ khi việc của chủ được tới 500 vòng (05/11/2026) phanh này là tấm chắn chính, nên nó soi
+    thêm hai ca:
+      - THĂM DÒ có tiến triển: gọi y nguyên mà kết quả ĐỔI (hỏi trạng thái một job dựng video,
+        xem log đang chạy) là đang chờ việc thật, không phải kẹt. Không đếm vào DUNG, nhưng cũng
+        không cho chờ vô hạn: tới DUNG_THAM_DO lần liên tiếp thì dừng.
+      - VÒNG XOAY: A, B, A, B... (hoặc chu kỳ 3) mà kết quả không đổi. Trần vòng cũ (30) chặn ca
+        này hộ; trần 500 thì không, nên lặp đủ CHU_KY_LAP lượt là dừng."""
     NHAC = 3    # lặp y hệt vòng thứ 3 → nhắc thẳng vào kết quả tool
     DUNG = 5    # vẫn y hệt tới vòng thứ 5 → dừng lượt
+    DUNG_THAM_DO = 30   # gọi y nguyên mà kết quả cứ đổi: chờ việc thật, tối đa ngần này lần liên tiếp
+    CHU_KY_LAP = 4      # chu kỳ 2-3 vòng lặp y hệt (cả kết quả) đủ ngần này lượt → kẹt
 
     def __init__(self):
         self._sig = None
+        self._kq = None
         self.lap = 0
+        self.tham_do = 0
+        self._lich_su = []
 
-    def ghi(self, calls) -> None:
+    @staticmethod
+    def _bam(ket_qua) -> str:
+        if ket_qua is None:
+            return ""
+        import hashlib
+        return hashlib.sha1("\x00".join(str(k) for k in ket_qua).encode("utf-8", "replace")).hexdigest()
+
+    def ghi(self, calls, ket_qua=None) -> None:
         sig = json.dumps(sorted((str(n), str(a)) for n, a in calls), ensure_ascii=False)
-        self.lap = self.lap + 1 if sig == self._sig else 1
+        kq = self._bam(ket_qua)
+        if sig == self._sig:
+            if ket_qua is not None and self._kq is not None and kq != self._kq:
+                # Cùng lời gọi, kết quả khác: đang thăm dò một việc còn chạy.
+                self.tham_do += 1
+                self.lap = 1
+            else:
+                self.lap += 1
+        else:
+            self.lap = 1
+            self.tham_do = 0
         self._sig = sig
+        self._kq = kq if ket_qua is not None else None
+        self._lich_su.append(sig + "|" + kq)
+        del self._lich_su[:-12]
+
+    def _xoay_vong(self) -> bool:
+        h = self._lich_su
+        for chu_ky in (2, 3):
+            n = chu_ky * self.CHU_KY_LAP
+            if len(h) < n:
+                continue
+            duoi = h[-n:]
+            khoi = duoi[:chu_ky]
+            if len(set(khoi)) > 1 and all(duoi[i] == khoi[i % chu_ky] for i in range(n)):
+                return True
+        return False
 
     def loi_nhac(self) -> str:
+        if self.tham_do == self.DUNG_THAM_DO - 5:
+            return (f"\n\n⚠ [Javis] Bạn đã gọi lại đúng lời gọi này {self.tham_do} lần để chờ một việc "
+                    "đang chạy. Nếu việc còn lâu, hãy chuyển nó chạy nền (javis_job op=then) rồi trả lời "
+                    "người dùng thay vì ngồi chờ tiếp.")
         if self.lap != self.NHAC:
             return ""
         return (f"\n\n⚠ [Javis] Bạn vừa gọi đúng tool này với đúng tham số này {self.NHAC} vòng "
@@ -2607,16 +2830,16 @@ class _LapGuard:
                 "đã có, hoặc đổi tham số nếu thật sự cần dữ liệu khác.")
 
     def ket(self) -> bool:
-        return self.lap >= self.DUNG
+        return self.lap >= self.DUNG or self.tham_do >= self.DUNG_THAM_DO or self._xoay_vong()
 
 
 def _loi_ket_vong() -> str:
-    return _c(f"\n\n⚠ Model gọi lại cùng tool với cùng tham số {_LapGuard.DUNG} vòng liên tiếp "
-              "(kẹt vòng lặp) nên Javis dừng lượt này để không đốt token vô ích. Câu trả lời ở "
-              "trên có thể còn dở - thử hỏi lại, nói rõ hơn yêu cầu, hoặc đổi model ở trang Models.",
-              f"\n\n⚠ The model called the same tool with the same arguments {_LapGuard.DUNG} rounds in a row "
-              "(stuck in a loop), so Javis stopped this turn to avoid burning tokens. The answer "
-              "above may be incomplete - ask again, state the request more clearly, or switch model on the Models page.")
+    return _c("\n\n⚠ Model cứ gọi lại cùng tool với cùng tham số mà không tiến triển (kẹt vòng lặp) "
+              "nên Javis dừng lượt này để không đốt token vô ích. Câu trả lời ở trên có thể còn dở - "
+              "nhắn \"làm tiếp\", nói rõ hơn yêu cầu, hoặc đổi model ở trang Models.",
+              "\n\n⚠ The model kept calling the same tool with the same arguments without making progress "
+              "(stuck in a loop), so Javis stopped this turn to avoid burning tokens. The answer above may "
+              "be incomplete - reply \"continue\", state the request more clearly, or switch model on the Models page.")
 
 
 async def openai_chat_with_mcp(api_key, model, messages, reasoning, mcp_tools, mcp_route):
@@ -2695,6 +2918,19 @@ async def openrouter_chat_with_mcp(api_key, model, messages, reasoning, mcp_tool
 
 
 async def responses_with_mcp(access_token, account_id, model, messages, reasoning, mcp_tools, mcp_route):
+    """Use account rotation for bot tool loops only; preserve the hub's exact permissions."""
+    import bot_oauth_rotation
+
+    async def one(token, aid):
+        async for ev in _responses_with_mcp_account(
+                token, aid, model, messages, reasoning, mcp_tools, mcp_route):
+            yield ev
+
+    async for ev in bot_oauth_rotation.stream(one, access_token, account_id):
+        yield ev
+
+
+async def _responses_with_mcp_account(access_token, account_id, model, messages, reasoning, mcp_tools, mcp_route):
     """ChatGPT OAuth (Codex Responses API) + tool MCP. EXPERIMENTAL (backend Codex).
 
     "EXPERIMENTAL" ở đây KHÔNG phải lời rào đón: tới 0.24.0 hàm này chưa từng được gọi từ đâu
@@ -2726,8 +2962,12 @@ async def responses_with_mcp(access_token, account_id, model, messages, reasonin
     async with httpx.AsyncClient(timeout=timeout) as client:
         usage_in = usage_out = 0
         guard = _LapGuard()   # phanh chống kẹt vòng lặp (xem _LapGuard)
+        reuse = tool_result_reuse.RepeatResults()   # identical repeated results become references
+        _note_question(messages)
         _n_vong = _max_tool_rounds()
         for _vong in range(_n_vong):
+            _gon_ket_qua_cu(items)
+            reuse.after_trim()
             # Backend Codex BẮT BUỘC stream=True → đọc SSE, lấy response.completed.output để chạy vòng tool
             payload = {"model": model, "instructions": instructions, "input": items,
                        "tools": tools, "stream": True, "store": False}
@@ -2837,11 +3077,14 @@ async def responses_with_mcp(access_token, account_id, model, messages, reasonin
                         args = {}
                     if _schedule_tool_allowed(messages, fc.get("name"), args):
                         yield {"type": "tool_call", "name": fc.get("name"), "input": args}
-                        result = await mcp_client.call_route(mcp_route, fc.get("name"), args)
+                        result = await _call_tool_for_model(mcp_route, fc.get("name"), args)
                     else:
                         result = _schedule_tool_blocked_result()
-                    items.append({"type": "function_call_output", "call_id": fc.get("call_id"), "output": _clip_tool_result(result, ten=fc.get("name") or "")})
-                guard.ghi([(fc.get("name"), fc.get("arguments") or "") for fc in fcalls])
+                    items.append({"type": "function_call_output", "call_id": fc.get("call_id"),
+                                  "output": _result_text_for_model(result, fc.get("name"), args, reuse)})
+                    reuse.remember(fc.get("name") or "", args, items[-1], "output")
+                guard.ghi([(fc.get("name"), fc.get("arguments") or "") for fc in fcalls],
+                          [it.get("output") for it in items[-len(fcalls):]])
                 nhac = guard.loi_nhac() + _nhac_sap_het(_vong, _n_vong)
                 if nhac:
                     items[-1]["output"] += nhac   # nối vào kết quả tool cuối - chỗ chắc chắn model đọc
@@ -2908,9 +3151,13 @@ async def anthropic_chat_with_mcp(api_key, model, messages, reasoning, mcp_tools
     async with httpx.AsyncClient(timeout=timeout) as client:
         usage_in = usage_out = 0
         guard = _LapGuard()   # phanh chống kẹt vòng lặp (xem _LapGuard)
+        reuse = tool_result_reuse.RepeatResults()   # identical repeated results become references
+        _note_question(messages)
         _n_vong = _max_tool_rounds()
         da_hien = False   # 0.438.5: đã nhả chữ xem trước ở vòng nào chưa
         for _vong in range(_n_vong):
+            _gon_ket_qua_cu(conv)
+            reuse.after_trim()
             # Cache theo lối không-mutate (system dựng mới mỗi vòng, conv copy-khi-đánh-dấu)
             # → marker KHÔNG tích luỹ qua vòng tool, tối đa 3 breakpoint/request (trần API là 4).
             # Vòng tool là nơi cache lãi nhất: mỗi vòng 1 request chở lại nguyên system+tools+conv.
@@ -2985,13 +3232,15 @@ async def anthropic_chat_with_mcp(api_key, model, messages, reasoning, mcp_tools
                     args = tu.get("input") or {}
                     if _schedule_tool_allowed(messages, tu.get("name"), args):
                         yield {"type": "tool_call", "name": tu.get("name"), "input": args}
-                        res = await mcp_client.call_route(mcp_route, tu.get("name"), args)
+                        res = await _call_tool_for_model(mcp_route, tu.get("name"), args)
                     else:
                         res = _schedule_tool_blocked_result()
                     results.append({"type": "tool_result", "tool_use_id": tu.get("id"),
-                                    "content": _clip_tool_result(res, ten=tu.get("name") or "")})
+                                    "content": _result_text_for_model(res, tu.get("name"), args, reuse)})
+                    reuse.remember(tu.get("name") or "", args, results[-1], "content")
                 guard.ghi([(tu.get("name"), json.dumps(tu.get("input") or {}, sort_keys=True,
-                                                       ensure_ascii=False)) for tu in tool_uses])
+                                                       ensure_ascii=False)) for tu in tool_uses],
+                          [r.get("content") for r in results])
                 nhac = guard.loi_nhac() + _nhac_sap_het(_vong, _n_vong)
                 if nhac:
                     results[-1]["content"] += nhac   # nối vào kết quả tool cuối - chỗ chắc chắn model đọc
