@@ -138,6 +138,25 @@
   // What the menu offers for one conversation, in order. Pure data so node can test it; conversations.js draws it and
   // runs the actions. Item: {act, icon, key (i18n), sub (second line), on (true/false = a checkable row), more (opens a
   // second view)}; {sep: true, key} is a divider with an optional small heading.
+  // What the conversation's platform lets Javis do (0.447.0, owner: "xoá, block, view profile" like Messenger's own
+  // menu). Same table as server/conversation_actions.py `_CAN`: Messenger blocks and shows a profile, Instagram shows a
+  // profile, a comment thread is deleted on Facebook or Instagram, a Zalo personal chat does all three.
+  function chatKind(c) {
+    var x = c || {}, id = String(x.external_chat_id || "");
+    if (x.channel === "messenger") return id.indexOf("cmt:") === 0 ? "fb_comment" : id.indexOf("igc:") === 0 ? "ig_comment"
+      : id.indexOf("ig:") === 0 ? "ig_dm" : "messenger_dm";
+    if (x.channel === "zalo_personal") return x.chat_type === "group" ? "zalo_group" : "zalo_private";
+    if (x.channel === "threads") return "threads_comment";
+    return "";
+  }
+  // "block" here means blocked ON THE PLATFORM; every other chat is still offered Block, done in Javis only (owner,
+  // 2026-11-20: "chặn thì ở các kênh luôn"). "leave" leaves a Zalo group (owner, same day: "nút rời nhóm ở zalo").
+  var CAN = { messenger_dm: ["profile", "block"], ig_dm: ["profile"], fb_comment: ["delete_remote"], ig_comment: ["delete_remote"],
+              zalo_private: ["profile", "block", "delete_remote"], zalo_group: ["delete_remote", "leave"],
+              // Threads (0.448.0): only the author can delete a reply, so Delete hides it under the post.
+              threads_comment: ["profile", "delete_remote"] };
+  function platformActs(c) { return CAN[chatKind(c)] || []; }
+
   function rowMenuItems(c) {
     var x = c || {}, items = [];
     items.push(x.unread_count > 0 ? { act: "read", icon: "mail-open", key: "ht.rm_read" }
@@ -161,8 +180,27 @@
     items.push({ sep: true });
     items.push(x.hidden ? { act: "unhide", icon: "eye", key: "ht.rm_unhide" }
                         : { act: "hide", icon: "eye-off", key: "ht.rm_hide", sub: tt("ht.rm_hide_sub") });
+    var can = platformActs(x);
+    if (can.indexOf("profile") >= 0) items.push({ act: "profile", icon: "circle-user", key: "ht.rm_profile" });
+    var k = chatKind(x), meta = x.metadata || {};
+    // Block on every channel: on the platform where it allows it, else in Javis only (the second line says which).
+    if (meta.blocked) items.push({ act: "unblock", icon: "circle-check", key: "ht.rm_unblock" });
+    else items.push({ act: "block", icon: "ban", key: "ht.rm_block",
+                      sub: tt(can.indexOf("block") < 0 ? "ht.rm_block_sub_local" : k === "messenger_dm" ? "ht.rm_block_sub_fb" : "ht.rm_block_sub_zalo") });
+    if (can.indexOf("leave") >= 0 && !meta.left)
+      items.push({ act: "leave", icon: "log-out", key: "ht.rm_leave", danger: true, sub: tt("ht.rm_leave_sub") });
+    // Delete is always there: where the platform allows it the chat (or the comment) goes there too, else only in Javis.
+    items.push({ act: "delete", icon: "trash-2", key: "ht.rm_delete", danger: true,
+                 sub: tt(k === "fb_comment" || k === "ig_comment" ? "ht.rm_delete_sub_cmt" : k === "threads_comment" ? "ht.rm_delete_sub_th" :
+                   can.indexOf("delete_remote") >= 0 ?
+                   "ht.rm_delete_sub_zalo" : "ht.rm_delete_sub_local") });
     return items;
   }
+
+  // The Info panel's own actions (owner, 2026-11-21: "xoá, rời nhóm, chặn ngay trong phần thông tin, giống menu sidebar"):
+  // the same rows as the "..." menu, so the two never disagree on what a chat allows or what each row says.
+  var INFO_ACTS = ["block", "unblock", "leave", "delete"];
+  function infoActItems(c) { return rowMenuItems(c).filter(function (it) { return INFO_ACTS.indexOf(it.act) >= 0; }); }
 
   // HTML of the menu's rows. `icon(name)` draws a Lucide icon (window.ic); `done` is the act that just finished and
   // shows its confirmation instead of its label (copy: "Copied").
@@ -173,7 +211,7 @@
       var checkable = typeof it.on === "boolean";
       var role = checkable ? (it.radio ? "menuitemradio" : "menuitemcheckbox") : "menuitem";
       var ok = done && done === it.act;
-      return '<button type="button" class="ht-rm-it' + (it.on ? " on" : "") + (ok ? " done" : "") + '" role="' + role + '" data-act="' + esc(it.act) + '"' +
+      return '<button type="button" class="ht-rm-it' + (it.on ? " on" : "") + (ok ? " done" : "") + (it.danger ? " danger" : "") + '" role="' + role + '" data-act="' + esc(it.act) + '"' +
         (checkable ? ' aria-checked="' + it.on + '"' : "") + (it.more ? ' aria-haspopup="menu"' : "") + '>' +
         '<span class="ht-rm-ic">' + I(ok ? "check" : it.icon) + '</span>' +
         '<span class="ht-rm-t"><span>' + esc(tt(ok ? "ht.rm_copied" : it.key)) + '</span>' +
@@ -205,6 +243,6 @@
   window.JavisConvFilters = {
     emptyState: emptyState, sanitize: sanitize, load: load, save: save, activeCount: activeCount, query: query,
     tagChips: tagChips, tagChip: tagChip, tagColor: tagColor,
-    TAG_COLORS: TAG_COLORS, rowMenuItems: rowMenuItems, rowMenuHtml: rowMenuHtml, tagMenuHtml: tagMenuHtml, WHOS: WHOS,
+    TAG_COLORS: TAG_COLORS, rowMenuItems: rowMenuItems, infoActItems: infoActItems, rowMenuHtml: rowMenuHtml, chatKind: chatKind, platformActs: platformActs, tagMenuHtml: tagMenuHtml, WHOS: WHOS,
   };
 })();

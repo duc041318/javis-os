@@ -1,13 +1,15 @@
 <!-- translated-from: README.md sha256:2e10ad3d2a86 -->
 <div align="center">
 
-<img src="../../../dashboard/logo.svg" width="88" alt="Logo do Javis OS">
+<a href="https://javisos.com"><img src="../../assets/social-preview.png" width="100%" alt="Javis OS: Your AI Workforce. Never miss the best AI."></a>
 
 # Javis OS
 
-### Seu agente de IA self-hosted com um cérebro intercambiável e um Second Brain que fica mais inteligente a cada dia.
+### Sua equipe de IA. Nunca perca a melhor IA.
 
-Rode no seu notebook ou em uma VPS pequena. Converse com ele por voz. Conecte Claude, ChatGPT, Grok, Gemini ou qualquer um dos 12 provedores, mantenha todas as ferramentas quando trocar de um para outro e deixe ele trabalhar em segundo plano enquanto você dorme.
+O Javis OS transforma **Claude, ChatGPT, Gemini, Grok** e os modelos que você escolher em uma equipe que trabalha 24/7 na sua própria máquina ou servidor. Cada colega tem um papel, compartilha a mesma memória e as mesmas ferramentas, e continua trabalhando em segundo plano. Quando sai um modelo melhor, você troca e mantém tudo o que eles aprenderam.
+
+**🌐 Site: [javisos.com](https://javisos.com)** · Código aberto · Self-hosted · 14 provedores de IA
 
 [![GitHub stars](https://img.shields.io/github/stars/blogminhquy/javis-os?style=flat&logo=github&label=stars)](https://github.com/blogminhquy/javis-os/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](../../../LICENSE)
@@ -117,7 +119,7 @@ O que você ganha com isso:
 | **Trabalho** | Responde e fica esperando | **Loops em segundo plano, lembretes e uma fila de tarefas gerenciada pela IA** que te reportam os resultados |
 | **Interface** | Uma caixa de chat | Dashboard + grafo de conhecimento + **voz sem usar as mãos** + Telegram, Slack, WhatsApp, Zalo + uma CLI |
 | **Seu trabalho** | Fica nos servidores do fornecedor, no formato do fornecedor | **Arquivos simples na sua máquina**: histórico, memória, skills, agents e workflows passam para qualquer modelo novo |
-| **Deploy** | A nuvem de outra pessoa | **Self-hosted**: [Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) em um clique, Docker ou qualquer VPS |
+| **Deploy** | A nuvem de outra pessoa | **Self-hosted**: [Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) em um clique, Docker ou qualquer VPS |
 
 > 💡 **A filosofia: a capacidade mora no Javis, não no modelo.** Todo cérebro recebe a mesma caixa de ferramentas por meio de um único hub de conexões compartilhado (o MCP Hub). Trocar do Claude para o Gemini não te custa nada além do acesso ao shell, que só os motores CLI têm.
 
@@ -247,7 +249,7 @@ flowchart LR
 <details open>
 <summary><b>Opção 1: Hostinger Docker Manager (domínio + HTTPS, em um clique)</b></summary>
 
-> 🛒 **Ainda não tem VPS?** [Contrate uma VPS da Hostinger aqui](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN). Ela já vem com o Docker Manager, então o Javis instala em um clique. Quando estiver pronta, volte aos passos abaixo.
+> 🛒 **Ainda não tem VPS?** [Contrate uma VPS da Hostinger aqui](https://www.hostinger.com?REFERRALCODE=JAVISOS). Ela já vem com o Docker Manager, então o Javis instala em um clique. Quando estiver pronta, volte aos passos abaixo.
 
 VPS da Hostinger → **Docker Manager → Compose → URL** → cole o arquivo da Hostinger e clique em **Deploy**:
 
@@ -275,7 +277,7 @@ Detalhes e solução de problemas: [DEPLOY.en.md](../../../DEPLOY.en.md).
 <details>
 <summary><b>Opção 2: Docker em qualquer VPS (sem precisar clonar)</b></summary>
 
-> 🛒 **Precisa de uma VPS?** Uma [VPS da Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) também roda esta opção.
+> 🛒 **Precisa de uma VPS?** Uma [VPS da Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS) também roda esta opção.
 
 ```bash
 # Docker required (don't have it?  curl -fsSL https://get.docker.com | sh)
@@ -507,5 +509,6 @@ Não pode doar? Usar o Javis, mandar feedback ou abrir um pull request também c
 
 <div align="center">
 <br>
+<b><a href="https://javisos.com">javisos.com</a></b><br>
 Feito com ☕ no Vietnã por <b><a href="https://minhquy.vn">Minh Quý</a></b>
 </div>

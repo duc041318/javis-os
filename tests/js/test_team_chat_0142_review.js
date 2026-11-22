@@ -79,7 +79,8 @@ check("timeout: nói số phút, có Đổi model và Thử lại", h.includes("
 h = row({ agent_key: "ag_lan", reason: "auth", detail: "token hết hạn" });
 check("lỗi đăng nhập: mở trang Models", h.includes('data-reply-act="models"') && h.includes(vi["teams.reply.why.auth"]), h);
 h = row({ agent_key: "ag_lan", reason: "cap", detail: "daily_turns" });
-check("hết lượt: mở giới hạn của nhóm", h.includes('data-reply-act="limits"'), h);
+// 17/11/2026: no limit numbers to open any more (the team tab has no Advanced, no daily cap): only Try again stays.
+check("hết lượt: không còn nút mở giới hạn, vẫn có Thử lại", !h.includes('data-reply-act="limits"') && h.includes("data-retry-key"), h);
 h = row({ agent_key: "__leader__", reason: "no_leader" });
 check("chưa có điều phối: dòng 'Điều phối ... chưa có ai trả lời' kèm Chọn điều phối và Thử lại",
   h.includes(vi["teams.reply.leader_slot"]) && h.includes('data-reply-act="leader"') && h.includes('data-retry-key="__leader__"'), h);
@@ -98,14 +99,16 @@ check("dòng chỗ trống đã giao cho điều phối: ẩn", h === "");
 const team = { team_id: "tm1", leader_key: "ag_lan", creator: { kind: "owner", you: true, name: "minhquy" },
   members: [{ agent_key: "ag_lan", slug: "lan", name: "Lan", status: "active", role: "leader" },
     { agent_key: "ag_m", slug: "m", name: "Minh", status: "active", role: "member" }] };
-check("đầu nhóm: 'Bạn + 2 cộng sự · Lan điều phối'", TM.headLine(team) === "Bạn + 2 cộng sự · Lan điều phối", TM.headLine(team));
+// 17/11/2026 (owner): "chữ điều phối đổi thành phó nhóm và người tạo ra nhóm mặc định là trưởng nhóm".
+check("đầu nhóm: 'Bạn + 2 cộng sự · Phó nhóm Lan'", TM.headLine(team) === "Bạn + 2 cộng sự · Phó nhóm Lan", TM.headLine(team));
 check("chưa có điều phối: nói rõ", TM.headLine(Object.assign({}, team, { leader_key: null })).includes(vi["teams.no_leader_short"]));
 const mh = TM.membersHtml(team, [], null);
 check("ngăn Nhóm: dòng Bạn (tên đăng nhập do server cấp) · Người tạo nhóm/quản lý, đứng đầu", mh.indexOf("Bạn (minhquy)") >= 0 &&
   mh.indexOf("Bạn (minhquy)") < mh.indexOf("Lan") && mh.includes(vi["teams.pick.you_role"]), mh.slice(0, 300));
-check("chữ 'trưởng nhóm' trên giao diện nhóm đổi thành 'điều phối'",
-  Object.keys(vi).filter((k) => k.indexOf("teams.") === 0 && /trưởng nhóm/i.test(vi[k])).length === 0 &&
-  Object.keys(en).filter((k) => k.indexOf("teams.") === 0 && /\blead\b/i.test(en[k])).length === 0);
+check("vai trong nhóm: cộng sự dẫn nhóm là 'phó nhóm', không còn chữ 'điều phối'; 'trưởng nhóm' chỉ để gọi bạn",
+  Object.keys(vi).filter((k) => k.indexOf("teams.") === 0 && /điều phối/i.test(vi[k])).length === 0 &&
+  Object.keys(en).filter((k) => k.indexOf("teams.") === 0 && /coordinat/i.test(en[k])).length === 0 &&
+  Object.keys(vi).filter((k) => k.indexOf("teams.") === 0 && /trưởng nhóm/i.test(vi[k])).sort().join() === "teams.lead_badge,teams.pick.owner_badge");
 
 // ───────────── hộp chọn kiểu Zalo ─────────────
 const roster = [

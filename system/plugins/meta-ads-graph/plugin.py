@@ -23,7 +23,9 @@ def _connected_id():
     except Exception:
         return None
     for c in mcp_store.list_connections():
-        if c.get("connector_id") == CONNECTOR_ID and oauth_mcp.status(c["id"]).get("connected"):
+        # A connection switched off on the Connections page is never used (2026-11-21).
+        if (c.get("connector_id") == CONNECTOR_ID and c.get("enabled", True)
+                and oauth_mcp.status(c["id"]).get("connected")):
             return c["id"]
     return None
 
@@ -59,6 +61,8 @@ async def _get(path, params, token):
 
 
 def _fmt(d):
+    from graph_output import sanitize_graph_output
+    d = sanitize_graph_output(d)
     if isinstance(d, dict) and d.get("error"):
         e = d["error"]
         return "ERROR: Facebook API: " + (e.get("message") if isinstance(e, dict) else str(e))

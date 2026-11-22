@@ -167,6 +167,12 @@ _THU_MUC_BIN_WINDOWS = (
     r"%USERPROFILE%\.local\bin",              # installer chính chủ của claude / grok / agy
     r"%LOCALAPPDATA%\Programs\antigravity",
     r"%LOCALAPPDATA%\Programs\grok",
+    # Where the official Windows installers really put them (seen on a clean windows-latest
+    # runner, 0.439.0): agy.exe under %LOCALAPPDATA%\agy\bin, grok.exe under ~\.grok\bin. Both
+    # only add themselves to the USER PATH in the registry, which a Javis started right after
+    # the install (setup wizard, "Open now") does not have yet.
+    r"%LOCALAPPDATA%\agy\bin",
+    r"%USERPROFILE%\.grok\bin",
     r"%LOCALAPPDATA%\Volta\bin",
     r"%USERPROFILE%\.bun\bin",
     r"%LOCALAPPDATA%\pnpm",
@@ -303,7 +309,123 @@ def tim_binary(ten: str) -> Optional[str]:
     return _binary_da_nho(ten)
 
 
+def _sdk_bundled_claude() -> Optional[str]:
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("claude_agent_sdk")
+        exe = Path(spec.origin).parent / "_bundled" / "claude.exe"
+        return str(exe) if exe.is_file() else None
+    except Exception:
+        return None
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def is_batch_script(path: str) -> bool:
+    """A .cmd/.bat file, which Windows runs through cmd.exe (PATHEXT may hand it back as `.CMD`)."""
+    return str(path or "").rstrip(". ").lower().endswith((".cmd", ".bat"))
+
+
+# A real Claude Code executable is tens of MB. The npm package also ships a tiny placeholder
+# `bin/claude.exe` that its postinstall replaces, so anything this small is not the CLI.
+_NATIVE_EXE_MIN_BYTES = 1 << 20
+_RX_SHIM_EXE = re.compile(r'%~?dp0%?[\\/]([^"\r\n%]*?claude[^"\\/\r\n%]*\.exe)', re.I)
+
+
+def native_claude_exe(cli: Optional[str]) -> Optional[str]:
+    """The native `claude.exe` to run instead of npm's `claude.cmd` shim on Windows, else `cli` unchanged.
+
+    claude-agent-sdk refuses to spawn a .cmd/.bat as the CLI (cmd.exe re-parses the command line,
+    so arguments can inject commands: the "BatBadBut" class). Javis handed the SDK whatever PATH
+    resolved, and `npm install -g` puts `claude.cmd` there, so once the SDK updated itself every
+    Claude turn on such a machine died with "Refusing to execute batch script" (owner, 2026-11-10).
+    The executable is nearly always on the machine already: recent npm packages ship it next to
+    the shim, and the native installer puts one in ~/.local/bin. Returns the shim itself when no
+    executable is found, so callers that spawn it directly keep working as before."""
+    if not cli or not _is_windows() or not is_batch_script(cli):
+        return cli
+    shim = Path(cli)
+    cands = []
+    try:
+        text = shim.read_text(encoding="utf-8", errors="ignore")[:8192]
+        for m in _RX_SHIM_EXE.finditer(text):
+            cands.append(shim.parent / m.group(1).replace("\\", "/"))
+    except Exception:
+        pass
+    pkg = shim.parent / "node_modules" / "@anthropic-ai"
+    cands += [pkg / "claude-code" / "bin" / "claude.exe",
+              pkg / "claude-code-win32-x64" / "claude.exe",
+              pkg / "claude-code-win32-arm64" / "claude.exe",
+              shim.parent / "claude.exe",
+              _home_dir() / ".local" / "bin" / "claude.exe"]
+    for path in (None, _duong_dan_tim_binary()):
+        try:
+            hit = shutil.which("claude.exe", path=path)
+        except Exception:
+            hit = None
+        if hit and hit.lower().endswith(".exe"):      # PATHEXT can answer "claude.exe.cmd"
+            cands.append(Path(hit))
+    for c in cands:
+        try:
+            if c.is_file() and c.stat().st_size >= _NATIVE_EXE_MIN_BYTES:
+                return str(c)
+        except Exception:
+            pass
+    return cli
+
+
+def claude_cli_for_sdk() -> str:
+    """The `cli_path` to hand claude-agent-sdk, or "" to let the SDK pick its own bundled binary.
+
+    Never a .cmd/.bat on Windows: the SDK refuses those, while its Windows wheel bundles a
+    claude.exe that works. Never the SDK's own `_bundled` binary either (see claude_sdk_engine)."""
+    cli = (os.environ.get("JAVIS_CLAUDE_CLI") or "").strip() or (tim_binary("claude") or "")
+    if not cli or "_bundled" in cli.replace("\\", "/"):
+        return ""
+    cli = native_claude_exe(cli) or ""
+    if _is_windows() and is_batch_script(cli):
+        return ""
+    return cli
+
+
+_SDK_CLI_ENV = {"set": ""}      # the value Javis itself put in JAVIS_CLAUDE_CLI, never the user's
+
+
+def use_native_claude_for_sdk() -> None:
+    """Windows: point JAVIS_CLAUDE_CLI at a native claude.exe when PATH resolves npm's shim.
+
+    Why an environment variable: claude_sdk_engine.py and `tim_binary` are both pinned (the
+    native qualification evidence hashes the first, improvement_trial_selection the second), and
+    the one thing both read before PATH is JAVIS_CLAUDE_CLI. Setting it keeps the chat engine and
+    the trial resolver on the same executable. With only the shim on the machine it is set to the
+    SDK's bundled claude.exe: the engine drops a "_bundled" path and the SDK picks that file.
+    A value the user set is respected, unless it names a batch script the SDK would refuse."""
+    if not _is_windows():
+        return
+    cur = (os.environ.get("JAVIS_CLAUDE_CLI") or "").strip()
+    ours = _SDK_CLI_ENV["set"]
+    base = cur if (cur and cur != ours) else (tim_binary("claude") or "")
+    if not is_batch_script(base):
+        if cur and cur == ours:           # PATH now resolves a real executable: step out of the way
+            os.environ.pop("JAVIS_CLAUDE_CLI", None)
+            _SDK_CLI_ENV["set"] = ""
+        return
+    exe = native_claude_exe(base) or ""
+    want = exe if (exe and not is_batch_script(exe)) else (_sdk_bundled_claude() or "")
+    if want and want != cur:
+        os.environ["JAVIS_CLAUDE_CLI"] = want
+        _SDK_CLI_ENV["set"] = want
+        print(f"[claude] the SDK refuses batch scripts, using {want} instead of {base}", file=sys.stderr)
+
+
 def find_claude_cli() -> Optional[str]:
+    """Find the claude CLI. On Windows a native claude.exe wins over npm's claude.cmd shim."""
+    return native_claude_exe(_find_claude_cli_raw())
+
+
+def _find_claude_cli_raw() -> Optional[str]:
     """Tìm claude CLI trên máy. Cửa thoát JAVIS_CLAUDE_BIN cho máy cài chỗ lạ.
 
     Có env override để ĐỒNG BỘ với `grok` (JAVIS_GROK_BIN), `agy` (JAVIS_AGY_BIN) và `codex`
@@ -497,6 +619,84 @@ def _file_co_danh_muc() -> Optional[Path]:
     return p if p.is_file() else None
 
 
+def _claude_config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"))
+
+
+def _catalog_cache_files() -> list:
+    """Claude Code's own model-catalog cache (`<config dir>/cache/model-catalog/*.json`).
+
+    Claude Code downloads the model list from Anthropic and keeps it here, so a model released
+    after the installed binary was built appears here first. The file holds model names only,
+    no credential, so reading it stays within the rule set in the module header.
+    """
+    folder = _claude_config_dir() / "cache" / "model-catalog"
+    try:
+        return sorted(f for f in folder.glob("*.json") if f.is_file())
+    except OSError:
+        return []
+
+
+def _catalog_cache_ids(files) -> list:
+    """Model ids listed in the catalog cache files. A file that fails to parse is skipped."""
+    out = []
+    for f in files or []:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            models = (((data.get("catalog") or {}).get("config") or {}).get("models")) or []
+        except Exception:  # noqa: BLE001 - a broken cache file must not hide the binary's list
+            continue
+        for m in models:
+            mid = str((m or {}).get("id") or "") if isinstance(m, dict) else ""
+            if mid and tach_phien_ban(mid) and mid not in out:
+                out.append(mid)
+    return out
+
+
+_FAMILY_TIERS = ("fable", "mythos", "opus", "sonnet", "haiku")
+
+
+def sort_models(ids) -> list:
+    """Full model ids -> family aliases first, then the ids NEWEST first. Anything that is not a model id is dropped.
+
+    Families go strongest tier first; inside a family the newer version comes first, and the
+    undated id sits above the dated one (`claude-haiku-4-5` before `claude-haiku-4-5-20251001`) because that is the
+    name people type. Aliases in the input are ignored and rebuilt from the ids, so the result has no duplicates.
+    """
+    hop, seen = [], set()
+    for mid in ids or []:
+        v = tach_phien_ban(mid)
+        if v and mid not in seen:
+            seen.add(mid)
+            hop.append((v[0], v[1], v[2], mid))
+    if not hop:
+        return []
+    moi_nhat = {}
+    for fam, ver, _, _ in hop:
+        if ver > moi_nhat.get(fam, ()):
+            moi_nhat[fam] = ver
+    # Known families go by tier, strongest first: by version alone Haiku 5.5 would sit above Fable 5.2. A family this
+    # code has never heard of follows them, newest version first, so a new line still shows without a code change.
+    def _tier(fam):
+        return _FAMILY_TIERS.index(fam) if fam in _FAMILY_TIERS else len(_FAMILY_TIERS)
+    hop.sort(key=lambda x: (_tier(x[0]), bac_phien_ban(moi_nhat[x[0]]), x[0], bac_phien_ban(x[1]), x[2], x[3]))
+    alias = []
+    for fam, _, _, _ in hop:
+        if fam not in alias:
+            alias.append(fam)
+    return alias + [mid for _, _, _, mid in hop]
+
+
+def merge_models(live, shipped) -> list:
+    """The catalog read from the installed `claude` binary, plus the models this Javis release ships with.
+
+    Owner report 2026-11-10: Fable 5.2 was out and Javis did not list it. The binary's catalog was the ONLY list
+    shown, so a machine whose Claude Code had not updated yet (Docker waits for a new image, the daily updater can
+    fail) never saw a model that the Javis release already knew. The union means either side can bring a new model.
+    """
+    return sort_models(list(live or []) + list(shipped or []))
+
+
 def list_models() -> Optional[list]:
     """Model của gói Claude Code: alias đứng trước, rồi id đầy đủ MỚI NHẤT trước.
 
@@ -505,43 +705,42 @@ def list_models() -> Optional[list]:
     Claude Code là lần hỏi sau tự quét lại, còn bình thường thì không đụng đĩa.
     """
     p = _file_co_danh_muc()
-    if not p:
+    catalog_files = _catalog_cache_files()
+    if not p and not catalog_files:
         return None
     try:
-        st = p.stat()
-        if st.st_size > _MAX_QUET_MB * (1 << 20):
-            return None
-        sig = (str(p), st.st_size, st.st_mtime_ns)
+        sig = []
+        if p:
+            st = p.stat()
+            if st.st_size > _MAX_QUET_MB * (1 << 20):
+                p = None
+            else:
+                sig.append((str(p), st.st_size, st.st_mtime_ns))
+        for f in catalog_files:
+            st = f.stat()
+            sig.append((str(f), st.st_size, st.st_mtime_ns))
+        sig = tuple(sig)
     except OSError:
+        return None
+    if not sig:
         return None
     if _MODELS_CACHE["sig"] == sig:
         return list(_MODELS_CACHE["ids"]) if _MODELS_CACHE["ids"] else None
-    try:
-        tho = _doc_id_model(p)
-    except Exception:
-        return None
-    hop = []
-    for mid in tho:
-        v = tach_phien_ban(mid)
-        if v:
-            hop.append((v[0], v[1], v[2], mid))
-    if not hop:
+    tho = []
+    if p:
+        try:
+            tho = _doc_id_model(p)
+        except Exception:
+            tho = []
+    # Models Anthropic ships after the installed CLI was built (Fable 5.2, 2026-11) are not in
+    # the binary: Claude Code fetches them into its model-catalog cache. Merge that list in.
+    for mid in _catalog_cache_ids(catalog_files):
+        if mid not in tho:
+            tho.append(mid)
+    ket_qua = sort_models(tho)[:40]
+    if not ket_qua:
         _MODELS_CACHE.update(sig=sig, ids=None)
         return None
-    # Dòng nào có bản mới nhất thì đứng trước; trong một dòng, bản mới trước, và bản KHÔNG
-    # gắn ngày đứng trên bản gắn ngày (`claude-haiku-4-5` trước `claude-haiku-4-5-20251001`)
-    # vì đó mới là tên người dùng gõ.
-    moi_nhat = {}
-    for fam, ver, _, _ in hop:
-        if ver > moi_nhat.get(fam, ()):
-            moi_nhat[fam] = ver
-    hop.sort(key=lambda x: (bac_phien_ban(moi_nhat[x[0]]), x[0], bac_phien_ban(x[1]), x[2], x[3]))
-    ids = [mid for _, _, _, mid in hop]
-    alias = []
-    for fam, _, _, _ in hop:
-        if fam not in alias:
-            alias.append(fam)
-    ket_qua = (alias + ids)[:40]
     _MODELS_CACHE.update(sig=sig, ids=list(ket_qua))
     return ket_qua
 
@@ -626,6 +825,23 @@ _AUTH_LOI = {"ts": 0.0}
 _AUTH_TTL_LOI = 30.0
 
 
+def _ten_goi_dong(goi: str, email: str = "", folder=None, chi_ten_that: bool = False) -> str:
+    """Name a Claude plan the way Anthropic names it now, never from a table Javis keeps.
+
+    `claude auth status` only gives a CODE ("max" covers both Max and the renamed Ultra since
+    2026-10-30). The CLI also stores the profile's `plan_display_name` in `.claude.json`; that wins.
+    Without it, javis-store's plan-name catalog, then the code tidied ("max" -> "Max"). `chi_ten_that`: return "" rather than the
+    tidied code, so a caller can tell a vendor name from a guess."""
+    if not goi:
+        return ""
+    try:
+        import plan_limits
+        ten = plan_limits.ten_goi_claude(folder, email)
+        return ten or ("" if chi_ten_that else plan_limits.ten_goi(goi, "claude"))
+    except Exception:  # noqa: BLE001
+        return "" if chi_ten_that else goi
+
+
 def auth_status(bo_qua_cache: bool = False):
     """Trạng thái đăng nhập Claude Code: {connected, email, plan, org}.
 
@@ -662,14 +878,28 @@ def auth_status(bo_qua_cache: bool = False):
         # 8 giây cho đường VẼ TRANG, 25 giây cho nút "Kiểm tra lại" (bo_qua_cache=True). Người
         # bấm nút thì sẵn lòng chờ; người chỉ mở trang thì không, và họ không có cách nào biết
         # mình đang chờ cái gì.
+        # The same credentials the turns run with (claude_auth.env_cho_cli): with a long-lived token saved
+        # (2026-11-22) the CLI reports "oauth_token" and is signed in whatever its own login file says.
+        try:
+            import claude_auth
+            _env = claude_auth.env_cho_cli()
+        except Exception:  # noqa: BLE001 - an unreadable setting only means the plain check
+            _env = {}
         r = subprocess.run([cli, "auth", "status", "--json"], capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
-                           timeout=25 if bo_qua_cache else 8, creationflags=_no_window())
+                           timeout=25 if bo_qua_cache else 8, creationflags=_no_window(),
+                           env=({**os.environ, **_env} if _env else None))
         d = json.loads((r.stdout or "").strip() or "{}")
+        goi = d.get("subscriptionType", "") or ""
+        am = str(d.get("authMethod", "") or "")
         ra = {"connected": bool(d.get("loggedIn")), "email": d.get("email", ""),
-              "plan": d.get("subscriptionType", "") or d.get("authMethod", ""), "org": d.get("orgName", ""),
-              # The plan alone (pro, max...), never the auth method: the usage ring names the plan (0.329.0).
-              "goi": d.get("subscriptionType", "") or ""}
+              # "oauth_token" is how the CLI names a long-lived token: a method, not a plan name to show.
+              "plan": _ten_goi_dong(goi, d.get("email", "")) or ("" if am == "oauth_token" else am),
+              "org": d.get("orgName", ""), "auth_method": am,
+              # The plan CODE alone (pro, max...), never the auth method: the usage ring names the plan (0.329.0).
+              "goi": goi,
+              # The plan's name as Anthropic names it today ("Ultra"), read from the CLI's own profile copy.
+              "goi_ten": _ten_goi_dong(goi, d.get("email", ""), chi_ten_that=True)}
         cu = _AUTH_CACHE["val"] or {}
         if cu.get("connected") and not ra["connected"]:
             # Đang đăng nhập mà CLI báo mất - in dấu vết CÓ GIỜ để lần sau chủ báo "thi thoảng
@@ -695,13 +925,22 @@ def auth_status_folder(folder) -> dict:
     cli = find_claude_cli()
     if not cli or not folder:
         return {"connected": False}
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(folder)}
+    # Ask with the account's own long-lived token (2026-11-22), never account 1's from the server's environment.
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    try:
+        import plan_accounts
+        own = plan_accounts.claude_token(folder)
+    except Exception:  # noqa: BLE001
+        own = ""
+    if own:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = own
     try:
         r = subprocess.run([cli, "auth", "status", "--json"], capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=15, creationflags=_no_window(),
-                           env={**os.environ, "CLAUDE_CONFIG_DIR": str(folder)})
+                           errors="replace", timeout=15, creationflags=_no_window(), env=env)
         d = json.loads((r.stdout or "").strip() or "{}")
         return {"connected": bool(d.get("loggedIn")), "email": d.get("email", ""),
-                "plan": d.get("subscriptionType", "") or ""}
+                "plan": _ten_goi_dong(d.get("subscriptionType", "") or "", d.get("email", ""), folder=folder)}
     except Exception as e:  # noqa: BLE001
         return {"connected": False, "unknown": True, "error": f"{type(e).__name__}: {e}"}
 
@@ -1183,6 +1422,38 @@ def claude_engine(system_prompt=None, cwd=None, tag="chat", allowed_tools=None, 
         plan_limits.cai_vao_claude_sdk()
     except Exception:  # noqa: BLE001 - a meter must never stop a turn
         pass
+    try:
+        # 2026-11-10: a whitelisted run below Full access writes only ordinary files inside its brain. Installed BEFORE
+        # the secret hook: that one must stay the outermost wrapper of _options, it looks for its mark only there.
+        import claude_write_scope_hook
+        claude_write_scope_hook.install()
+    except Exception as e:  # noqa: BLE001 - reported, never a broken turn
+        print(f"[write scope] Claude hook not installed: {type(e).__name__}: {e}", file=sys.stderr)
+    try:
+        # 2026-11-17: Claude Code compacting its conversation drops the turn's record of repeated tool results
+        # (tool_result_reuse). Installed BEFORE the secret hook, which must stay the outermost wrapper of _options.
+        import claude_result_reuse
+        claude_result_reuse.install()
+    except Exception as e:  # noqa: BLE001 - reported, never a broken turn
+        print(f"[result reuse] Claude hook not installed: {type(e).__name__}: {e}", file=sys.stderr)
+    try:
+        # 2026-11-09 (owner incident): every Claude turn refuses tool calls on Javis' secret files (secret_guard.py).
+        import claude_secret_hook
+        claude_secret_hook.install()
+    except Exception as e:  # noqa: BLE001 - the guard must never stop a turn
+        print(f"[secret guard] Claude hook not installed: {type(e).__name__}: {e}", file=sys.stderr)
+    try:
+        # 2026-11-12 (customer report): a `claude` that exits before answering names the reason it printed, in place
+        # of the SDK's "Check stderr output for details".
+        import claude_exit_reason
+        claude_exit_reason.install()
+    except Exception as e:  # noqa: BLE001 - reported, never a broken turn
+        print(f"[claude] exit reason wrapper not installed: {type(e).__name__}: {e}", file=sys.stderr)
+    try:
+        # 2026-11-10 (owner incident): the SDK refuses npm's claude.cmd on Windows; hand it a native claude.exe.
+        use_native_claude_for_sdk()
+    except Exception as e:  # noqa: BLE001 - reported, never a broken turn
+        print(f"[claude] native CLI lookup failed: {type(e).__name__}: {e}", file=sys.stderr)
     eng = ClaudeSDK(system_prompt=system_prompt, cwd=cwd, tag=tag,
                     allowed_tools=allowed_tools, model=model)
     # Every run (chat, loops, reminders, bots) skips the repo CLAUDE.md and compacts at ~180k;
@@ -1343,13 +1614,12 @@ def find_codex_cli() -> Optional[str]:
         Path(os.environ.get("APPDATA", "")) / "npm" / "codex.cmd",
         Path(os.environ.get("APPDATA", "")) / "npm" / "codex.exe",
         home / ".codex" / ".sandbox-bin" / "codex",
+        home / ".local" / "bin" / "codex",
     ]
-    # Windows Store có thể đặt app-execution alias ``codex.exe`` lên PATH nhưng
-    # service/tiến trình nền không được quyền chạy alias đó (WinError 5), nên alias
-    # đó chỉ là đường lui cuối. POSIX vẫn tôn trọng PATH trước như thông lệ.
+    # Windows Store có thể đặt app-execution alias ``codex.exe`` lên PATH nhưng service/tiến trình nền không được
+    # quyền chạy alias đó (WinError 5), nên alias đó chỉ là đường lui cuối. Since PR 1608 the PATH binary on
+    # Mac/Linux no longer wins outright either: it joins the candidates below and the newest one is asked.
     cli = tim_binary("codex")
-    if cli and os.name != "nt":
-        return cli
     co = []
     if cli and "windowsapps" not in cli.lower():
         co.append(cli)
@@ -1359,16 +1629,17 @@ def find_codex_cli() -> Optional[str]:
                 co.append(str(p))
         except Exception:
             pass
-    # Một máy Windows hay có NHIỀU bản Codex cùng lúc: Codex Desktop xuất một bản vào
-    # ~/.codex/.sandbox-bin và không phải lúc nào cũng cập nhật nó, npm đặt bản khác. Trước
-    # 0.71.1 bản đứng đầu danh sách thắng, và chủ repo đo 03/10/2026: sandbox-bin kẹt ở 0.147
-    # (tháng 8) trong khi npm đã 0.160, nên `model/list` chỉ trả đời GPT-5.6 và trang Models
-    # không có GPT-6.1-Sol. Danh sách model là lời của CHÍNH binary được hỏi, nên phải hỏi bản
-    # MỚI NHẤT. Không đọc được số phiên bản thì giữ thứ tự cũ.
+    # Một máy hay có NHIỀU bản Codex cùng lúc: Codex Desktop xuất một bản vào ~/.codex/.sandbox-bin và không phải lúc
+    # nào cũng cập nhật nó, npm đặt bản khác. Trước 0.71.1 bản đứng đầu danh sách thắng, và chủ repo đo 03/10/2026:
+    # sandbox-bin kẹt ở 0.147 (tháng 8) trong khi npm đã 0.160, nên `model/list` chỉ trả đời GPT-5.6 và trang Models
+    # không có GPT-6.1-Sol. Danh sách model là lời của CHÍNH binary được hỏi, nên phải hỏi bản MỚI NHẤT. PR 1608
+    # (2026-11-19): the same holds on Mac/Linux (PATH, npm, ~/.local/bin). A binary whose version cannot be read is
+    # skipped; when none can be read, the old search order stands.
     if len(co) > 1:
-        best = max(co, key=lambda p: _codex_version(p) or ())
-        if _codex_version(best):
-            return best
+        versioned = [(p, _codex_version(p)) for p in co]
+        versioned = [(p, version) for p, version in versioned if version is not None]
+        if versioned:
+            return max(versioned, key=lambda item: item[1])[0]
     if co:
         return co[0]
     if cli:
@@ -1636,6 +1907,32 @@ def _codex_home() -> Path:
     return Path(home) if home else _home_dir() / ".codex"
 
 
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def codex_windows_sandbox_config(sandbox: Optional[str], codex_home=None) -> list:
+    """`-c` overrides that make `--sandbox` mean what it says on Windows (#1133).
+
+    On Windows, with no `[windows] sandbox` in config.toml, Codex quietly downgrades `workspace-write` to `read-only`:
+    every background job at `auto` could read but not write, and stopped as if waiting for the owner. Javis asks for the
+    unelevated Windows sandbox (no admin prompt) whenever it sets a sandbox. A choice already made in config.toml of
+    that Codex home (for example `elevated`) is kept: an override would beat it. Nothing on other systems, nothing when
+    no sandbox is set (full access)."""
+    if not sandbox or not _windows():
+        return []
+    try:
+        import tomllib
+        cfg = Path(codex_home or _codex_home()) / "config.toml"
+        if cfg.is_file():
+            with open(cfg, "rb") as f:
+                if ((tomllib.load(f) or {}).get("windows") or {}).get("sandbox"):
+                    return []
+    except Exception:  # noqa: BLE001 - an unreadable config: still ask for the sandbox that makes writes work
+        pass
+    return ['windows.sandbox="unelevated"']
+
+
 # Báo lỗi khách 04/10/2026 (Windows, 0.71.0): mọi lượt chat ChatGPT chết với "Codex lỗi (exit 1):
 # WARNING: proceeding, even though we could not create PATH aliases: Could not find home
 # directory". Codex tự tìm home bằng `dirs::home_dir()`: trên Windows hàm đó hỏi thẳng hồ sơ người
@@ -1643,6 +1940,15 @@ def _codex_home() -> Path:
 # tài khoản không có hồ sơ là Codex mù home, không thấy auth.json, trong khi Javis (đọc
 # USERPROFILE/HOME qua `_home_dir`) vẫn thấy đăng nhập ChatGPT đầy đủ. Đặt CODEX_HOME thì Codex
 # bỏ qua hẳn bước hỏi Windows, và cả hai bên nhìn cùng một thư mục.
+def _mark_env(env, tag):
+    """`env` plus the background-work mark of turn `tag` (tien_trinh_nen.mark_env). Never fails a turn."""
+    try:
+        import tien_trinh_nen
+        return tien_trinh_nen.mark_env(env, tag)
+    except Exception:  # noqa: BLE001
+        return env
+
+
 def codex_env(codex_home: Optional[str] = None) -> dict:
     """Biến môi trường cho MỌI tiến trình Codex mà Javis bật.
 
@@ -1870,6 +2176,8 @@ class CodexCLI:
             args += ["-p", self.profile]
         for c in (self.extra_config or []):
             args += ["-c", c]
+        for c in codex_windows_sandbox_config(self.sandbox, self.codex_home):
+            args += ["-c", c]
         if self.hub_turn:
             # Built per query, inside the turn: the same CodexCLI serves many turns (and several
             # people in one group chat), so the key can never live in extra_config.
@@ -1933,12 +2241,11 @@ class CodexCLI:
             tinfo = {"timed_out": False}
             last = {"t": time.time()}
             from claude_sdk_engine import tran_watchdog
-            # Ba trần, None = không giới hạn. Parity với engine Claude SDK, kể cả mặc định:
-            # hai trần đo sự IM LẶNG của model đều bỏ trần (im lặng không phải treo - xem
-            # `tran_watchdog`), riêng trần chờ TOOL giữ 1 tiếng vì nó đo một tiến trình con
-            # có thật đang sống ngoài kia.
+            # Ba trần, None = không giới hạn. Parity với engine Claude SDK, kể cả mặc định: cả ba
+            # đều bỏ trần. Trần chờ TOOL (1 tiếng) cũng bỏ từ 2026-11-07 theo lời chủ repo ("bỏ hết
+            # các trần của các model"); muốn có lại thì đặt JAVIS_CLAUDE_TOOL_TIMEOUT.
             IDLE = tran_watchdog("JAVIS_CLAUDE_IDLE_TIMEOUT", "0")
-            TOOL_IDLE = tran_watchdog("JAVIS_CLAUDE_TOOL_TIMEOUT", "3600")
+            TOOL_IDLE = tran_watchdog("JAVIS_CLAUDE_TOOL_TIMEOUT", "0")
             FIRST_IDLE = tran_watchdog("JAVIS_CLAUDE_FIRST_TIMEOUT", "0")
             busy = {"n": 0}   # số item tool/lệnh đã started mà chưa completed
             seen = {"dong_dau": False}   # đã có dòng đầu tiên chưa (quyết định dùng trần nào)
@@ -1950,7 +2257,7 @@ class CodexCLI:
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     cwd=self.cwd, text=True, encoding="utf-8", errors="replace", bufsize=1,
                     creationflags=creationflags, start_new_session=(os.name != "nt"),
-                    env=codex_env(getattr(self, "codex_home", None)),
+                    env=_mark_env(codex_env(getattr(self, "codex_home", None)), self.tag),
                 )
                 with _PROC_LOCK:
                     _ACTIVE_PROCS[proc] = self.tag
@@ -2054,6 +2361,10 @@ class CodexCLI:
         final_text = ""
         messages = []   # this turn's agent messages, joined into `final_text` when the turn ends (codex_answer_text)
         sandbox_hong = False
+        # 2026-11-16: each agent message is its own paragraph in the live chat, as on the app-server path
+        # (codex_steer); they used to reach the chat glued together ("...xong.Bước tiếp...").
+        import text_breaks
+        shown = text_breaks.Joiner()
         while True:
             item = await queue.get()
             if item is SENTINEL:
@@ -2082,6 +2393,12 @@ class CodexCLI:
                     self.session_id = thread_id
                     # Phát ngay để caller lưu trước cả khi lượt bị ngắt giữa chừng.
                     yield {"type": "session", "session_id": thread_id}
+            elif t in ("item.started", "item.updated", "item.completed") \
+                    and (ev.get("item") or {}).get("type") == "todo_list":
+                # Codex's plan for this turn (update_plan). Each update carries the whole list; the chat draws it as a
+                # checklist (turn_plan.py). It used to fall through every branch and be dropped.
+                it = ev.get("item") or {}
+                yield {"type": "tool_call", "name": "todo_list", "item": it}
             elif t == "item.started":
                 # Codex báo lúc một bước BẮT ĐẦU (đo 08/10, Codex 0.160: lệnh `ping` 5 giây có
                 # item.started ở giây 8,8, item.completed ở giây 14). Trước 0.86.1 Javis chỉ nghe
@@ -2097,6 +2414,10 @@ class CodexCLI:
             elif t == "item.completed":
                 it = ev.get("item") or {}
                 itype = it.get("type")
+                if itype in ("context_compaction", "contextCompaction"):
+                    # Codex summarised the thread: earlier tool results may be gone (tool_result_reuse).
+                    import tool_result_reuse
+                    tool_result_reuse.forget_current_turn()
                 if itype == "agent_message":
                     # Bóc dấu trích dẫn nội bộ của OpenAI TRƯỚC khi text đi bất cứ đâu. Nếu
                     # để lọt, ba ký tự vô hình đó hiện thành ô vuông giữa câu trả lời, VÀ đi
@@ -2106,7 +2427,8 @@ class CodexCLI:
                     if txt.strip():
                         # Shown live as before; the answer (`final`) leaves lead-ins out (codex_answer_text).
                         messages.append({"text": txt, "phase": it.get("phase")})
-                        yield {"type": "text", "content": txt}
+                        shown.tool()   # a new message: a new paragraph after earlier text
+                        yield {"type": "text", "content": shown.text(txt)}
                 elif itype in _CODEX_TOOL_ITEMS:
                     codex_mark_step(messages)
                     # Câu lệnh đi kèm trong `item` để tool_label.chi_tiet rút ra khi cần.

@@ -75,7 +75,9 @@ check("và CSS của nó không bị hạ opacity như hàng nút hover",
   && !/\.cs-menu-pin \{[^}]*opacity/.test(CSS));
 
 // Kho: ghim xếp lên đầu, và KHÔNG đụng updated_at.
-check("kho xếp project ghim lên đầu", /ORDER BY p\.pinned DESC, p\.updated_at DESC/.test(PY));
+// 0.454.0: the owner's own order (table project_order, drag to reorder) comes first; among projects never ordered, pinned
+// ones still go on top. tests/python/test_reorder_0454.py checks the behaviour on a real store.
+check("kho xếp project ghim lên đầu", /ORDER BY \(po\.pos IS NULL\), po\.pos, p\.pinned DESC, p\.updated_at DESC/.test(PY));
 check("ghim không bump updated_at (nếu không, bỏ ghim là nhảy lên đầu nhóm chưa ghim)",
   /UPDATE projects SET pinned = \? WHERE id = \?/.test(PY));
 check("DB cũ được thêm cột pinned qua migration",
@@ -314,8 +316,8 @@ check("gọi endpoint tài sản của phiên", /"\/sessions\/" \+ encodeURIComp
 // dữ liệu là nhân đôi số chỗ phải sửa về sau.
 check("dùng lại vỏ ngăn kéo của project chứ không dựng khung thứ hai",
   (SU.match(/class="pd-panel"/g) || []).length === 1 && /pdCheDo = "cuoc"/.test(SU));
-check("thanh tab dựng động: chế độ cuộc và trợ lý chỉ có File và Link",
-  /if \(pdLaCuoc\(\) \|\| pdLaAgent\(\)\) return \[tabFile, tabLink\];/.test(SU));
+check("thanh tab dựng động: chế độ cuộc và trợ lý chỉ có tab Tài liệu (file, thư mục, link gộp một chỗ)",
+  /if \(pdLaCuoc\(\) \|\| pdLaAgent\(\)\) return \[tabDocs\];/.test(SU));
 check("mở khung project thì trả chế độ về project", /pdDung\(\);\s*\n\s*pdCheDo = "project";/.test(SU));
 check("file đã dời vẫn hiện, mờ đi và gạch ngang",
   /\.pd-row\.mat \{ opacity/.test(CSS) && /\.pd-row\.mat \.pd-row-name \{ text-decoration: line-through/.test(CSS));

@@ -31,6 +31,7 @@ import copy
 import importlib.util
 import inspect
 import json
+import kept
 import os
 import re
 import sys
@@ -597,7 +598,16 @@ def _key(vault_root: Optional[str], scope_vault: bool = True) -> str:
 
 
 def _signature(vault_root: Optional[str], scope_vault: bool = True) -> tuple:
-    """Chữ ký để biết khi nào phải nạp lại: mtime state + mtime entry/manifest mọi plugin + env flag."""
+    """Chữ ký để biết khi nào phải nạp lại: mtime state + mtime entry/manifest mọi plugin + env flag.
+
+    2026-11-13: computing it walks every plugin folder (bundled, packs, user, vault) and stats four files per
+    plugin, a few hundred disk calls with a dozen packs installed, and `_load_all` asks for it on every tool list,
+    every tool call that has hooks and every bot turn. On the event loop it now comes from memory (kept.py);
+    `invalidate()` drops it, so a plugin changed through Javis is seen at once."""
+    return _SIGS.get((vault_root, bool(scope_vault)))
+
+
+def _signature_now(vault_root: Optional[str], scope_vault: bool = True) -> tuple:
     sig: List[Any] = [_env_user_enabled()]
     try:
         sig.append(_STATE_PATH.stat().st_mtime)
@@ -621,6 +631,9 @@ def _signature(vault_root: Optional[str], scope_vault: bool = True) -> tuple:
             except OSError:
                 pass
     return tuple(sig)
+
+
+_SIGS = kept.Keyed(lambda a: _signature_now(a[0], a[1]), name="plugins signature")
 
 
 def shared_signature() -> tuple:
@@ -807,6 +820,20 @@ def tim_http(slug: str, duong: str, method: str = ""):
         for r in lp.http:
             if r["path"] == duong and (not method or method.upper() in r["methods"]):
                 return lp, r
+    # 0.440.0: plugin đổi tên theo gói (gói khai `replaces`): địa chỉ cũ đã dán ra ngoài vẫn tới
+    # plugin mới. Chỉ một bước, và chỉ khi slug cũ không còn plugin nào giữ.
+    try:
+        import packs
+        moi = packs.plugin_alias(slug)
+    except Exception:
+        moi = ""
+    if moi and moi != slug and not any(lp.slug == slug for lp in _plugin_http()):
+        for lp in _plugin_http():
+            if lp.slug != moi:
+                continue
+            for r in lp.http:
+                if r["path"] == duong and (not method or method.upper() in r["methods"]):
+                    return lp, r
     return None
 
 
@@ -900,6 +927,7 @@ def invalidate() -> None:
     """
     with _lock:
         _cache.clear()
+    _SIGS.drop()
     _STATE_CACHE["sig"] = None
     _STATE_CACHE["data"] = None
     _MANIFEST_CACHE.clear()
@@ -939,6 +967,94 @@ async def _maybe_await(v):
     return v
 
 
+# Tools that queue work which runs LATER, and the argument holding that work's level (security fix, 2026-11-05 audit).
+# Both are `safe`, so an "auto" run (a customer bot, a loop reading untrusted text) could call them, and the work they
+# queued ran at Full access by default: shell, every connection. The level a run hands on is now capped at its own.
+_JOB_LEVEL_ARG = {"javis_schedule": "muc_quyen", "javis_task": "mode"}
+_JOB_LEVEL_RANK = {"suggest": 0, "auto": 1, "full": 2}
+
+
+# Tools through which a turn leaves work for LATER (security fix, 2026-11-10).
+_QUEUE_TOOLS = frozenset({"javis_schedule", "javis_task", "javis_job"})
+
+
+def _chatbot_turn() -> bool:
+    """True when the turn being served belongs to a dedicated chatbot, i.e. somebody who is not the owner is steering
+    the model. The host stamps `bot_id` on the turn (main.py), the model never does."""
+    try:
+        import turn_context
+        return bool(str((turn_context.current() or {}).get("bot_id") or "").strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _chatbot_queue_refusal(name: str, args: dict, mode: str) -> str:
+    """Refusal text when a chatbot below Full access tries to leave AI-run work for later, "" otherwise.
+
+    Capping the level of that work (`_cap_job_level`) was not enough. The job a customer queued through a "can write"
+    bot ran later as one of the OWNER's background jobs: Claude Code's own Read / Write / Edit (not confined to the
+    bot's brain), and every tool a bot never sees (the login vault, web fetch, memory). One message was a way out of the
+    bot's sandbox. A bot below Full access now leaves exactly one kind of thing for later: a reminder that only SAYS
+    its text at the set time (`notify_only`), with no model and no tool behind it. A bot the owner raised to Full access
+    keeps queueing work as before, and so does every turn of the owner."""
+    if name not in _QUEUE_TOOLS or not _chatbot_turn():
+        return ""
+    m = str(mode or "").strip().lower()
+    if m == "gated":
+        return ""
+    try:
+        import mcp_catalog
+        if mcp_catalog.effective_perm("full", m) == "full":
+            return ""
+    except Exception:  # noqa: BLE001
+        if m in ("", "full"):
+            return ""
+    a = args or {}
+    op = str(a.get("op") or ("create" if name == "javis_schedule" else "")).strip().lower()
+    if op == "list":
+        return ""
+    if name == "javis_schedule" and op == "create" and a.get("notify_only") in (True, "true", "True", 1, "1"):
+        return ""
+    return ("ERROR: chatbot trả lời khách ở mức dưới Toàn quyền không được giao việc cho AI chạy sau (việc nền, loop, "
+            "nhắc hẹn có AI làm hộ) và không được sửa, huỷ hay trả lời việc đã có. Đây là rào bảo mật: việc đó sẽ chạy "
+            "bằng quyền của chủ, ngoài phạm vi của bot. Vẫn làm được: tạo lời nhắc CHỈ NHẮC bằng javis_schedule với "
+            "notify_only=true. Việc cần AI làm thì ghi lại để chủ tự giao, hoặc chủ nâng bot này lên Toàn quyền.")
+
+
+def _cap_job_level(name: str, args: dict, mode: str):
+    """(args, refusal). A run below Full access may only queue work at its own level or lighter.
+
+    Full-access runs and gated Team steps (they go through the owner's approval) pass unchanged. Below Full, the level
+    argument is set to the weaker of what was asked (missing = the tool's default, Full) and the run's own level, and
+    `javis_schedule op=update` is refused: it would rewrite the prompt of a job the owner may have made at Full."""
+    why = _chatbot_queue_refusal(name, args, mode)
+    if why:
+        return args, why
+    field = _JOB_LEVEL_ARG.get(name)
+    m = str(mode or "").strip().lower()
+    if not field or m == "gated":
+        return args, ""
+    try:
+        import mcp_catalog
+        eff = mcp_catalog.effective_perm("full", m)
+    except Exception:  # noqa: BLE001
+        eff = "full" if m in ("", "full") else "readonly"
+    if eff == "full":
+        return args, ""
+    tran = "auto" if eff == "safe" else "suggest"
+    a = dict(args or {})
+    op = str(a.get("op") or ("create" if name == "javis_schedule" else "")).strip().lower()
+    if name == "javis_schedule" and op == "update":
+        return a, ("ERROR: việc chạy dưới mức Toàn quyền không được sửa việc đã lên lịch (việc đó có thể đang chạy "
+                   "toàn quyền). Nhờ chủ sửa ở trang Việc, hoặc tạo việc mới.")
+    if name == "javis_task" and op != "add":
+        return a, ""
+    xin = str(a.get(field) or "full").strip().lower()
+    if _JOB_LEVEL_RANK.get(xin, 2) > _JOB_LEVEL_RANK[tran]:
+        a[field] = tran
+    return a, ""
+
+
 def _make_call(tool: dict, ctx: PluginContext, mode: str):
     """Bọc 1 handler plugin thành async call(args) có gate min_mode + check_fn + chống crash."""
     handler = tool["handler"]
@@ -968,6 +1084,10 @@ def _make_call(tool: dict, ctx: PluginContext, mode: str):
                 return f"ERROR: kiểm tra điều kiện tool '{name}' lỗi: {type(e).__name__}: {e}"
             if why:
                 return f"ERROR: {why}"
+        args, tu_choi = _cap_job_level(name, args, mode)
+        if tu_choi:
+            return tu_choi
+
         async def _run(a):
             try:
                 res = handler(a or {}, ctx)

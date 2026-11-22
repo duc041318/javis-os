@@ -100,9 +100,10 @@ Two things to know:
 
 ## The Info panel
 
-- **Customer**: name, nick or Page, the phone or email they left, **tags** (add, remove, create on the spot) and a **note** only you see (saved when you click out of the box; it belongs to the customer, so their other chats show it too).
+- **Customer**: name, nick or Page, the phone or email they left, **tags** (add, remove, create on the spot) and, in a private chat, the **customer profile** (since 12/11/2026, the note box before that): the AI writes down what is worth remembering about the customer after each chat and the bot reads it when it answers; you can still edit or add to it (saved when you click out of the box; it belongs to the customer, so their other chats show it too). Details in [Chatbots](25-chatbots.md), "Does the bot remember a customer over the long run?". A group keeps a plain **note** only you see.
 - **AI in this chat**: who replies (off here, or one of the three modes); for groups **the AI speaks up when** (called by name, it sees a need, every message); **when you type yourself, the AI waits** how long. The last two are settings of the whole bot, and the panel says so. A link opens the bot's settings.
 - **Channel**: the logo, the channel and the nick or Page.
+- **Block, Leave group, Delete chat** (since 21/11/2026): the three actions of the "..." menu in the list also sit at the foot of this panel, with the same words and the same small line saying whether it also happens on Zalo or the Page. **Leave group** (a Zalo group) leaves on Zalo, then deletes the chat from Javis too. A deleted chat does not come back because of its old messages: only a message sent AFTER the delete opens it again.
 
 ## The Channels tab
 
@@ -163,7 +164,7 @@ Adding a channel = one file in the registry, one registration line, one logo in 
 
 ## Want more: the Customer management (CRM) pack
 
-The Store has a **Customer management (CRM)** pack (`javis.khach-hang-crm`, needs 0.60.1 or newer) that sits on this very inbox. Once installed, just ask Javis: "who has waited over 2 hours without a reply", "what did Lan ask", "tag Lan as VIP", "how many new customers this week", "export customers who asked for a price to Excel". It ships a customer-care agent and a daily review workflow. The pack only reads the inbox and writes tags and notes on customers; it never messages anyone.
+The Store has a **Customer management (CRM)** pack (`javis.crm`, needs 0.440.0 or newer) that sits on this very inbox. Once installed, just ask Javis: "who has waited over 2 hours without a reply", "what did Lan ask", "tag Lan as VIP", "how many new customers this week", "export customers who asked for a price to Excel". It ships a customer-care agent and a daily review workflow. The pack only reads the inbox and writes tags and notes on customers; it never messages anyone.
 
 ## See also
 

@@ -155,11 +155,15 @@ check("ui_targets.py: bí danh 'tro ly' của NHÓM nay trỏ sang bo_nao", /"tr
 
 // ---- 7. Thanh bên gọn một tầng ----
 check("console.js: không còn nhóm tro_ly", !/id: "tro_ly"/.test(console_js));
-check("console.js: home và chat nằm trong nhóm Bộ não",
-  /ids: \["home", "chat", "files", "learn"\]/.test(console_js));
+// 2026-11-05 (owner): Chat stands alone as the first rail row; the Brain group keeps home, files, learn.
+check("console.js: Chat đứng riêng ở đầu thanh bên, Bộ não còn home/files/learn",
+  /const RAIL_TOP = \["chat"\];/.test(console_js) && /ids: \["home", "files", "learn"\]/.test(console_js));
 check("i18n: không còn khoá nhóm tro_ly", vi["nav.group.tro_ly"] === undefined && en["nav.group.tro_ly"] === undefined);
-check("i18n: trang home đổi tên thành Đồ thị / Graph",
-  vi["page.home.label"] === "Đồ thị" && en["page.home.label"] === "Graph");
+// 2026-11-05 (owner): "thay chữ đồ thị và biểu tượng đồ thị thành neural network (Mạng nơ-ron)".
+check("i18n: trang home tên là Mạng nơ-ron / Neural network",
+  vi["page.home.label"] === "Mạng nơ-ron" && en["page.home.label"] === "Neural network");
+check("console.js: Tự học có icon riêng (brain-cog), không trùng bộ não của nhóm", /learn: "brain-cog",/.test(console_js));
+check("console.js: icon trang home là neural-net riêng của Javis", /home: "neural-net",/.test(console_js) && /"neural-net":/.test(read("dashboard/icons.js")));
 
 // ---- 8. Nạp file và từ điển ----
 const iApp = html.indexOf("/static/app.js"), iPet = html.indexOf("/static/pet.js");
@@ -243,7 +247,7 @@ check("ws.onclose gọi baoDutMang", /ws\.onclose = \(e?\) => \{[\s\S]{0,320}bao
     /setProperty\("--pet-eye", mauMatCfg\(\)\)/.test(pet));
   check("dấu ấn trên thanh bên cũng theo màu mắt đã chọn",
     /markSvg: function \(\) \{ return chanDung\(cfg\.shape, cfg\.palette, optsCfg\(\)\); \}/.test(pet)
-    && /function optsCfg\(\) \{ return \{ mau: cfg\.color, mat: cfg\.eye, mauMat: cfg\.eyeColor, coMat: cfg\.eyeSize \}; \}/.test(pet));
+    && /function optsCfg\(\) \{ return \{ mau: cfg\.color, mat: cfg\.eye, mauMat: cfg\.eyeColor, coMat: cfg\.eyeSize(, anh: cfg\.image)? \}; \}/.test(pet));
   // Avatar trợ lý dùng màu mắt RIÊNG của nó (0.64.39), không bao giờ màu mắt của con pet;
   // trợ lý cũ chưa chọn thì vẫn đi đường tự động. Mất chốt này là đổi màu mắt pet kéo theo
   // cả danh sách trợ lý đổi theo.
@@ -255,7 +259,7 @@ check("ws.onclose gọi baoDutMang", /ws\.onclose = \(e?\) => \{[\s\S]{0,320}bao
     /P\.editorHtml\(cur, OPTS_ED\)/.test(console_js)
     && /P\.editorBind\(host\.querySelector\("\[data-pet-editor\]"\), cur, \(patch, tam\) => P\.setCfg\(patch, tam\), OPTS_ED\)/.test(console_js));
   check("ô xem thử hình dáng vẽ đúng màu mắt đang chọn",
-    /chanDung\(k, v\.palette, Object\.assign\(\{ vanh: !!o\.vanh \}, anhCua\(v\)\)\)/.test(pet));
+    /chanDung\(k, v\.palette, Object\.assign\(\{ vanh: !!o\.vanh(, anh: o\.image \? v\.image : "")? \}, anhCua\(v\)\)\)/.test(pet));
   check("Đặt lại trả màu mắt về đen", /eye: "den", eyeSize: 1, enabled: true/.test(console_js));
   ["settings.pet_eye", "pet.eye.den", "pet.eye.trang"].forEach(k => {
     check("i18n vi+en có " + k, typeof vi[k] === "string" && typeof en[k] === "string");

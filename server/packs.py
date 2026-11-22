@@ -49,9 +49,11 @@ thứ đang chạy được; một file lạ trong STATE_DIR không được ph�
 from __future__ import annotations
 
 import json
+import kept
 import os
 import re
 import sys
+import time
 import threading
 from pathlib import Path
 
@@ -85,7 +87,7 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 # Trường connector chỉ có nghĩa khi chạy MÃ hoặc LỆNH. Có mặt bất kỳ cái nào thì gói là bậc
 # CODE. Danh sách này là mô tả, không phải cổng chặn: xem docstring đầu file.
 _CODE_FIELD = ("command", "args", "env", "cred_dir", "isolate_home", "oauth_file",
-               "needs_local_browser")
+               "oauth_env", "needs_local_browser")
 
 # Trường bị TỪ CHỐI THẲNG ở spec 1, nêu đích danh khi từ chối.
 #   internal : `mcp_client._INTERNAL` là allowlist bảo vệ `importlib.import_module`, không phải
@@ -183,6 +185,36 @@ def _doc_file(p):
     return fastyaml.safe_load(raw)
 
 
+def ma_thay_the(m, pid: str = "") -> list:
+    """Mã CŨ mà gói này thay (`replaces:` trong manifest, 0.440.0). Gói đổi mã (ví dụ
+    `javis.javis-trong-chatgpt` thành `javis.gate`) khai mã cũ ở đây, để trình cài chuyển sổ cài đặt,
+    dữ liệu plugin và năng lực trong brain sang mã mới thay vì coi đó là hai gói khác nhau.
+    Chỉ nhận mã hợp lệ, khác chính nó, tối đa 10."""
+    ra = []
+    for x in ((m or {}).get("replaces") or [])[:10] if isinstance((m or {}).get("replaces"), list) else []:
+        x = str(x or "").strip()
+        if _ID_RE.match(x) and x != pid and x not in ra:
+            ra.append(x)
+    return ra
+
+
+def plugin_alias(slug: str) -> str:
+    """Tên MỚI của một plugin đã đổi tên theo gói (0.440.0), hoặc "" nếu không có.
+
+    Địa chỉ `/ext/<slug cũ>/...` đã dán ra ngoài (ChatGPT giữ địa chỉ MCP và cửa OAuth) phải còn
+    chạy sau khi gói đổi mã, nên trình cài ghi `plugin_aliases` {cũ: mới} vào hàng của gói mới."""
+    slug = str(slug or "")
+    if not slug:
+        return ""
+    for hang in _so_cai_dat().values():
+        if not isinstance(hang, dict) or hang.get("enabled") is False:
+            continue
+        moi = (hang.get("plugin_aliases") or {}).get(slug)
+        if moi and moi != slug:
+            return str(moi)
+    return ""
+
+
 def _kiem_connector(con, thu_muc, id_da_co) -> tuple[bool, str]:
     """Một connector từ gói có được phép vào kho không. Trả (ok, lý do)."""
     cid = str((con or {}).get("id") or "").strip()
@@ -229,12 +261,28 @@ def _tier(thu_muc, connectors) -> str:
     return "data"
 
 
-def _nap_mot(thu_muc, id_da_co) -> dict:
+def _goi_vao_loi(catalog: dict) -> dict:
+    """{mã gói: {id connector}} của những gói mà kho gốc đã thay bằng bản dựng sẵn (`thay_goi`).
+
+    Cloudflare đi từ kho cài đặt vào lõi (chủ repo 2026-11-05: kết nối mặc định, đi đôi với
+    GitHub). Máy đã cài gói từ trước vẫn còn thư mục gói trên đĩa, và luật trùng id bên dưới sẽ
+    báo lỗi đỏ cho một gói chẳng làm gì sai. Chỉ kho gốc (file trong repo, không phải dữ liệu
+    người lạ viết) mới khai được trường này, và connector của lõi luôn thắng, nên không có gì bị
+    bẻ hướng: gói chỉ được im lặng bỏ ĐÚNG những id lõi đã nhận thay nó."""
+    ra = {}
+    for cid, con in (catalog or {}).items():
+        for pid in (con.get("thay_goi") or []) if isinstance(con.get("thay_goi"), list) else []:
+            ra.setdefault(str(pid), set()).add(cid)
+    return ra
+
+
+def _nap_mot(thu_muc, id_da_co, vao_loi=None) -> dict:
     """Đọc và kiểm MỘT thư mục gói. Luôn trả về một bản ghi, kể cả khi hỏng."""
     pid = thu_muc.name
     ban = {"id": pid, "dir": str(thu_muc), "ok": False, "error": "", "enabled": True,
            "name": {}, "description": {}, "version": "", "author": {}, "tier": "data",
-           "connectors": [], "_con_objs": []}
+           "connectors": [], "_con_objs": [], "built_in": []}
+    lo_thay = (vao_loi or {}).get(pid) or set()
 
     manifest = next((thu_muc / t for t in MANIFEST_TEN if (thu_muc / t).is_file()), None)
     if manifest is None:
@@ -280,6 +328,7 @@ def _nap_mot(thu_muc, id_da_co) -> dict:
     ban.update(name=_ngon_ngu(m.get("name"), pid), description=_ngon_ngu(m.get("description")),
                version=str(m.get("version") or ""), author=(m.get("author") or {}),
                homepage=str(m.get("homepage") or ""), license=str(m.get("license") or ""))
+    ban["replaces"] = ma_thay_the(m, pid)
 
     cons, loi = [], []
     for rel in ((m.get("provides") or {}).get("connectors") or []):
@@ -294,6 +343,10 @@ def _nap_mot(thu_muc, id_da_co) -> dict:
             continue
         if not isinstance(con, dict):
             loi.append(f"{rel}: phải là một object")
+            continue
+        cid_goi = str(con.get("id") or "").strip()
+        if cid_goi in lo_thay and cid_goi in id_da_co:
+            ban["built_in"].append(cid_goi)   # lõi đã có sẵn, kết nối cũ chạy tiếp theo bản của lõi
             continue
         hop, vs = _kiem_connector(con, thu_muc, id_da_co)
         if not hop:
@@ -337,8 +390,9 @@ def _quet():
                 # vụ của app đi rồi không có cách nào lấy lại bản của kho, vì id vẫn bị coi là
                 # đang bị chiếm bởi một thứ không còn tồn tại với họ.
                 id_da_co = set(mcp_catalog.tat_ca()) - core_off.da_go("connectors")
+                vao_loi = _goi_vao_loi(mcp_catalog.tat_ca())
             except Exception:
-                id_da_co = set()
+                id_da_co, vao_loi = set(), {}
             so = _so_cai_dat()
             for d in sorted(PACKS_DIR.iterdir()):
                 if not d.is_dir() or d.name.startswith((".", "_")):
@@ -352,7 +406,7 @@ def _quet():
                                   "author": {}, "tier": str(hang.get("tier") or "data"),
                                   "connectors": []})
                     continue
-                ban = _nap_mot(d, id_da_co)
+                ban = _nap_mot(d, id_da_co, vao_loi)
                 ban["enabled"] = True
                 for con in ban.pop("_con_objs", []):
                     connectors[con["id"]] = con
@@ -370,7 +424,25 @@ def _so_cai_dat() -> dict:
         return {}
 
 
+# A signature computed less than this long ago is reused without touching the disk (2026-11-09, see
+# mcp_catalog.CHECK_S for the measurement). `invalidate()` drops it, and every install, removal or consent in
+# pack_install calls that, so a change made through Javis is seen at once.
+SIGNATURE_S = 2.0
+# 2026-11-13: the 2 s above still let the event loop do the re-check itself, and on the owner's VPS one re-check took
+# up to 93 s (GET /health/loop: this function was 44% of all the time the server stood still). The event loop now
+# gets the last signature from memory while a helper thread computes the new one (kept.py).
+_SIG = kept.Value(lambda: _signature_now(), fresh_s=lambda: SIGNATURE_S, key=lambda: str(PACKS_DIR),
+                  name="packs.signature")
+
+
 def signature():
+    """Chữ ký để `mcp_catalog.load()` gộp vào khoá cache của nó. Nhớ trong SIGNATURE_S giây (xem trên)."""
+    if tat_het():
+        return "off"
+    return _SIG.get()
+
+
+def _signature_now():
     """Chữ ký để `mcp_catalog.load()` gộp vào khoá cache của nó.
 
     Gộp mtime của THƯ MỤC gói và của từng manifest, không quét sâu: thêm hoặc bớt một thư mục
@@ -483,3 +555,9 @@ def page_path(pid: str, rel: str):
 def invalidate():
     with _lock:
         _cache.update(sig=None, packs=[], connectors={})
+        _SIG.drop()
+    try:
+        import mcp_catalog
+        mcp_catalog.invalidate()
+    except Exception:  # noqa: BLE001 - the catalog re-checks by itself within mcp_catalog.CHECK_S
+        pass

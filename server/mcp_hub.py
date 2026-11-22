@@ -9,7 +9,9 @@ Quyền: mcp_catalog.allowed(connector, perm_connection, mode_lượt_chạy, to
 Mode đến từ header X-Javis-Mode (Claude/Codex) hoặc tham số (engine API).
 """
 import asyncio
+import contextvars
 import hashlib
+import fnmatch
 import json
 import os
 import re
@@ -18,7 +20,8 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, unquote
 
@@ -26,17 +29,31 @@ from fastapi.responses import JSONResponse, Response
 
 import chatbot_doc_tools
 import coding_files
+import default_brain
 import config
 import doc_text
 import hub_trace
+import job_recipes
+import kept
 import localefmt
 import mcp_catalog
 import mcp_client
 import mcp_store
 import once_ledger
+import turn_ledger
+import scout
+import code_mode
+import secret_guard
 import skill_router
 import skill_usage
 import team_gate
+import tool_finder
+import tool_images
+import tool_pins
+import tool_result_shaper
+import tool_result_reuse   # 2026-11-17: compact JSON + per-turn repeat references for CLI engines
+import section_select   # 2026-11-18: load the parts of a long menu-style skill a task needs
+import tool_result_tools
 import turn_context
 from config import STATE_DIR
 
@@ -54,6 +71,17 @@ _CACHE_TTL_THIEU = 10
 # keeps the short synchronous rule above; any change to the connection store (mtime) or invalidate_cache() still
 # drops the entry at once.
 _CACHE_STALE_MAX = 900
+# 2026-11-10: a source that stays down. The short rule above makes every turn dial again after 10 s, and a source that
+# accepts the connection but never answers holds that dial for the full timeout: measured 20 s added to EVERY chat turn
+# for as long as it stays down. Once two dials in a row came back missing the SAME sources, the partial list is served
+# as it is (up to this age) while the next dial runs in the background. The first miss still gets its synchronous
+# second chance, so a source that was only slow once is not written off; a source that recovers shows up one refresh
+# later instead of making everybody wait for it in the meantime.
+_CACHE_STALE_THIEU_MAX = 300
+# Entries of the module cache. One entry is a whole tool table (100 KB to 1 MB), and keys that end in a session id
+# (coding sessions, API-engine background work) never repeat, so without a cap the table of every session that ever
+# ran stayed in memory. Past the cap the oldest entries go; nothing is lost but one dial.
+_CACHE_MAX = 48
 _refreshing: set = set()
 _cache = {}          # (mode, vault_root) -> {"tools", "route", "ts", "mtime"}
 _cache_epoch = 0
@@ -67,15 +95,24 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic"}
 _mem_token = None   # fallback khi STATE_DIR không ghi được - PHẢI ngẫu nhiên, không được hằng số
 
 
+def _token_on_disk() -> str:
+    return _TOKEN_PATH.read_text(encoding="utf-8").strip() if _TOKEN_PATH.exists() else ""
+
+
+# 2026-11-13: every request to /hub/mcp compares its Bearer with this token, and each compare read the file on the
+# event loop: one more read that froze the hub when the disk stalled. The loop reads it from memory (kept.py).
+_TOKEN = kept.Value(lambda: _token_on_disk(), key=lambda: str(_TOKEN_PATH), name="hub token")
+
+
 def hub_token():
     global _mem_token
     try:
-        if _TOKEN_PATH.exists():
-            t = _TOKEN_PATH.read_text(encoding="utf-8").strip()
-            if t:
-                return t
+        t = _TOKEN.get()
+        if t:
+            return t
         t = _secrets.token_urlsafe(32)
         _TOKEN_PATH.write_text(t, encoding="utf-8")
+        _TOKEN.drop()
         try:
             os.chmod(_TOKEN_PATH, 0o600)
         except Exception:
@@ -99,6 +136,52 @@ def hub_url():
     return f"http://127.0.0.1:{hub_port()}/hub/mcp"
 
 
+def hide_hub_token(text):
+    """`text` without the hub bearer (security fix, 2026-11-10).
+
+    Engine configs that Javis writes carry the bearer, and some of them live inside a brain (`.grok/config.toml`,
+    `.agents/mcp_config.json`). A file tool that returned one of them handed the model, and whoever steers it, the key
+    of the whole hub. The tools still read those files; the key itself never leaves in a tool result."""
+    if not isinstance(text, str) or not text:
+        return text
+    try:
+        tok = hub_token()
+    except Exception:  # noqa: BLE001
+        return text
+    return text.replace(tok, "[hub token hidden]") if tok and tok in text else text
+
+
+def vault_header_refused(p) -> bool:
+    """True when a client-sent vault path points at Javis's own state instead of a brain (security fix, 2026-11-10).
+
+    The X-Javis-Vault header used to accept any directory that exists. With the state directory (or a folder above it)
+    as the "brain", the file tools of the hub read `.sessions.json` and wrote `plugins/<x>/plugin.yaml`, which the
+    server loads as Python. A brain is never the state directory, never a plugin or pack folder inside it, and never a
+    folder that contains it. Brains kept under BRAINS_DIR stay valid even when BRAINS_DIR sits inside the state
+    directory."""
+    try:
+        p = Path(p).resolve()
+        st = Path(STATE_DIR).resolve()
+    except (OSError, ValueError):
+        return True
+    if p == st or p in st.parents:
+        return True
+    if st not in p.parents:
+        return False
+    try:
+        br = _brains_dir().resolve()
+        if br != st and (p == br or br in p.parents) and (br == st or st in br.parents):
+            return p == br          # a brain under BRAINS_DIR is fine; BRAINS_DIR itself is not a brain
+    except (OSError, ValueError):
+        pass
+    try:
+        top = p.relative_to(st).parts[0].lower()
+    except (ValueError, IndexError):
+        return True
+    # Folders of the state directory that hold code the server runs, or its secrets and stores.
+    return top in ("plugins", "packs", ".staging", "__pycache__") or top.startswith(".")
+
+
 def allow_patterns():
     """Pattern cho --allowedTools của loop: mọi tool qua hub đều mang tên mcp__javis__*."""
     return ["mcp__javis"]
@@ -112,17 +195,34 @@ def allow_patterns():
 # `javis_team` (0.173.0) creates, edits and deletes team chats and writes assistant files: owner-only for the same reason.
 # `javis_watch` (0.239.0) makes the server fetch an address on a schedule and message the owner: not a customer's call.
 # `javis_login` (0.251.0) opens pages signed in as the owner (login vault): a customer must never browse as them.
+# Its op=browser (2026-11-21) puts a sign-in into the Playwright browser; `discover_all` then also keeps that
+# browser's own tools away from a bot.
 OWNER_ONLY_TOOLS = frozenset({"javis_reply_policy", "javis_reply_policy_tune", "javis_team", "javis_memory",
                               "javis_watch", "javis_login",
                               # 0.403.0: changes which notices reach the owner. A customer must never mute the owner.
                               "javis_notify",
+                              # 2026-11-04: renames Javis Core in the owner's brain. Not a customer's call.
+                              "javis_core_name",
+                              # 2026-11-10: steers which model background jobs run on. Not a customer's call.
+                              "javis_tune",
+                              # 2026-11-15: rewrites assistants, skills and memory, attaches Javis's own code, updates
+                              # and restarts the install. Only the owner asks for that.
+                              "javis_improve",
+                              # 2026-11-13: rewrites a project's instructions, notes, files and links.
+                              "javis_project",
                               # 2026-10-25: writes code that runs in the server (installed OFF, still owner's call).
                               "javis_plugin",
                               # 0.439.0: giao việc cho agent ngoài của chủ (Hermes, Muse) và cấp khoá cho chúng.
                               "javis_council",
                               # 0.259.0: tìm và đọc web. Bot nói chuyện với khách lạ không được biến
                               # máy chủ của chủ thành máy đi đọc web hộ bất kỳ ai nhắn tới.
-                              "javis_web_search", "javis_web_fetch"})
+                              "javis_web_search", "javis_web_fetch",
+                              # 2026-11-19 (PR 1554 review): list, read and message EVERY customer of the shop. A
+                              # stranger chatting with a bot must never read other customers' chats or write to them.
+                              "inbox_find", "inbox_reply",
+                              # 2026-11-05 audit: adds an MCP server to the store EVERY brain shares and dials it
+                              # at once. A customer must never plant a server in the owner's tool list.
+                              "javis_add_mcp"})
 
 
 # ============================================================
@@ -212,6 +312,73 @@ def audit_tail(limit=50, conn_id=None):
         return []
 
 
+def note_query_answer(tool: str, sent_chars: int) -> None:
+    """One javis_query answer: the characters a model read in place of the pages it queried."""
+    _sizes_append({"ts": datetime.now().isoformat(timespec="seconds"), "conn_id": "javis-query",
+                   "label": "javis_query", "tool": tool or "javis_query",
+                   "raw_chars": 0, "sent_chars": int(sent_chars or 0), "shape": "query"})
+
+
+def result_size_stats(days: int = 7, top: int = 10) -> dict:
+    """How large connection results were and how much of them a model was handed, from the sizes log.
+
+    Only calls a model read are counted (shape in tool_result_shaper.MODEL_KINDS), plus pages javis_query read
+    for itself and the answers it gave. The log is two files of 5 MB at most, so on a busy install this covers
+    less than `days`; `since` says how far it goes."""
+    days = max(1, min(90, int(days or 7)))
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")   # same clock as the log's `ts`
+    # "repeat": a repeated identical result handed over as a reference (tool_result_reuse, API engines)
+    counted = tool_result_shaper.MODEL_KINDS | {"raw", "query", "repeat", "sections"}
+    total = {"calls": 0, "raw_chars": 0, "sent_chars": 0, "stored": 0, "over_cap": 0}
+    by_tool, since = {}, ""
+    for path in (_SIZES_PATH.with_suffix(".jsonl.1"), _SIZES_PATH):
+        try:
+            if not path.exists():
+                continue
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    ts = str(rec.get("ts") or "")
+                    if ts < cutoff or rec.get("shape") not in counted:
+                        continue
+                    since = ts if not since or ts < since else since
+                    raw, sent = int(rec.get("raw_chars") or 0), int(rec.get("sent_chars") or 0)
+                    key = (str(rec.get("label") or rec.get("conn_id") or ""), str(rec.get("tool") or ""))
+                    row = by_tool.setdefault(key, {"calls": 0, "raw_chars": 0, "sent_chars": 0})
+                    for acc in (total, row):
+                        acc["calls"] += 1
+                        acc["raw_chars"] += raw
+                        acc["sent_chars"] += sent
+                    # small results tallied since the previous line: handed over whole
+                    total["calls"] += int(rec.get("small_calls") or 0)
+                    total["raw_chars"] += int(rec.get("small_chars") or 0)
+                    total["sent_chars"] += int(rec.get("small_chars") or 0)
+                    if rec.get("shape") in ("table", "preview", "text_preview"):
+                        total["stored"] += 1
+                    if raw > tool_result_shaper.INLINE_MAX_DEFAULT:
+                        total["over_cap"] += 1
+        except OSError:
+            continue
+    with _small_lock:                               # not yet written anywhere
+        total["calls"] += _small_tally["calls"]
+        total["raw_chars"] += _small_tally["chars"]
+        total["sent_chars"] += _small_tally["chars"]
+    saved = max(0, total["raw_chars"] - total["sent_chars"])
+    rows = sorted(by_tool.items(), key=lambda kv: kv[1]["raw_chars"] - kv[1]["sent_chars"], reverse=True)[:top]
+    try:
+        per_token = float((config.read_settings().get("context_runtime") or {}).get("estimate_chars_per_token") or 3.0)
+    except Exception:  # noqa: BLE001
+        per_token = 3.0
+    return {"days": days, "since": since, **total, "saved_chars": saved,
+            "saved_pct": round(saved * 100 / total["raw_chars"], 1) if total["raw_chars"] else 0.0,
+            "saved_tokens_est": int(saved / max(1.0, per_token)),
+            "shaping_on": bool(tool_result_shaper.settings().get("on")),
+            "by_tool": [{"source": k[0], "tool": k[1], **v} for k, v in rows]}
+
+
 # ============================================================
 # Rate limit (catalog rate_limit.calls_per_min - vd Zalo chống spam/ban)
 # ============================================================
@@ -232,6 +399,107 @@ def _rate_ok(conn_id, connector):
 # ============================================================
 # Guarded call - lớp quyền CỨNG + audit quanh mọi tool call
 # ============================================================
+_SIZES_PATH = STATE_DIR / "tool_result_sizes.jsonl"
+
+
+def _sizes_append(rec):
+    """One line per connection result: how large it was and how much of it a model was handed. A file of its own,
+    so the audit log keeps its meaning (who called what, allowed or not) and its size."""
+    try:
+        if _SIZES_PATH.exists() and _SIZES_PATH.stat().st_size > 5_000_000:
+            _SIZES_PATH.replace(_SIZES_PATH.with_suffix(".jsonl.1"))
+        with _SIZES_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001 - a meter never fails a tool call
+        print(f"[hub sizes] {e}", file=sys.stderr)
+
+
+# Small results are not written to the sizes log one by one (a file write per call on the event loop is exactly
+# what tools/loop_audit.py exists to stop). They are tallied here and ride along on the next line that is written.
+_small_tally = {"calls": 0, "chars": 0}
+_small_lock = threading.Lock()
+_SHAPE_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="javis-shape")
+
+
+def _shape_and_log(text, fn, conn, tool, scope):
+    """Worker-thread half of `_shaped_call`: parse, maybe store, and write the sizes line."""
+    shaped = tool_result_shaper.shape(text, tool=fn, conn_id=conn["id"], scope=scope)
+    with _small_lock:
+        small_calls, small_chars = _small_tally["calls"], _small_tally["chars"]
+        _small_tally["calls"] = _small_tally["chars"] = 0
+    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "conn_id": conn["id"],
+           "label": conn.get("label"), "tool": tool, "raw_chars": shaped.raw_chars,
+           # "raw" = pages javis_query read for itself: none of it reached a model
+           "sent_chars": 0 if shaped.kind == "raw" else shaped.sent_chars, "shape": shaped.kind}
+    if small_calls:
+        rec["small_calls"], rec["small_chars"] = small_calls, small_chars
+    _sizes_append(rec)
+    return shaped
+
+
+# One line in the tool search's description when a scout is available: the model must know it exists to decide to
+# use it, and a line costs far less per turn than listing the whole tool.
+SCOUT_HINT = (" javis_scout(task): giao model nền ĐỌC dữ liệu nặng (nhiều nguồn, nhiều trang, kỳ dài) rồi chỉ trả "
+              "về kết luận; gọi qua {run}.")
+# Same idea for javis_code (code_mode.py): one line, in English like every new prompt text.
+CODE_MODE_HINT = (" javis_code(code): run a read-only Python script that chains several tool reads and returns only "
+                  "what it prints; call via {run}.")
+
+
+def _shape_view(result, name, scope):
+    """An explicit `result_view` of javis_run_tool, shaped like any result and counted as what the model read (the
+    inner call was logged as read-for-itself, with nothing sent)."""
+    shaped = tool_result_shaper.shape(result, tool=name, scope=scope)
+    _sizes_append({"ts": datetime.now().isoformat(timespec="seconds"), "conn_id": "javis-view", "label": "result_view",
+                   "tool": name, "raw_chars": 0, "sent_chars": shaped.sent_chars, "shape": "query"})
+    return shaped.text
+
+
+def _shaped_call(call, ent, fn, scope):
+    """The OUTERMOST layer of a connection tool's route: shape the result for whoever reads it.
+
+    Outside the permission guard and outside plugin hooks on purpose: a `post_tool_call` hook must keep seeing what
+    the tool really returned, not the view made for a model. What happens to a result (tool_result_shaper): an
+    internal caller gets it untouched; a model's tool loop gets errors and small results word for word, JSON
+    without indentation or empty fields, and a large result stored whole and replaced by a view with a
+    reference. Large results are parsed and stored off the event loop.
+
+    scope: the brain this tool list was built for. A stored result can be read back only by a turn of that brain."""
+    conn = ent["conn"]
+    tool = ent["tool"]
+
+    async def _call(args):
+        audience = tool_result_shaper.audience()
+        # Inside a model's turn an image the tool returns is saved in this brain and shown in the chat (tool_images).
+        with tool_images.saving_to(scope if audience else "", tool):
+            result = await call(args)
+        if audience == "":
+            return result                       # an internal caller: exactly as before, and not measured
+        text = result if isinstance(result, str) else str(result)
+        if len(text) < tool_result_shaper.MIN_SHAPE_CHARS:
+            # nothing to parse or store: decided inline, counted in memory
+            shaped = tool_result_shaper.shape(text, tool=fn, conn_id=conn["id"], scope=scope)
+            with _small_lock:
+                _small_tally["calls"] += 1
+                _small_tally["chars"] += len(text)
+        else:
+            # Its own small pool, not the general one: parsing holds the interpreter lock, and two dozen results
+            # parsed at once on thirty threads starved the event loop for 200 ms (measured, test_tool_result_scale).
+            ctx = contextvars.copy_context()
+            shaped = await asyncio.get_running_loop().run_in_executor(
+                _SHAPE_POOL, ctx.run, _shape_and_log, text, fn, conn, tool, scope)
+        if shaped.kind in tool_result_shaper.MODEL_KINDS:
+            # A recurring job's read calls are what its recipe replays (job_recipes.py). No job, no recording.
+            job = str((turn_context.current() or {}).get("job") or "")
+            if job:
+                # only a call that is plainly a read may ever be repeated by Javis (tool_result_tools.is_plain_read)
+                if tool_result_tools.is_plain_read(ent, args):
+                    job_recipes.note_call(job, fn, args, ok=not text.lstrip().startswith("ERROR:"), ref=shaped.ref)
+        return shaped.text if shaped.kind in tool_result_shaper.CHANGED_KINDS else result
+
+    return _call
+
+
 def _guard(ent, fn, mode):
     """Bọc 1 route entry MCP thành async call có kiểm quyền + audit."""
     conn = ent["conn"]
@@ -268,6 +536,9 @@ def _guard(ent, fn, mode):
         if cls == "read":
             result = await mcp_client.call_route({fn: {"spec": ent["spec"], "tool": tool}}, fn, args)
         else:
+            # 16/11/2026: a chat turn that acts outside is marked, so a restart in the middle of it does not run the
+            # whole turn again by itself (turn_ledger.py). A turn that only read things is safe to run again.
+            turn_ledger.mark_acted(str((turn_context.current() or {}).get("session_id") or ""))
             # 0.238.0: a Kanban job that runs again must not send, post or order twice (once_ledger.py).
             # Outside a background job this calls straight through.
             result = await once_ledger.run(
@@ -300,6 +571,23 @@ def _guard(ent, fn, mode):
 # ============================================================
 _AMBIENT_TTL = 300          # giây - danh sách connector tài khoản ít đổi, cache rộng
 _ambient_cache = {"ts": 0.0, "servers": [], "refreshing": False}
+
+
+def _outside_plugin_call(fn, call):
+    """A plugin tool whose strongest level is `full` acts outside (sends, posts, orders), like a connector call that
+    is not a read. 16/11/2026, for work that runs again by itself after a restart:
+
+    - a chat turn that calls it is marked, so the turn is not run again as a whole (turn_ledger.py);
+    - a team step records it once per step chain, so the step that runs again does not do it twice (once_ledger.py,
+      the `team:` keys of team_runner.once_key). Kanban jobs keep calling plugin tools straight through, as before.
+
+    The turn is read at CALL time: routes are cached and shared by every turn."""
+    async def _run(args):
+        turn_ledger.mark_acted(str((turn_context.current() or {}).get("session_id") or ""))
+        if once_ledger.current_job().startswith("team:"):
+            return await once_ledger.run(fn, args, call)
+        return await call(args)
+    return _run
 
 
 def _ambient_enabled():
@@ -572,7 +860,8 @@ def _connections_json(include_ambient=False, hidden=None, bo_qua=None, owner_cha
                                   "Code. Model đang chạy bằng API key nên không gọi được. Nói đúng lý do đó, rồi "
                                   "chỉ hai cách: nối nguồn này ở trang Kết nối của Javis (mọi model đều dùng "
                                   "được), hoặc đổi model chat sang Claude Code.")})
-    return json.dumps(out, ensure_ascii=False, indent=1)
+    # Compact: a model reads this list on every engine; indent=1 made a sample list of six connections 17% longer.
+    return json.dumps(out, ensure_ascii=False, separators=(",", ":"))
 
 
 def _skills_dir(vault_root):
@@ -585,8 +874,46 @@ def _list_skills(vault_root):
     return skill_router.enabled_slugs(vault_root)
 
 
+def _rel_trong_goc(p, vault_root, workspace_root):
+    """Path of `p` relative to the brain or a working folder, or None when it sits in neither."""
+    goc = [vault_root] + list(workspace_root if isinstance(workspace_root, (list, tuple)) else
+                              ([workspace_root] if workspace_root else []))
+    for base in goc:
+        if not base:
+            continue
+        try:
+            return Path(p).resolve().relative_to(Path(base).resolve())
+        except (ValueError, TypeError, OSError):
+            continue
+    return None
+
+
+def _ghi_vung_bao_ve(p, vault_root, workspace_root, mode, for_bot=False) -> str:
+    """Refusal text when a run below Full access, or any customer bot, writes a file that runs or configures code.
+
+    Security fix (2026-11-05 audit): plugins/ with `enabled: true` is loaded as Python in the server, Javis/loops,
+    Javis/scripts and reminders run later at Full access, .git/config and .claude/settings.json run commands. Before this
+    only a gated Team step was stopped there, so an "auto" bot steered by a stranger, or an auto loop reading untrusted
+    text, could plant one of these and climb to Full access. Full-access owner runs keep writing them as before (the
+    owner's own chat already has a shell). A gated Team step keeps its approval path below, so it is not refused here.
+    """
+    if mode == team_gate.HUB_MODE:
+        return ""
+    duoi_full = mcp_catalog.effective_perm("full", mode) != "full"
+    if not (duoi_full or for_bot):
+        return ""
+    rel = _rel_trong_goc(p, vault_root, workspace_root)
+    if rel is not None and not team_gate.protected_rel(rel):
+        return ""
+    ai = "chatbot trả lời khách" if for_bot else f"việc chạy ở mức '{mode}' (dưới Toàn quyền)"
+    return (f"ERROR: {ai} không được ghi vào '{rel if rel is not None else p}'. Thư mục plugins/, Javis/ (loop, script, "
+            ".javis), .git, .claude và cấu hình engine là nơi CHỨA MÃ CHẠY hoặc việc chạy toàn quyền, nên chỉ chủ ở mức "
+            "Toàn quyền mới ghi được. Đây là rào bảo mật, không phải lỗi ổ đĩa. Ghi nội dung vào chỗ khác (ví dụ "
+            "drafts/) hoặc đưa nội dung vào câu trả lời để chủ tự xem.")
+
+
 def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang="", staging=False,
-                   bo_qua=None, workspace_root=None, coding_ctx_cua_phien=None):
+                   bo_qua=None, workspace_root=None, coding_ctx_cua_phien=None, for_bot=False):
     """(tools_spec, route) các tool nội bộ cho engine API. Claude/Codex có tool file native
     nên hub HTTP không trả nhóm này (chỉ meta javis_connections).
     include_ambient=True (đường engine Claude): javis_connections kèm cả connector tài khoản
@@ -697,6 +1024,11 @@ def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang=""
                     f"dùng vừa đính kèm vào khung chat.")
         if not p.is_file():
             return f"ERROR: không có file '{rel}'"
+        # Security (2026-11-10): the secret tripwire of the shell and of Claude Code's own tools also covers this tool.
+        bi_mat = secret_guard.check_text(str(p))
+        if bi_mat:
+            secret_guard.note_blocked("javis_read_file", bi_mat, str(rel or ""))
+            return secret_guard.refusal(bi_mat)
         if p.suffix.lower() in _IMAGE_SUFFIXES:
             # Reading a photo as text hands the model a page of mojibake it then "describes" with confidence. Say what the
             # file is and how to actually see it (0.73.0).
@@ -708,6 +1040,7 @@ def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang=""
             text = await asyncio.to_thread(doc_text.extract, p)
         else:
             text = p.read_text(encoding="utf-8", errors="replace")
+        text = hide_hub_token(text)
         # 0.256.0: đọc theo đoạn có số dòng "N|..." khi xin offset/limit, hoặc khi file nằm trong
         # thư mục làm việc của phiên Coding (ở đó số dòng là thứ model cần để sửa từng đoạn).
         # Chat thường không xin thì GIỮ NGUYÊN output cũ: chatbot và luồng brain dựa vào nó.
@@ -729,7 +1062,7 @@ def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang=""
             rows.append(("[d] " if e.is_dir() else "    ") + e.name)
         return "\n".join(rows) or "(trống)"
 
-    async def _kiem_ghi(args, ten_tool="javis_write_file"):
+    async def _kiem_ghi(args, ten_tool="javis_write_file"):  # noqa: C901
         """(đường dẫn đã duyệt, lỗi). Mọi rào trước khi GHI, dùng chung cho ghi và sửa file."""
         if mcp_catalog.effective_perm("full", mode) == "readonly":
             # Câu này phải NÓI RÕ ĐÂY LÀ QUYỀN CỦA JAVIS, không phải lỗi máy. Bản cũ chỉ ghi
@@ -770,6 +1103,9 @@ def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang=""
                         "Nói với người dùng rằng ghi nhớ đang tắt (bật lại ở Javis Core > Trí nhớ).")
         except Exception:
             pass
+        loi_bao_ve = _ghi_vung_bao_ve(p, vault_root, workspace_root, mode, for_bot)
+        if loi_bao_ve:
+            return None, loi_bao_ve
         if mode == team_gate.HUB_MODE:
             # 0.207.0 review: a gated Team step writes its deliverables, never files that run or configure code
             # (plugins/, .claude/, Javis/ loops and reminders...). Those go through the owner's approval like any action.
@@ -861,6 +1197,11 @@ def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang=""
 
     async def _skill(args):
         name = str((args or {}).get("name") or "").strip()
+        # 2026-11-18 (section_select): a long skill built as a menu loads the parts this task needs; `section` and
+        # `full` fetch more. Every doubt loads the whole skill, as before.
+        want_section = str((args or {}).get("section") or "").strip()
+        want_full = bool((args or {}).get("full"))
+        task = str((args or {}).get("task") or "").strip()
         from improvement_task_skill_scope import current, ScopeUnavailable
         from improvement_blobs import AssetUnavailable
         import sqlite3
@@ -878,7 +1219,23 @@ def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang=""
         if asset is None:
             return ("ERROR: không có skill đó. Skill khả dụng: "
                     + (", ".join(_list_skills(vault_root)) or "(chưa có)"))
-        text = _skill_base_line(vault_root, asset) + asset.text[:60_000]
+        base = _skill_base_line(vault_root, asset)
+        text = base + asset.text[:60_000]
+        _sess = section_select.session_key()
+        if want_section:
+            part = section_select.find_section(asset.text, want_section)
+            if part is None:
+                return (f"ERROR: skill `{asset.slug}` has no section matching '{want_section}'. Its sections: "
+                        + "; ".join(section_select.section_titles(asset.text)))
+            await asyncio.to_thread(section_select.note_fetch, "skill", asset.slug, _sess,
+                                    section_select.resolve_title(asset.text, want_section) or want_section)
+            return base + part
+        if want_full:
+            await asyncio.to_thread(section_select.note_fetch, "skill", asset.slug, _sess, "*")
+        else:
+            picked = await asyncio.to_thread(section_select.for_skill, asset.slug, asset.text, task, None, _sess)
+            if picked:
+                text = base + picked
         # ĐIỂM ĐẾM DUY NHẤT: mọi engine nạp skill qua tool này đều đi ngang đây. Chỉ đếm ở
         # đường THÀNH CÔNG - nhánh trên đã lọc slug sai/skill tắt nên không đếm gõ nhầm.
         # Count the slug verified by the shared reader, not the raw name from the engine.
@@ -968,9 +1325,12 @@ def _builtin_tools(mode, vault_root, include_ambient=False, hidden=None, lang=""
         listing += (f"; …(+{_con_lai} skill nữa không liệt kê ở đây, vẫn nạp được bằng "
                     f"name=<slug> nếu biết tên - xem Javis/index.md)")
     add("javis_use_skill",
-        "Nạp nội dung 1 skill (hướng dẫn chuyên sâu) rồi LÀM THEO. Truyền name=<slug>. "
-        "Skill khả dụng (slug: mô tả): " + (listing or "(chưa có)"),
-        {"name": {"type": "string"}}, ["name"], _skill)
+        "Load a skill (in-depth instructions) and FOLLOW it. Pass name=<slug> and task=<what you are about to do, in a "
+        "few words, in the language of the skill's description: translate the request if needed>; a long skill may "
+        "come back as the parts this task needs, listing the rest: read one with "
+        "section=<title>, or all with full=true. Available skills (slug: description): " + (listing or "(none yet)"),
+        {"name": {"type": "string"}, "task": {"type": "string"}, "section": {"type": "string"},
+         "full": {"type": "boolean"}}, ["name"], _skill)
 
     # `javis_run_command` chỉ hiện khi phiên CÓ thư mục làm việc. Phiên chat thường không thấy
     # nó, nên không có chuyện một câu hỏi bình thường lại gọi được lệnh máy. Mức quyền vẫn do
@@ -1123,7 +1483,9 @@ CORE_CODING_FNS = frozenset({"javis_edit_file", "javis_search_files"})
 # Mô tả nhóm tool nội bộ cho thực đơn lazy. Builtin/plugin không có connector trong
 # mcp_catalog nên không tự có mô tả; thiếu dòng này thì model chỉ thấy "javis (javis, N tool)".
 _LOCAL_GROUP_DESC = {
-    "javis": "skill của brain, danh sách nguồn đang đấu, tiện ích nội bộ",
+    # Cut at 70 characters in the menu. Names what the prompt promises (Kanban work, reminders, team chats) so a
+    # model looking for javis_team knows it sits here and searches, instead of saying it has too many tools.
+    "javis": "việc nền, lịch nhắc, nhóm chat, trợ lý, skill của brain, tiện ích",
     "plugin": "tool do plugin cài thêm",
 }
 
@@ -1222,26 +1584,32 @@ def _connector_menu(pool, ambient=None):
     return "; ".join(parts)
 
 
-def _rank_tools(pool, query, top_k):
-    """Xếp hạng pool theo độ khớp query: khớp cả cụm (+5), đếm từ khoá (+1/từ), boost khi
-    query nhắc thẳng namespace (+3). Trả top_k tool điểm > 0; query rỗng → [] (handler trả menu)."""
-    q = (query or "").strip().lower()
-    if not q:
-        return []
-    terms = set(_WORD_RE.findall(q))
-    scored = []
+def _source_descs(pool):
+    """namespace -> one-line description of the source (catalog, plugin manifest or local group), the same
+    words the connector menu shows. tool_finder reads them to send "doanh thu" to a POS whose tools only
+    speak English."""
+    out = {}
     for t in pool:
-        hay = " ".join([str(t.get("fn") or ""), str(t.get("name") or ""), str(t.get("description") or ""),
-                        str(t.get("namespace") or ""), str(t.get("label") or "")]).lower()
-        score = 5 if q in hay else 0
-        score += sum(1 for w in terms if w in hay)
-        ns = str(t.get("namespace") or "").lower()
-        if ns and ns in q:
-            score += 3
-        if score > 0:
-            scored.append((score, t))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [t for _s, t in scored[:top_k]]
+        ns = t.get("namespace") or t.get("server") or "?"
+        if ns in out:
+            continue
+        con = mcp_catalog.get(t.get("connector_id")) or {}
+        out[ns] = (str(con.get("description") or "").strip() or str(t.get("group_desc") or "").strip()
+                   or _LOCAL_GROUP_DESC.get(ns, ""))
+    return out
+
+
+def _rank_tools(pool, query, top_k, index=None):
+    """Tools of `pool` that match `query`, best first, at most top_k; [] for an empty query or no match.
+
+    2026-11-19: ranking moved to tool_finder (concepts in Vietnamese and English, BM25, named sources,
+    spelling). The word count it replaces found the right tool for 20 of 55 everyday requests on a real
+    brain; see tool_finder's docstring for why."""
+    idx = index or tool_finder.Index(pool, _source_descs(pool))
+    res = idx.search(query)
+    if res["browse"]:
+        return []
+    return [t for t, _s in res["hits"][:top_k]]
 
 
 def _hidden_hint(hidden, only_ns=None):
@@ -1269,10 +1637,37 @@ def _hidden_hint(hidden, only_ns=None):
 _SO_KQ_DAY_DU = 3
 _MO_TA_DAY_DU = 4000
 _MO_TA_GON = 400
+# Whole answer of one tool search, in characters. Hits are listed in full (description + schema) while they fit;
+# the rest are named with one line each, and a search by exact name returns the schema of any of them. The best
+# hit is always given in full, whatever its size.
+_SEARCH_BUDGET_CHARS = 6000
+_MO_TA_TEN = 160
+# After the top_k hits with arguments, this many more are named with one line each: cheap (about 250
+# characters each) and they turn "not in the list" into "one more search by exact name".
+_THEM_GON = 8
+# One line per tool when a search only names a source and gets the source's whole list.
+_MO_TA_LIET_KE = 90
+
+
+def _tool_chars(t) -> int:
+    """Characters one tool costs when it is shown directly: its name, description and schema."""
+    try:
+        return (len(str(t.get("fn") or "")) + len(str(t.get("description") or ""))
+                + len(json.dumps(t.get("schema") or {}, ensure_ascii=False)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _counted(call, pins_key, fn, size):
+    """A pinned tool's call, counted: it keeps its place only while it is really called (tool_pins)."""
+    async def _call(args):
+        tool_pins.note_run(pins_key, fn, size, direct=True)
+        return await call(args)
+    return _call
 
 
 def _lazy_tools_and_route(visible_tools, visible_route, pool, full_route, top_k, ambient=None,
-                          hidden=None):
+                          hidden=None, pins_key="", scope=""):
     """Dựng (tools_spec, route) chế độ lazy: builtins/plugin hiện trực tiếp + 2 meta-tool.
     _search đóng gói `pool` (full tools_spec để xếp hạng); _run đóng gói `full_route` (dispatch
     qua call_route → giữ nguyên _guard quyền/audit/rate-limit).
@@ -1280,31 +1675,113 @@ def _lazy_tools_and_route(visible_tools, visible_route, pool, full_route, top_k,
     (chúng KHÔNG nằm trong pool nên _run không gọi được; phải gọi thẳng)."""
     ambient = ambient or []
     menu = _connector_menu(pool, ambient)
+    by_fn = {t.get("fn"): t for t in pool} if pins_key else {}
+
+    index_box = []
+
+    def _index():
+        # Built on the first search of this tool list, not when the list is built: most turns never search.
+        if not index_box:
+            index_box.append(tool_finder.Index(pool, _source_descs(pool)))
+        return index_box[0]
+
+    def _src(t):
+        return str(t.get("label") or t.get("namespace") or "")
+
+    def _also(group):
+        # The same tool in other accounts of the same kind (three POS shops, three Zalo accounts): named once
+        # under the first, so the list has room for the second and third tool the request needs.
+        return [{"name": t.get("fn"), "source": _src(t)} for t in group[1:]]
 
     async def _search(args):
         q = (args or {}).get("query") or ""
-        hits = _rank_tools(pool, q, top_k)
+        if pins_key:
+            tool_pins.note_search(pins_key)
+        res = _index().search(q)
         amb = _match_ambient(ambient, q)
+        hits = res["hits"]
         if not hits and not amb:
             hint = _hidden_hint(hidden)
             return ("Không thấy tool khớp. Nguồn đang đấu: " + (menu or "(chưa có nguồn nào)")
-                    + f". Nêu rõ nguồn hoặc việc cần làm rồi gọi lại {_LAZY_SEARCH}."
+                    + f". Gọi lại {_LAZY_SEARCH} với TÊN NGUỒN (liệt kê mọi tool của nguồn đó) hoặc mô tả việc "
+                      "bằng từ khác, tiếng Việt hay tiếng Anh đều được."
                     + (" " + hint if hint else ""))
         payload = {}
-        hint = _hidden_hint(hidden, {t.get("namespace") for t in hits})
+        hint = _hidden_hint(hidden, {t.get("namespace") for t, _s in hits})
         if hint:
             payload["luu_y_quyen"] = hint
-        if hits:
+        if res["browse"]:
+            # The request named a source and nothing to do with it: list what that source has, by name, so
+            # the next search (or the run) can ask for the exact one.
+            labels = sorted({_src(t) for t, _s in hits})
+            listing, used = [], 0
+            for group in tool_finder.group_hits(hits):
+                t = group[0]
+                d = " ".join(str(t.get("description") or "").split())
+                item = {"name": t.get("fn"), "description": d[:_MO_TA_LIET_KE]}
+                if len(group) > 1:
+                    item["same_tool_in"] = _also(group)
+                size = len(json.dumps(item, ensure_ascii=False))
+                if used + size > _SEARCH_BUDGET_CHARS:
+                    item = {"name": t.get("fn")}
+                    size = len(t.get("fn") or "") + 12
+                    if used + size > _SEARCH_BUDGET_CHARS + 1500:
+                        break
+                listing.append(item)
+                used += size
+            payload["source_tools"] = listing
+            payload["source_note"] = (f"Mọi tool của {', '.join(labels)} ({len(listing)}/{len(hits)} nhóm). Gọi "
+                                      f"{_LAZY_SEARCH} với đúng tên một tool để lấy tham số của nó.")
+        elif hits:
             # Mô tả ĐẦY ĐỦ cho vài kết quả đầu, gọn cho phần còn lại. Cắt đồng loạt 400 ký tự
             # từng nuốt mất thông tin sống còn: mô tả COMPOSIO_SEARCH_TOOLS ghi "User has
             # manually connected the apps: gmail, googlecalendar..." ở quãng ký tự 1000, nên
             # model không bao giờ biết người dùng đã nối những app nào (vụ 24/09).
-            payload["tools"] = [{"name": t.get("fn"),
-                                 "description": (t.get("description") or "")[
-                                     :(_MO_TA_DAY_DU if i < _SO_KQ_DAY_DU else _MO_TA_GON)],
-                                 "schema": t.get("schema") or {"type": "object", "properties": {}}}
-                                for i, t in enumerate(hits)]
-            payload["goi_the_nao"] = f"Gọi tool bằng {_LAZY_RUN}(name=<name>, args={{...}})."
+            full, brief, used = [], [], 0
+            groups = tool_finder.group_hits(hits)
+            for i, group in enumerate(groups[:top_k + _THEM_GON]):
+                t = group[0]
+                item = {"name": t.get("fn"), "source": _src(t),
+                        "description": (t.get("description") or "")[
+                            :(_MO_TA_DAY_DU if i < _SO_KQ_DAY_DU else _MO_TA_GON)],
+                        "schema": t.get("schema") or {"type": "object", "properties": {}}}
+                if len(group) > 1:
+                    item["same_tool_in"] = _also(group)
+                size = len(json.dumps(item, ensure_ascii=False))
+                if full and (brief or i >= top_k or used + size > _SEARCH_BUDGET_CHARS):
+                    b = {"name": t.get("fn"), "source": _src(t),
+                         "description": " ".join(str(t.get("description") or "").split())[:_MO_TA_TEN]}
+                    if len(group) > 1:
+                        b["same_tool_in"] = _also(group)
+                    brief.append(b)
+                    continue
+                full.append(item)
+                used += size
+            payload["tools"] = full
+            if brief:
+                payload["more_tools"] = brief
+                payload["more_tools_note"] = (f"Also match, listed without their arguments. Call {_LAZY_SEARCH} "
+                                              "with the exact name to get the schema of one.")
+            rest = tool_finder.group_hits(res.get("rest") or [])
+            shown = {g[0].get("fn") for g in groups[:len(full) + len(brief)]}
+            rest = [g for g in rest if g[0].get("fn") not in shown]
+            if rest:
+                # The request named a small source: the rest of it, one short line each, so a tool the words
+                # missed is still one exact-name search away.
+                payload["rest_of_source"] = [
+                    {"name": g[0].get("fn"),
+                     "description": " ".join(str(g[0].get("description") or "").split())[:_MO_TA_LIET_KE]}
+                    for g in rest]
+            if res["other"]:
+                payload["other_sources"] = [
+                    {"name": t.get("fn"), "source": _src(t),
+                     "description": " ".join(str(t.get("description") or "").split())[:_MO_TA_TEN]}
+                    for t, _s in res["other"]]
+            if any(len(g) > 1 for g in groups[:len(full) + len(brief)]):
+                payload["tai_khoan"] = ("Tool có same_tool_in tồn tại ở nhiều tài khoản/nguồn cùng loại. Chọn "
+                                        "đúng tài khoản người dùng nói tới; chưa rõ thì hỏi lại, đừng đoán.")
+            payload["goi_the_nao"] = (f"Gọi tool bằng {_LAZY_RUN}(name=<name>, args={{...}}). "
+                                     "Nếu cổng làm mất khoá trong args, dùng args_json là chuỗi JSON object thay args.")
         if amb:
             # Connector tài khoản Claude: tool native đã có sẵn trong danh sách tool của engine.
             payload["tai_khoan_claude"] = [
@@ -1318,21 +1795,74 @@ def _lazy_tools_and_route(visible_tools, visible_route, pool, full_route, top_k,
     async def _run(args):
         name = str((args or {}).get("name") or "").strip()
         targs = (args or {}).get("args")
+        encoded_args = (args or {}).get("args_json")
+        if encoded_args is not None:
+            if not isinstance(encoded_args, str):
+                return "ERROR: args_json must be a JSON object encoded as a string."
+            if targs not in (None, {}):
+                return "ERROR: use either args or args_json, not both."
+            targs = encoded_args
         if isinstance(targs, str):          # vài model gói args thành chuỗi JSON
             try:
                 targs = json.loads(targs)
             except (ValueError, TypeError):
-                targs = {}
+                return "ERROR: invalid JSON arguments; pass an object or args_json containing a JSON object."
         if not isinstance(targs, dict):
+            if targs is not None:
+                return "ERROR: tool arguments must be a JSON object."
             targs = {}
         if not name:
             return f"ERROR: thiếu 'name'. Dùng {_LAZY_SEARCH} để tìm tên tool trước."
         if name in (_LAZY_SEARCH, _LAZY_RUN):
             return f"ERROR: '{name}' là meta-tool, không gọi qua {_LAZY_RUN}."
         if name not in full_route:
-            return (f"ERROR: không có tool '{name}'. Dùng {_LAZY_SEARCH} để lấy đúng tên "
-                    "(phải khớp y hệt kết quả tìm).")
-        return await mcp_client.call_route(full_route, name, targs)
+            # A name without its source prefix ("zalo_get_history") or with a typo used to end here with
+            # "search again". When exactly one tool of this list carries that name, it is the one meant;
+            # otherwise name the candidates so the next call is the right one, not another search.
+            listed = {t.get("fn") for t in pool} | set(visible_route)
+            near = [f for f in tool_finder.suggest_names(name, [f for f in full_route if f in listed or not pool])
+                    if f not in (_LAZY_SEARCH, _LAZY_RUN)]
+            # Only auto-match a bare name without a namespace prefix; an explicit "ns__tool" must never
+            # silently dispatch to another account or connector.
+            same_tail = ([] if "__" in name else
+                         [f for f in near if f.lower().split("__")[-1] == name.lower().split("__")[-1]])
+            if len(same_tail) == 1:
+                name = same_tail[0]
+            else:
+                if near:
+                    src = {t.get("fn"): str(t.get("label") or t.get("namespace") or "") for t in pool}
+                    opts = "; ".join(f"{f}" + (f" ({src[f]})" if src.get(f) else "") for f in near)
+                    return (f"ERROR: không có tool '{name}'. Gần nhất: {opts}. Gọi lại {_LAZY_RUN} với đúng một "
+                            "tên ở trên (chọn đúng tài khoản người dùng nói tới).")
+                return (f"ERROR: không có tool '{name}'. Dùng {_LAZY_SEARCH} để lấy đúng tên "
+                        "(phải khớp y hệt kết quả tìm).")
+        if name in by_fn:
+            # One call that needed a search round first: the count that earns a tool its pin (tool_pins).
+            tool_pins.note_run(pins_key, name, _tool_chars(by_fn[name]))
+        view = (args or {}).get("result_view")
+        if not view:
+            return await mcp_client.call_route(full_route, name, targs)
+        # An explicit view is cut from the WHOLE result, so the inner call runs unshaped; what the view leaves is
+        # then shaped like any other result. Same permission/audit/plugin route, executed only once.
+        from tool_result_view import project_result
+        audience = tool_result_shaper.audience()
+        with tool_result_shaper.raw_results():
+            result = await mcp_client.call_route(full_route, name, targs)
+        projected = project_result(result, view, tool_name=name)
+        if projected is result and isinstance(result, str):
+            # Some servers print a status line before the JSON ("HTTP 200 OK\n---\n{...}"): the view then found
+            # no JSON to cut. Take the view from the JSON part.
+            parsed = tool_result_shaper.parse_document(result)
+            if parsed is not None and parsed.prefix.strip() and not parsed.multi:
+                body = json.dumps(parsed.data, ensure_ascii=False)
+                cut = project_result(body, view, tool_name=name)
+                if cut is not body:
+                    projected = cut
+        result = projected
+        if audience != "model":
+            return result
+        with tool_result_shaper.for_model():
+            return await asyncio.to_thread(_shape_view, result, name, scope)
 
     tools = list(visible_tools)
     route = dict(visible_route)
@@ -1341,7 +1871,11 @@ def _lazy_tools_and_route(visible_tools, visible_route, pool, full_route, top_k,
                                   "ngữ cảnh khi cần). query = mô tả việc cần làm hoặc tên nguồn. Nguồn "
                                   "đang đấu: " + (menu or "(chưa có nguồn nào)") + f". Kết quả trả tên + "
                                   f"tham số tool để gọi tiếp qua {_LAZY_RUN}; nếu khớp nguồn tài khoản "
-                                  "Claude thì trả hướng dẫn gọi thẳng tool native mcp__<tên>__*."),
+                                  "Claude thì trả hướng dẫn gọi thẳng tool native mcp__<tên>__*."
+                                  + (SCOUT_HINT.format(run=_LAZY_RUN)
+                                     if any(t.get("fn") == scout.TOOL for t in pool) else "")
+                                  + (CODE_MODE_HINT.format(run=_LAZY_RUN)
+                                     if any(t.get("fn") == code_mode.TOOL for t in pool) else "")),
                   "schema": {"type": "object", "properties": {
                       "query": {"type": "string",
                                 "description": "Việc cần làm / nguồn / từ khoá, vd 'doanh thu POS hôm nay'"}},
@@ -1349,22 +1883,34 @@ def _lazy_tools_and_route(visible_tools, visible_route, pool, full_route, top_k,
     tools.append({"fn": _LAZY_RUN, "server": "javis", "name": _LAZY_RUN,
                   "description": (f"GỌI một tool MCP đã tìm được qua {_LAZY_SEARCH}. name = tên tool (đúng "
                                   "y hệt kết quả tìm), args = tham số (object). Quyền/audit/giới hạn tần "
-                                  "suất áp y như gọi trực tiếp."),
+                                  "suất áp y như gọi trực tiếp. Nếu backend làm mất khoá trong args, "
+                                  "dùng args_json là chuỗi JSON đầy đủ, ví dụ {\"op\":\"pending\"}."),
                   "schema": {"type": "object", "properties": {
                       "name": {"type": "string", "description": f"Tên tool lấy từ {_LAZY_SEARCH}"},
-                      "args": {"type": "object", "description": "Tham số tool (object)"}},
+                      "args": {"type": "object", "description": "Tham số tool (object)"},
+                      "args_json": {"type": "string", "description": "Tham số tool dưới dạng chuỗi JSON object; dùng thay args để giữ nguyên các khoá động, ví dụ {\"op\":\"pending\"}."},
+                      "result_view": {"type": "object", "description": "Optional explicit JSON view after execution. Keeps errors and source IDs. Does not cache or replay tools.",
+                          "properties": {"pointer": {"type": "string", "description": "JSON pointer, e.g. /data/tasks"},
+                              "fields": {"type": "array", "items": {"type": "string"}},
+                              "offset": {"type": "integer", "minimum": 0},
+                              "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+                          "additionalProperties": False}},
                       "required": ["name"]}})
     route[_LAZY_SEARCH] = {"call": _search}
     route[_LAZY_RUN] = {"call": _run}
     return tools, route
 
 
-def _apply_lazy(tools_spec, route, include_ambient=False, hidden=None, force=False):
+def _apply_lazy(tools_spec, route, include_ambient=False, hidden=None, force=False, pins_key="", pins=(),
+                scope=""):
     """Nếu bật lazy: giấu tool sau meta-tool search/run; không bật → trả nguyên.
     Pool = MỌI tool trừ nhóm hạt nhân CORE_TOOL_FNS - gồm cả builtin và plugin, không riêng
     tool MCP. Xem chú thích ở CORE_TOOL_FNS về lý do không suy pool ra từ 'conn'.
     include_ambient (đường engine Claude): kèm connector tài khoản Claude vào menu/search để
-    model biết còn nhóm tool native mcp__* ngoài pool của hub."""
+    model biết còn nhóm tool native mcp__* ngoài pool của hub.
+    pins_key, pins (tool_pins): the brain's counter and the tools it calls most. A pinned tool is shown directly,
+    after the core tools, so the model calls it without a search round; it stays in the pool too, so a search
+    still finds it. A pin that this permission level or this pool does not hold is simply not shown."""
     pool = [t for t in tools_spec if t["fn"] not in CORE_TOOL_FNS
             and not (route.get(t["fn"]) or {}).get("hat_nhan")]
     if not force and not _lazy_on(len(pool), _pool_chars(pool)):
@@ -1372,9 +1918,25 @@ def _apply_lazy(tools_spec, route, include_ambient=False, hidden=None, force=Fal
     pool_fns = {t["fn"] for t in pool}
     visible_tools = [t for t in tools_spec if t["fn"] not in pool_fns]
     visible_route = {fn: ent for fn, ent in route.items() if fn not in pool_fns}
+    if pins:
+        by_fn = {t["fn"]: t for t in pool}
+        used = 0
+        for fn in pins:
+            ent = route.get(fn) or {}
+            if fn not in by_fn or not ent.get("call"):
+                continue
+            # The size bounds hold on EVERY request, not only when the list was chosen: a description can grow
+            # afterwards (a tool that lists what the user installed), and the tightest models must still fit.
+            size = _tool_chars(by_fn[fn])
+            if size > tool_pins.MAX_TOOL_CHARS or used + size > tool_pins.BUDGET_CHARS:
+                continue
+            used += size
+            visible_tools.append(by_fn[fn])
+            visible_route[fn] = {**ent, "call": _counted(ent["call"], pins_key, fn, size)}
     _, _, top_k = _lazy_config()
     ambient = _ambient_servers() if include_ambient else []
-    return _lazy_tools_and_route(visible_tools, visible_route, pool, route, top_k, ambient, hidden)
+    return _lazy_tools_and_route(visible_tools, visible_route, pool, route, top_k, ambient, hidden,
+                                 pins_key=pins_key, scope=scope)
 
 
 # ============================================================
@@ -1389,6 +1951,10 @@ def _store_mtime():
 
     Đây là đường CHẬM (trong TTL 60 giây sẵn có), dành cho ca thả thư mục vào bằng tay. Đổi qua
     endpoint thì đã gọi thẳng `invalidate_cache()` nên có hiệu lực ngay."""
+    return _STORE_MTIME.get()
+
+
+def _store_mtime_now():
     tong = 0.0
     for f in (mcp_store.STORE, STATE_DIR / "core-off.json", STATE_DIR / "packs"):
         try:
@@ -1398,9 +1964,25 @@ def _store_mtime():
     return tong
 
 
+# 2026-11-13: those three stats ran on the event loop for every tool list a hub request asked for. The loop reads
+# the sum from memory (kept.py); `invalidate_cache()` drops it together with the tool lists.
+_STORE_MTIME = kept.Value(lambda: _store_mtime_now(), key=lambda: (str(mcp_store.STORE), str(STATE_DIR)),
+                          name="hub store mtime")
+
+
+def _scope_tools(tools, route, allowlist):
+    if allowlist is None:
+        return tools, route
+    selected = {name for name in route
+                if name not in ("javis_run_tool", "javis_search_tools")
+                and any(fnmatch.fnmatchcase(name, pattern) for pattern in allowlist)}
+    return ([tool for tool in tools if tool["fn"] in selected],
+            {name: entry for name, entry in route.items() if name in selected})
+
+
 async def discover_all(mode="full", vault_root=None, include_plugins=True, include_ambient=False,
                        force_refresh=False, force_lazy=False, staging=False, workspace_root=None,
-                       coding_ctx_cua_phien=None, for_bot=False):
+                       coding_ctx_cua_phien=None, for_bot=False, tool_allowlist=None):
     """(tools_spec, route) đầy đủ cho 1 mode. route entries ĐÃ bọc quyền + audit.
     include_plugins=False: bỏ nhóm tool plugin - dùng khi engine SDK đã đấu plugin
     IN-PROCESS (header X-Javis-No-Plugins) để model không thấy tool trùng chức năng.
@@ -1418,7 +2000,7 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
     # connection, no builtin, no plugin, no lazy tier. Returned before any of those are discovered so
     # a later change to them cannot leak into this level. See chatbot_doc_tools.
     if mode == chatbot_doc_tools.MODE:
-        return chatbot_doc_tools.build(vault_root)
+        return _scope_tools(*chatbot_doc_tools.build(vault_root), tool_allowlist)
     # Ngôn ngữ đọc từ CẤU HÌNH, không truyền từ lượt chat: danh sách tool được cache dùng chung
     # cho mọi lượt, nên nó không thể mang ngôn ngữ dò được của riêng một câu. Đổi lại, ngôn ngữ
     # phải nằm TRONG khoá cache - thiếu nó thì đổi ngôn ngữ ở trang Cài đặt xong vẫn nhận danh
@@ -1436,9 +2018,17 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
     # phiên (cwd, biến môi trường, tiến trình nền). Hai phiên cùng repo cùng chip mà dùng chung
     # cache là phiên này chạy lệnh trong terminal của phiên kia.
     _sid_ctx = getattr(coding_ctx_cua_phien, "session_id", "") if workspace_root else ""
+    # The brain's pinned tools (tool_pins) are part of the list, so they are part of the key: when the pins change
+    # (at most once a day) the next turn builds a new list and the old entry ages out. The session id stays LAST,
+    # `bo_cache_phien` reads it there.
+    pins_key = tool_pins.key(vault_root, bot=for_bot)
+    pins = tool_pins.pinned(pins_key)
     key = (mode, str(vault_root or ""), bool(include_plugins), bool(include_ambient),
            bool(force_lazy), lang, bool(staging), _ten_goc(workspace_root), _quyen_ctx, bool(for_bot),
-           str(_sid_ctx or ""))
+           pins, str(_sid_ctx or ""))
+    if tool_allowlist is not None:
+        tool_allowlist = tuple(sorted(set(tool_allowlist)))
+        key = key[:-1] + (tool_allowlist,) + key[-1:]
     from improvement_task_skill_scope import current, ScopeUnavailable
     task_scope = current(vault_root or '')
     cache = task_scope._hub_cache if task_scope is not None else _cache
@@ -1451,7 +2041,7 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
             task_scope.manifests(lang)  # fresh enabled/source checks on a private cache hit
         return ent["tools"], ent["route"]
     if (not force_refresh and ent and task_scope is None and ent["mtime"] == mt and ent.get("epoch") == epoch
-            and ent.get("ttl", _CACHE_TTL) == _CACHE_TTL and time.time() - ent["ts"] < _CACHE_STALE_MAX):
+            and _stale_servable(ent)):
         if key not in _refreshing:
             _refreshing.add(key)
 
@@ -1459,7 +2049,8 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
                 try:
                     await discover_all(mode, vault_root, include_plugins, include_ambient, force_refresh=True,
                                        force_lazy=force_lazy, staging=staging, workspace_root=workspace_root,
-                                       coding_ctx_cua_phien=coding_ctx_cua_phien, for_bot=for_bot)
+                                       coding_ctx_cua_phien=coding_ctx_cua_phien, for_bot=for_bot,
+                                       tool_allowlist=tool_allowlist)
                 except Exception as e:  # noqa: BLE001 - the next caller simply dials again
                     print(f"[hub] background refresh failed: {type(e).__name__}: {e}", file=sys.stderr)
                 finally:
@@ -1480,9 +2071,15 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
 
     tools_spec, route = [], {}
     hidden = {}          # conn_id -> {"perm", "ns", "tools"} - tool CÓ THẬT nhưng bị quyền lọc
+    # 2026-11-21: once the browser has held one of the owner's sign-ins (javis_login op=browser), a customer bot
+    # gets no tool of that browser connection at all: whoever drives it browses as the owner.
+    import browser_login
+    owner_browser = for_bot and browser_login.in_use()
     for t in raw_tools:
         raw = raw_route.get(t["fn"])
         if not raw:
+            continue
+        if owner_browser and browser_login.is_browser_spec(raw.get("spec")):
             continue
         conn = raw["conn"]
         connector = mcp_catalog.get(conn.get("connector_id"))
@@ -1518,9 +2115,33 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
 
     b_tools, b_route = await asyncio.to_thread(
         _builtin_tools, mode, vault_root, include_ambient, hidden, lang, staging,
-        bo_qua, workspace_root=workspace_root, coding_ctx_cua_phien=coding_ctx_cua_phien)
+        bo_qua, workspace_root=workspace_root, coding_ctx_cua_phien=coding_ctx_cua_phien, for_bot=for_bot)
     tools_spec += b_tools
     route.update(b_route)
+    # javis_query: reads a stored large result back, or computes over a read-only tool's pages, so the data
+    # never has to pass through the model. Its two dicts are filled further down, once every route is final.
+    # Only a brain with a connected source gets it: without one nothing is ever stored, and a core tool costs
+    # its description on every turn.
+    query_route, query_specs = {}, {}
+    if any(ent.get("conn") for ent in route.values()):
+        q_spec, q_entry = tool_result_tools.build(query_route, query_specs, str(vault_root or ""))
+        q_entry["full_route"] = query_route      # every route behind the tool search too (job_recipes.replay)
+        tools_spec.append(q_spec)
+        route[q_spec["fn"]] = q_entry
+        # javis_code: a read-only script that chains several reads and returns only what it prints (code_mode.py).
+        # Same reach as javis_query (declared reads only, through the guarded routes), but it runs code the model
+        # wrote, so never for a customer bot.
+        if code_mode.enabled() and not for_bot:
+            c_spec, c_entry = code_mode.build(query_route, str(vault_root or ""))
+            tools_spec.append(c_spec)
+            route[c_spec["fn"]] = c_entry
+    # javis_scout: a read-only run on the background model that returns only its findings (scout.py). Never for a
+    # customer bot (it starts a run on the owner's background model), and absent when no runner is configured.
+    # Not in OWNER_ONLY_TOOLS on purpose: that set lists tools every owner session HAS, and this one is optional.
+    if scout.available() and not for_bot:
+        s_spec, s_entry = scout.build(vault_root, mode)
+        tools_spec.append(s_spec)
+        route[s_spec["fn"]] = s_entry
 
     # PLUGIN: tool do plugin đăng ký (bundled + vault) → mọi engine, tôn trọng min_mode.
     # Trùng tên tool đã có (MCP/builtin) → BỎ QUA (không cho plugin shadow tool lõi).
@@ -1535,6 +2156,8 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
                     continue
                 tools_spec.append(t)
                 route[fn] = p_route[fn]
+                if route[fn].get("effect") == "danger" and route[fn].get("call"):
+                    route[fn]["call"] = _outside_plugin_call(fn, route[fn]["call"])
         # HOOK pre/post_tool_call: bọc MỌI tool call (chỉ khi có plugin đăng ký hook → 0 overhead khi không).
         if plugins_host.has_tool_hooks(vault_root):
             for fn in list(route):
@@ -1552,13 +2175,25 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
 
     # Snapshot ĐẦY ĐỦ trước lazy cho Capability Registry Phase 2. Registry chỉ dùng metadata;
     # model vẫn nhận đúng danh sách sau lazy như trước.
+    # Shaping is the outermost layer of every connection tool (see _shaped_call), added after the hooks above.
+    for fn, ent in route.items():
+        if ent.get("conn") and ent.get("tool") and ent.get("call"):
+            ent["call"] = _shaped_call(ent["call"], ent, fn, str(vault_root or ""))
     inventory_tools = list(tools_spec)
     inventory_route = dict(route)
+    query_route.update(route)
+    query_specs.update({t["fn"]: t for t in tools_spec})
 
     # LAZY: đông tool MCP thì giấu pool sau meta-tool search/run (giữ full route để dispatch).
     # Đặt SAU builtin+plugin để chúng luôn hiện; cache lưu bản ĐÃ biến đổi (route lazy vẫn dispatch
     # được vì _run đóng gói route đầy đủ). Đổi setting → làm mới theo TTL cache (60s) hoặc invalidate.
-    tools_spec, route = _apply_lazy(tools_spec, route, include_ambient, hidden, force=force_lazy)
+    if tool_allowlist is None:
+        tools_spec, route = _apply_lazy(tools_spec, route, include_ambient, hidden, force=force_lazy,
+                                        scope=str(vault_root or ""), pins_key=pins_key, pins=pins)
+    else:
+        # Filter BEFORE a lazy dispatcher can capture the full route table. A missing name
+        # fails at call_route too, so a forged tools/call cannot bypass the advertised list.
+        tools_spec, route = _scope_tools(tools_spec, route, tool_allowlist)
     if task_scope is not None:
         if current(vault_root) is not task_scope or _cache_epoch != epoch:
             raise ScopeUnavailable('task_skill_discovery_changed')
@@ -1567,10 +2202,47 @@ async def discover_all(mode="full", vault_root=None, include_plugins=True, inclu
         # invalidate_cache() ran while this dial was out (0.382.0: a background refresh makes that likelier): the
         # list may predate the change, so hand it to this caller only and do not store it.
         return tools_spec, route
+    missing = frozenset(str(x) for x in bo_qua)
+    prev = cache.get(key)
+    streak = 0
+    if missing:
+        same = bool(prev and prev.get("missing") == missing and prev.get("mtime") == mt and prev.get("epoch") == epoch)
+        streak = (int(prev.get("missing_streak") or 0) + 1) if same else 1
     cache[key] = {"tools": tools_spec, "route": route, "ts": time.time(), "mtime": mt, 'epoch': epoch,
                    "ttl": _CACHE_TTL_THIEU if bo_qua else _CACHE_TTL,
+                   "missing": missing, "missing_streak": streak,
                    "inventory_tools": inventory_tools, "inventory_route": inventory_route}
+    if cache is _cache:
+        _prune_cache()
     return tools_spec, route
+
+
+def _stale_servable(ent) -> bool:
+    """May this expired entry be answered now while a refresh runs in the background?
+
+    A complete list: yes, up to _CACHE_STALE_MAX (0.382.0). A partial list: only when the same sources have been
+    missing for two dials in a row, and up to _CACHE_STALE_THIEU_MAX (see the constants)."""
+    age = time.time() - ent["ts"]
+    ttl = ent.get("ttl", _CACHE_TTL)
+    if ttl == _CACHE_TTL:
+        return age < _CACHE_STALE_MAX
+    return int(ent.get("missing_streak") or 0) >= 2 and age < _CACHE_STALE_THIEU_MAX
+
+
+def _prune_cache() -> int:
+    """Keep the module cache at _CACHE_MAX entries: drop what is too old to ever be served, then the oldest."""
+    if len(_cache) <= _CACHE_MAX:
+        return 0
+    now, n = time.time(), 0
+    for k in [k for k, e in list(_cache.items()) if now - float(e.get("ts") or 0) >= _CACHE_STALE_MAX]:
+        if _cache.pop(k, None) is not None:
+            n += 1
+    over = len(_cache) - _CACHE_MAX
+    if over > 0:
+        for k, _e in sorted(list(_cache.items()), key=lambda kv: float(kv[1].get("ts") or 0))[:over]:
+            if k not in _refreshing and _cache.pop(k, None) is not None:
+                n += 1
+    return n
 
 
 def registry_inventory(mode="full", vault_root=None, include_plugins=True, include_ambient=False,
@@ -1590,6 +2262,7 @@ def registry_inventory(mode="full", vault_root=None, include_plugins=True, inclu
         key = ((mode or 'full').strip().lower(), str(vault_root or ''), bool(include_plugins),
             bool(include_ambient), bool(force_lazy), lang, bool(staging), _ten_goc(workspace_root),
             getattr(coding_ctx_cua_phien, 'permission_mode', '') or '', False,
+            tool_pins.pinned(tool_pins.key(vault_root)),
             str((getattr(coding_ctx_cua_phien, 'session_id', '') if workspace_root else '') or ''))
         ent = task_scope._hub_cache.get(key) or {}
         if ent.get('epoch') != _cache_epoch:
@@ -1601,20 +2274,67 @@ def registry_inventory(mode="full", vault_root=None, include_plugins=True, inclu
     )
 
 
+def bo_cache_phien(sid: str) -> int:
+    """Bỏ khỏi cache các bộ tool dựng cho MỘT phiên (khoá kết thúc bằng mã phiên). Việc nền chạy bằng
+    engine API có terminal (05/11/2026) mỗi lượt một mã phiên, nên không dọn thì một loop 5 phút một
+    lần để lại vài trăm bộ tool mỗi ngày trong RAM. Trả số mục đã bỏ."""
+    sid = str(sid or "")
+    if not sid:
+        return 0
+    bo = [k for k in list(_cache) if isinstance(k, tuple) and k and k[-1] == sid]
+    for k in bo:
+        _cache.pop(k, None)
+    return len(bo)
+
+
+def drop_bot_cache() -> int:
+    """Forget the tool lists built for customer bots, so the next bot turn builds its list again. Called when the
+    browser first takes one of the owner's sign-ins (browser_login.py): a bot must lose that browser now, not when
+    the cache ages out. Unlike `invalidate_cache` this closes no session: the browser that was just signed in
+    keeps running. The key's tenth field is `for_bot` (see `discover_all`). Returns how many entries went."""
+    gone = [k for k in list(_cache) if isinstance(k, tuple) and len(k) > 9 and k[9] is True]
+    for k in gone:
+        _cache.pop(k, None)
+    return len(gone)
+
+
 def invalidate_cache():
     """Gọi sau khi thêm/sửa/xoá connection - làm mới tool list + đóng session cũ."""
     global _cache_epoch
     _cache_epoch += 1
     _cache.clear()
+    _STORE_MTIME.drop()
     _ambient_cache["ts"] = 0.0   # ép nạp lại danh sách connector tài khoản ở lần discover kế
     try:
+        keep = _single_socket_unchanged()
         for c in mcp_store.list_connections():
+            if c["id"] in keep:
+                continue
             # A session still in its first package download is closed as soon as its handshake
             # is over, not now: killing it mid-install leaves a half-installed npx folder that npx
             # reuses forever. The new credentials or the disabled state apply right after.
             mcp_client.pool.invalidate(c["id"], defer_if_starting=True)
     except Exception:
         pass
+
+
+def _single_socket_unchanged() -> set:
+    """Ids of live sessions that `invalidate_cache` leaves running: an account connector holding ONE live socket per
+    account (catalog `isolate_home`, i.e. personal Zalo), still enabled, its session started with exactly the spec it
+    has now. Signing in a second Zalo account used to restart the first one's javis-zalo two or three times (sign-in,
+    status poll, companion pack), and every restart is a fresh Zalo login during which messages are missed. A real
+    change still restarts it: a new spec makes `SessionPool._get` replace the session, a disabled connection is not in
+    the list, and a re-login closes the session itself (`/connect/relogin`)."""
+    keep = set()
+    try:
+        for r in mcp_store.resolved(enabled_only=True):
+            if (r.get("transport") or "") == "stdio" and (r.get("connector") or {}).get("isolate_home") \
+                    and mcp_client.pool.holds_spec(mcp_client._conn_spec(r)):
+                keep.add(r["id"])
+    except Exception as e:      # noqa: BLE001 - unsure means restart, as before
+        print(f"[mcp_hub] invalidate_cache keep: {type(e).__name__}: {e}", file=sys.stderr)
+        return set()
+    return keep
 
 
 # ============================================================
@@ -1679,14 +2399,14 @@ def _brain_tu_phien(ung) -> str:
     currentBrainPath). Kiểm nó như đường dẫn thô thì "brain" không resolve được (#610), còn một
     giá trị TƯƠNG ĐỐI như "." resolve theo cwd của tiến trình thành /app hay gốc repo - một thư
     mục có thật nhưng không phải brain nào cả, tức đúng kiểu chạy nhầm brain mà luật fail-closed
-    sinh ra để chặn. Nên: "brain" -> Brain Default (cùng quy ước `main._brain_root`), đường dẫn
+    sinh ra để chặn. Nên: "brain" -> brain mặc định (cùng quy ước `main._brain_root`), đường dẫn
     TUYỆT ĐỐI có thật -> chính nó, mọi thứ khác -> "" để rơi về các nấc suy luận sau.
     """
     raw = str(ung or "").strip()
     if not raw:
         return ""
     if raw == "brain":
-        p = _brains_dir() / "Brain Default"
+        p = default_brain.path(_brains_dir())   # the default brain the owner chose, `Brain Default` until then
     else:
         p = Path(raw).expanduser()
         if not p.is_absolute():
@@ -1745,7 +2465,7 @@ def resolve_vault(raw_vault):
         for thu in dict.fromkeys(ung):
             try:
                 p = Path(thu).expanduser().resolve()
-                if p.is_dir():
+                if p.is_dir() and not vault_header_refused(p):
                     return str(p), "header", ""
             except Exception:
                 pass
@@ -1799,16 +2519,19 @@ def _chan_doan_thieu_brain(header_hong):
 
 
 async def _handle_one(msg, mode, include_plugins=True, include_ambient=False, vault_root=None,
-                      vault_nguon="", vault_header_hong="", for_bot=False):
+                      vault_nguon="", vault_header_hong="", for_bot=False, gate=None, tool_allowlist=None):
     mid = msg.get("id")
     method = msg.get("method") or ""
     params = msg.get("params") or {}
     if method == "initialize":
-        return {"jsonrpc": "2.0", "id": mid, "result": {
-            "protocolVersion": params.get("protocolVersion") or mcp_client.PROTOCOL,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "javis-hub", "version": "1.0"},
-        }}
+        res = {"protocolVersion": params.get("protocolVersion") or mcp_client.PROTOCOL,
+               "capabilities": {"tools": {}},
+               "serverInfo": {"name": "javis-hub", "version": "1.0"}}
+        if gate is not None:
+            # Javis Gate (20/11/2026): tells a coding agent to offer Javis Sync, so connecting Gate is the whole setup.
+            import chat_bridge
+            res["instructions"] = chat_bridge.GATE_INSTRUCTIONS
+        return {"jsonrpc": "2.0", "id": mid, "result": res}
     if method.startswith("notifications/"):
         return None
     if method == "ping":
@@ -1825,16 +2548,41 @@ async def _handle_one(msg, mode, include_plugins=True, include_ambient=False, va
     if method == "tools/list":
         tools, _ = await discover_all(mode, vault_root=vault_root, include_plugins=include_plugins,
                                       include_ambient=include_ambient,
-                                      for_bot=for_bot)   # Claude/Codex có tool file native → không builtin file
+                                      for_bot=for_bot, **({"tool_allowlist": tool_allowlist}
+                                                         if tool_allowlist is not None else {}))
+        if gate is not None:
+            # Javis Gate (0.440.0): bốn tool chat CHỈ có ở cửa cho AI bên ngoài (chat_bridge.py).
+            import chat_bridge
+            tools = chat_bridge.tool_specs(mode) + list(tools)
+        if tool_allowlist is not None:
+            tools, _ = _scope_tools(tools, {t["fn"]: {} for t in tools}, tool_allowlist)
         return {"jsonrpc": "2.0", "id": mid, "result": {"tools": [
             {"name": t["fn"], "description": (t.get("description") or t["fn"]),
              "inputSchema": t.get("schema") or {"type": "object", "properties": {}}}
             for t in tools]}}
     if method == "tools/call":
-        _, route = await discover_all(mode, vault_root=vault_root, include_plugins=include_plugins,
-                                      include_ambient=include_ambient, for_bot=for_bot)
         name = params.get("name") or ""
-        result = str(await mcp_client.call_route(route, name, params.get("arguments") or {}))
+        if tool_allowlist is not None and not _scope_tools([], {name: {}}, tool_allowlist)[1]:
+            return {"jsonrpc": "2.0", "id": mid, "result": {
+                "content": [{"type": "text", "text": "ERROR: Tool is outside this workflow's allowed list."}],
+                "isError": True}}
+        if gate is not None:
+            import chat_bridge
+            if name in chat_bridge.TOOLS:
+                result = await chat_bridge.goi_tool(name, params.get("arguments") or {}, mode,
+                                                    (gate or {}).get("source") or "",
+                                                    base_url=str((gate or {}).get("base_url") or ""))
+                return {"jsonrpc": "2.0", "id": mid, "result": {
+                    "content": [{"type": "text", "text": result}],
+                    "isError": result.startswith("ERROR:"),
+                }}
+        _, route = await discover_all(mode, vault_root=vault_root, include_plugins=include_plugins,
+                                      include_ambient=include_ambient, for_bot=for_bot,
+                                      **({"tool_allowlist": tool_allowlist} if tool_allowlist is not None else {}))
+        with tool_result_shaper.for_model():
+            result = str(await mcp_client.call_route(route, name, params.get("arguments") or {}))
+        # A CLI engine's tool loop is out of Javis's sight: compact JSON and per-turn repeat references happen here.
+        result = tool_result_reuse.lean_for_cli(result, name, params.get("arguments") or {})
         ghi_chu = _ghi_chu_brain(vault_nguon, vault_root, vault_header_hong)
         if ghi_chu:
             result += "\n\n" + ghi_chu
@@ -1870,11 +2618,26 @@ async def handle_http(request):
     # A dedicated bot's Claude Code config carries X-Javis-Bot: 1 (see `claude_config_path(bot=True)`), so the hub
     # hides OWNER_ONLY_TOOLS from it. The header can only take tools AWAY; leaving it out grants nothing new.
     for_bot = (request.headers.get("x-javis-bot") or "").strip() == "1"
+    tool_allowlist = None
+    raw_allowlist = request.headers.get("x-javis-tool-allowlist")
+    if raw_allowlist is not None:
+        try:
+            tool_allowlist = json.loads(raw_allowlist)
+            if (len(raw_allowlist) > 16000 or not isinstance(tool_allowlist, list)
+                    or len(tool_allowlist) > 256
+                    or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.*-]{1,200}", name)
+                           for name in tool_allowlist)):
+                raise ValueError("invalid tool allowlist")
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "invalid_tool_allowlist"}, status_code=400)
     # Who is talking (`turn` for tool hooks). The CLI engine of a chat turn sends the opaque key
     # that turn issued; the header names nobody by itself, so a forged or stale key is just None.
     # ALWAYS bind, even to None: this request must never inherit a turn from whatever context
     # the server happens to run it in.
-    tok = turn_context.bind(turn_context.resolve_key(request.headers.get(turn_context.HEADER.lower())))
+    turn_key = request.headers.get(turn_context.HEADER.lower())
+    tok = turn_context.bind(turn_context.resolve_key(turn_key))
+    # The same key names this turn's record of repeated results (tool_result_reuse, CLI engines).
+    reuse_tok = tool_result_reuse.HUB_TURN.set(tool_result_reuse.turn_id_for_key(turn_key))
     # CLI engines also load skills natively from `.claude/skills`; an improvement overlay served only
     # through this tool would split one turn across two versions, so these requests see canonical skills.
     import improvement_activation
@@ -1882,8 +2645,10 @@ async def handle_http(request):
         with improvement_activation.cli_transport():
             return await tra_loi_jsonrpc(request, mode, include_plugins=include_plugins,
                                          include_ambient=include_ambient,
-                                         raw_vault=request.headers.get("x-javis-vault"), for_bot=for_bot)
+                                         raw_vault=request.headers.get("x-javis-vault"), for_bot=for_bot,
+                                         **({"tool_allowlist": tool_allowlist} if tool_allowlist is not None else {}))
     finally:
+        tool_result_reuse.HUB_TURN.reset(reuse_tok)
         turn_context.reset(tok)
 
 
@@ -1900,13 +2665,17 @@ async def _handle_one_traced(msg, *args, **kwargs):
 
 
 async def tra_loi_jsonrpc(request, mode, include_plugins=True, include_ambient=False,
-                          raw_vault=None, for_bot=False):
+                          raw_vault=None, for_bot=False, gate=None, tool_allowlist=None):
     """Đọc thân JSON-RPC của `request`, chạy qua hub, trả Response. KHÔNG xác thực gì cả.
 
     Tách khỏi `handle_http` để một cửa khác (ví dụ plugin tự lo OAuth qua `register_http`) đi
     ĐÚNG đường này - cùng danh sách tool, cùng mức quyền ép ở lớp cứng, cùng chú thích brain -
     và chỉ khác lớp xác thực phía trước. Hai bản chép của cùng một vòng xử lý là hai chỗ để
     lệch nhau.
+
+    `gate` (0.440.0): cửa Javis Gate truyền `{"source": "<tên AI>"}` để có thêm bốn tool chat của
+    `chat_bridge` (tìm, đọc, gửi vào hội thoại, đọc kết quả). None (mặc định) thì không có, nên
+    Claude Code, Codex và mọi engine của chính Javis không bao giờ thấy chúng.
     """
     vault_root, vault_nguon, vault_header_hong = resolve_vault(raw_vault)
     # "read_docs" opens documents of ONE brain, the bot's, named by the X-Javis-Vault header Javis
@@ -1922,13 +2691,16 @@ async def tra_loi_jsonrpc(request, mode, include_plugins=True, include_ambient=F
         if isinstance(body, list):
             out = [r for r in [await _handle_one_traced(m, mode, include_plugins, include_ambient,
                                                         vault_root, vault_nguon, vault_header_hong,
-                                                        for_bot=for_bot)
+                                                        for_bot=for_bot, gate=gate,
+                                                        **({"tool_allowlist": tool_allowlist}
+                                                           if tool_allowlist is not None else {}))
                                for m in body] if r is not None]
             if not out:
                 return Response(status_code=202)
             return JSONResponse(out)
         res = await _handle_one_traced(body, mode, include_plugins, include_ambient, vault_root,
-                                       vault_nguon, vault_header_hong, for_bot=for_bot)
+                                       vault_nguon, vault_header_hong, for_bot=for_bot, gate=gate,
+                                       **({"tool_allowlist": tool_allowlist} if tool_allowlist is not None else {}))
         if res is None:
             return Response(status_code=202)
         return JSONResponse(res)
@@ -2164,10 +2936,20 @@ CODEX_REQUIRED_KEY = "mcp_servers.javis.required"
 CODEX_APPS_KEY = "features.apps"
 
 
+# A required hub gets a longer wait than the profile's 20 seconds (#1306). With `required = true` a hub that answers
+# `tools/list` late no longer costs the tools, it costs the WHOLE run: Codex exits before it calls the model. Field
+# report 2026-11-10: 8 scheduled runs lost in ten days, mostly when several schedules opened a Codex session in the
+# same minute. Chat keeps the profile's 20 seconds; codex_steer.START_TIMEOUT_S (120) leaves room for this.
+CODEX_REQUIRED_TIMEOUT_KEY = "mcp_servers.javis.startup_timeout_sec"
+CODEX_REQUIRED_TIMEOUT_S = 45
+
+
 def dat_codex_hub_bat_buoc(extra_config):
     """Gắn `required = true` cho entry hub vào `-c` của MỘT CodexCLI, THAY bản cũ nếu có."""
-    extra_config[:] = [x for x in extra_config if not str(x).startswith(CODEX_REQUIRED_KEY + "=")]
+    extra_config[:] = [x for x in extra_config
+                       if not str(x).startswith((CODEX_REQUIRED_KEY + "=", CODEX_REQUIRED_TIMEOUT_KEY + "="))]
     extra_config.append(f"{CODEX_REQUIRED_KEY}=true")
+    extra_config.append(f"{CODEX_REQUIRED_TIMEOUT_KEY}={CODEX_REQUIRED_TIMEOUT_S}")
     return extra_config
 
 
@@ -2359,7 +3141,7 @@ async def validate_connection(conn_id):
     spec = mcp_client._conn_spec(conn)
     try:
         spec["headers"].update(await mcp_client._oauth_headers(conn))
-        tools = await mcp_client.pool.list_tools(spec)
+        tools = await mcp_client.pool.list_tools(spec, fresh=True)   # the Test button reaches the server
     except Exception as e:
         if conn.get("connector_id") == "composio":
             import connect_health

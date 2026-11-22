@@ -32,6 +32,23 @@
   }
 
   var OPEN = String.fromCharCode(0xE000), CLOSE = String.fromCharCode(0xE001);   // sentinel placeholder (private-use, khong xuat hien trong text)
+  // Security (2026-11-10): a placeholder also carries a random tag drawn for each render. The source text, and anything
+  // decoded from it later (%EE%80%80 in a link target, a \uE000 escape in a card's JSON), can hold the two sentinel
+  // characters but can never name the tag, so it cannot make the last pass splice a finished fragment into the middle
+  // of an attribute value. Before this, `[a](x%EE%80%801%EE%80%81) [b](https://e.com/onmouseover=...)` put a working
+  // event handler on the first link. Sentinels found in the source are dropped as well: they are never text.
+  var SENTINEL_RE = new RegExp("[" + OPEN + CLOSE + "]", "g");
+  var _phTag = "", _phSeq = 0;
+  function newPlaceholderTag() {
+    var rnd = "";
+    try {
+      var c = (typeof crypto !== "undefined" && crypto.getRandomValues) ? crypto : null;
+      if (c) { var a = new Uint32Array(2); c.getRandomValues(a); rnd = a[0].toString(36) + a[1].toString(36); }
+    } catch (e) { rnd = ""; }
+    if (!rnd) rnd = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    _phSeq = (_phSeq + 1) % 1679616;
+    return rnd + _phSeq.toString(36) + "z";
+  }
 
   // ---------------------------------------------------------------- helpers
   // File này chạy hai chế độ: trong trình duyệt và dưới node (test require nó).
@@ -148,7 +165,16 @@
   }
   function currentBrainBase() {
     var b = String(brainPath() || "").replace(/\\/g, "/").replace(/\/+$/, "");
-    return b === "brain" ? "Brain Default" : (b.split("/").pop() || "");
+    return b === "brain" ? defaultBrainFolder() : (b.split("/").pop() || "");
+  }
+  // Folder of the default brain: the owner can choose another brain as the default (2026-11-09), so "brain" no longer
+  // always means "Brain Default". brains-ui.js puts the folder on the picker's default entry.
+  function defaultBrainFolder() {
+    try {
+      var o = document.querySelector('#graphSource option[value="brain"]');
+      if (o && o.dataset && o.dataset.brainName) return o.dataset.brainName;
+    } catch (e) {}
+    return "Brain Default";
   }
   function currentBrainMatches(name) {
     return String(currentBrainBase() || "").toLowerCase() === String(name || "").toLowerCase();
@@ -207,6 +233,91 @@
     var ref = appFileRef(href);
     return ref ? ref.path : "";
   }
+  // A FULL path on the owner's computer, outside the brain: a deck Javis built in ~/Documents, a
+  // report in ~/Downloads. These used to render as dead text, because the file server only reaches
+  // the brain (owner request 2026-11-09). A click now asks the server to open the file with the
+  // owner's own app (POST /files/open-local), which only works in a browser on that same machine.
+  //   localTarget("/Users/a/Documents/x.html") -> { local: "/Users/a/Documents/x.html" }
+  //   localTarget("/Users/a/brains/Brain Default/wiki/x.md") -> { vault: "wiki/x.md" } (stays in the app)
+  //   localTarget("wiki/x.md") / ("/files/raw?..") / ("file:///wiki/x.md") -> null (other rules apply)
+  var LOCAL_ABS_RE = /^(?:~\/|\/(?:Users|home|Volumes|mnt|media|private\/tmp|tmp)\/|[A-Za-z]:\/)/;
+  function localTarget(s) {
+    s = String(s == null ? "" : s).trim();
+    var p = fileUriPath(s);
+    if (p == null) p = decodeVaultPath(s);
+    p = p.replace(/\\/g, "/");
+    if (!LOCAL_ABS_RE.test(p)) return null;
+    if (/[\n<>"|?*]/.test(p.replace(/^[A-Za-z]:/, ""))) return null;
+    if (/(^|\/)\.\.(\/|$)/.test(p)) return null;
+    var base = currentBrainBase();
+    var idx = base ? p.toLowerCase().indexOf("/" + base.toLowerCase() + "/") : -1;
+    if (idx >= 0) {
+      var rest = p.slice(idx + base.length + 2).replace(/^\/+/, "");
+      return rest ? { vault: rest } : null;
+    }
+    return { local: p };
+  }
+  // Such a link is drawn ONLY where a click can work: a browser on the machine that runs Javis. On a VPS, through a
+  // tunnel or a domain, or with Javis in Docker, the path stays the text it always was (and can still be copied
+  // whole), instead of a link that could only answer "not on this computer".
+  //   - Not at a loopback address: never, and the server is not even asked.
+  //   - At a loopback address: yes, until the server says otherwise (GET /files/open-local: Docker, or a Linux box
+  //     with no desktop). It is asked once per page, the first time such a path is drawn. A "no" is remembered for
+  //     the next visits and turns the links already on screen back into plain paths.
+  var LOCAL_OPEN_KEY = "jv_local_open_off";
+  var _localOpen = null;        // null: not looked at yet. true / false: what is known for this page.
+  function onLoopback() {
+    try { return /^(?:localhost|127\.0\.0\.1|\[::1\])$/i.test(location.hostname); } catch (e) { return false; }
+  }
+  function canOpenLocal() {
+    if (_localOpen != null) return _localOpen;
+    if (!onLoopback()) { _localOpen = false; return false; }
+    var off = false;
+    try { off = localStorage.getItem(LOCAL_OPEN_KEY) === "1"; } catch (e) {}
+    _localOpen = !off;
+    try {
+      fetch("/files/open-local").then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+        if (!j || typeof j.available !== "boolean") return;
+        _localOpen = j.available;
+        try { j.available ? localStorage.removeItem(LOCAL_OPEN_KEY) : localStorage.setItem(LOCAL_OPEN_KEY, "1"); } catch (e) {}
+        if (!j.available) plainLocalLinks();
+      }).catch(function () {});
+    } catch (e) {}
+    return _localOpen;
+  }
+  // The server said no after some links were drawn: put the whole path back as text.
+  function plainLocalLinks() {
+    try {
+      var list = document.querySelectorAll("a.jv-flocal");
+      for (var i = 0; i < list.length; i++) {
+        var a = list[i], p = a.getAttribute("data-local-path") || "";
+        if (a.classList.contains("jv-fcode")) {
+          var code = document.createElement("code");
+          code.textContent = p;
+          a.parentNode.replaceChild(code, a);
+        } else {
+          a.removeAttribute("href"); a.removeAttribute("data-local-path"); a.removeAttribute("title");
+          a.classList.remove("jv-flocal");
+        }
+      }
+    } catch (e) {}
+  }
+  // Inline code is stricter than a markdown link: `/Users/a/bin/tool --x` is a command, not a file.
+  // Needs a file extension, or a trailing "/" for a folder.
+  function codeLocalTarget(c) {
+    var t = String(c == null ? "" : c).trim();
+    if (t.length > 400 || !(/\.[A-Za-z0-9]{1,8}\/?$/.test(t) || /\/$/.test(t))) return null;
+    return localTarget(t);
+  }
+  function localName(p) {
+    var parts = String(p || "").replace(/\/+$/, "").split("/");
+    return (parts.pop() || p) + (/\/$/.test(p) ? "/" : "");
+  }
+  function localLinkAttrs(p, extraCls) {
+    var href = /^\//.test(p) ? "file://" + encodeURI(p) : "#";
+    return 'href="' + esc(href) + '" data-local-path="' + esc(p) + '" class="jv-flocal' +
+      (extraCls ? " " + extraCls : "") + '" title="' + esc(tw("crender.open_local") + "\n" + p) + '"';
+  }
   // File thanh pham/media trong brain: click o chat la TAI VE. Note .md va file nguon text
   // van mo editor; URL http(s) duoc xu ly rieng va luon mo tab moi.
   //
@@ -240,10 +351,23 @@
     return 'href="#open=' + esc(encodeURIComponent(clean)) + '" data-vault-path="' + esc(clean) +
       '" class="jv-floc' + (extraCls ? " " + extraCls : "") + '" title="' + esc(tit + "\n" + clean) + '"';
   }
+  // An IDE-style line suffix on a file link: `x.md#L66`, `#L66-L75`, `#L66-75`, `#L66C3-L70C1` (any case). CLI engines
+  // cite files this way (issue 1390). The file is `x.md`; kept on the path, the click looked for a file literally
+  // named `x.md#L66-L75` and said "not found". A heading anchor like `x.md#lien-he` is not a line suffix.
+  var LINE_SUFFIX_RE = /#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?$/i;
+  function splitLineSuffix(p) {
+    p = String(p == null ? "" : p);
+    var m = LINE_SUFFIX_RE.exec(p);
+    return m ? { path: p.slice(0, m.index), suffix: m[0] } : { path: p, suffix: "" };
+  }
   function vaultLink(rawpath, extraCls, brainOverride) {
-    return isDownloadFile(rawpath)
-      ? vaultDownload(rawpath, extraCls, brainOverride)
-      : vaultLoc(rawpath, extraCls);
+    var sp = splitLineSuffix(rawpath);
+    var attrs = isDownloadFile(sp.path)
+      ? vaultDownload(sp.path, extraCls, brainOverride)
+      : vaultLoc(sp.path, extraCls);
+    // The suffix rides along in its own attribute so a note saved from the editor's rendered view writes the link
+    // back whole (console.js, turndown rule for vault links).
+    return sp.suffix ? attrs + ' data-vault-line="' + esc(sp.suffix) + '"' : attrs;
   }
   // Inline code chua DUONG DAN FILE vault (vd `Javis/loops/x.md`)? Tra ve path da chuan hoa, "" neu khong phai.
   // Chi nhan khi trong giong path that: co duoi file + (co thu muc / la .md tran), khong ky tu cam cua ten file
@@ -501,6 +625,71 @@
       "</tr></thead><tbody>" + trs + "</tbody></table></div>";
   }
 
+  // ---------------------------------------------------------------- math (KaTeX)
+  // Owner 15/11/2026: formulas showed as raw "$\frac{a}{b}$" in chat. KaTeX is loaded from the CDN the first time
+  // a formula appears, like mermaid. Until it arrives (or when offline) the TeX shows as text in a .jv-math span;
+  // once loaded, those spans are drawn in place and later renders call katex.renderToString directly.
+  // KaTeX escapes its input and runs with trust:false, so \href / \htmlClass and friends cannot add markup.
+  // The CDN code runs with full rights in the owner's dashboard, so both files are pinned by hash (SRI): a changed
+  // file on the CDN is refused and the formula stays as plain text. Bumping KX_VER means new hashes, taken from the
+  // npm tarball: `npm pack katex@X`, then `openssl dgst -sha384 -binary dist/<file> | openssl base64 -A`.
+  var KX_VER = "0.16.11", kxState = 0;   // 0 not loaded, 1 loading, 2 ready, 3 failed
+  var KX_SRI = {
+    js: "sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg",
+    css: "sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+"
+  };
+  function katexOpts(display) {
+    return { displayMode: !!display, throwOnError: false, strict: "ignore", trust: false, output: "htmlAndMathml" };
+  }
+  function upgradeMath(root) {
+    var k = window.katex;
+    if (!k || !root || !root.querySelectorAll) return;
+    var els = root.querySelectorAll(".jv-math[data-tex]");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i], d = el.classList.contains("jv-math-d");
+      try { k.render(el.getAttribute("data-tex"), el, katexOpts(d)); el.removeAttribute("data-tex"); } catch (e) {}
+    }
+  }
+  function loadKatex() {
+    if (kxState || typeof document === "undefined" || !document.head) return;
+    kxState = 1;
+    var base = "https://cdn.jsdelivr.net/npm/katex@" + KX_VER + "/dist/";
+    var css = document.createElement("link");
+    css.rel = "stylesheet"; css.href = base + "katex.min.css";
+    css.integrity = KX_SRI.css; css.crossOrigin = "anonymous";
+    document.head.appendChild(css);
+    var s = document.createElement("script");
+    s.src = base + "katex.min.js";
+    s.integrity = KX_SRI.js; s.crossOrigin = "anonymous";
+    s.onload = function () { kxState = window.katex ? 2 : 3; upgradeMath(document); };
+    s.onerror = function () { kxState = 3; };
+    document.head.appendChild(s);
+  }
+  function mathHtml(tex, display) {
+    var k = (typeof window !== "undefined") ? window.katex : null;
+    if (k) {
+      try {
+        var out = k.renderToString(tex, katexOpts(display));
+        return display ? '<div class="jv-math-block">' + out + "</div>" : out;
+      } catch (e) {}
+    }
+    loadKatex();
+    var t = display ? "div" : "span";
+    return "<" + t + ' class="jv-math' + (display ? " jv-math-d jv-math-block" : "") + '" data-tex="' + esc(tex) + '">' +
+      esc(display ? "$$" + tex + "$$" : "$" + tex + "$") + "</" + t + ">";
+  }
+  // Finds $$..$$, \[..\], \(..\) and $..$ in text whose code is already in placeholders. A single $ only opens
+  // when a non-space follows and closes when a non-space precedes and no digit follows, so "$5 and $10" stays money.
+  function replaceMath(raw, put) {
+    function blk(_m, tex) { return tex.trim() ? "\n" + put(mathHtml(tex.trim(), true)) + "\n" : _m; }
+    raw = raw.replace(/\$\$([\s\S]+?)\$\$/g, blk);
+    raw = raw.replace(/\\\[([\s\S]+?)\\\]/g, blk);
+    raw = raw.replace(/\\\(([^\n]+?)\\\)/g, function (_m, tex) { return put(mathHtml(tex.trim(), false)); });
+    return raw.replace(/(^|[^\\$\w])\$(?=\S)([^$\n]*?\S)\$(?![\d$])/g, function (_m, pre, tex) {
+      return pre + put(mathHtml(tex, false));
+    });
+  }
+
   // ---------------------------------------------------------------- inline (dam/nghieng/gach/xuong dong)
   function inline(s) {
     s = esc(s);
@@ -561,7 +750,7 @@
   function blockParse(text) {
     var lines = text.split("\n"), out = [], i = 0, n = lines.length, para = [];
     function flushPara() { if (para.length) { out.push("<p>" + inline(para.join("\n")) + "</p>"); para = []; } }
-    var BLOCK_ONLY = new RegExp("^\\s*" + OPEN + "\\d+" + CLOSE + "\\s*$");
+    var BLOCK_ONLY = new RegExp("^\\s*" + OPEN + _phTag + "\\d+" + CLOSE + "\\s*$");
     while (i < n) {
       var line = lines[i];
       if (/^\s*$/.test(line)) { flushPara(); i++; continue; }
@@ -612,6 +801,75 @@
     try { return _mdToHtmlThan(raw); }
     finally { _brainForRender = truoc; _choTrinhSua = truocTS; _thuMucForRender = truocTM; _anhVForRender = truocAV; }
   }
+  // ---------------------------------------------------------------- streaming: how much is settled
+  // While an answer streams, app.js used to render the WHOLE text again on every flush and replace the bubble. For a
+  // 20,000 character answer that is over a hundred full parses, each followed by a layout of the whole bubble
+  // (measured on a throttled phone: 43 long tasks). Most of that text is finished: only the last block is still
+  // growing. streamCut says how much of the text can be rendered once and left alone.
+  //
+  // streamCut(text, from) -> an index >= from. text.slice(from, index) is a run of COMPLETE top-level blocks and
+  // text.slice(index) is what may still change. `from` must be an index returned earlier (or 0). The rule is
+  // conservative, because a wrong cut shows until the final full render replaces the bubble:
+  //   - never inside a code fence (counted the way the renderer finds them: every ``` toggles), an HTML comment
+  //     (JAVIS_CARD, JAVIS_ASK) or the frontmatter of the first block;
+  //   - only at a blank line, and only when the line before it and the line after it are plain text or headings.
+  //     Lists (numbering continues across blank lines), tables, quotes and indented text stay in the growing part
+  //     until something plain follows them;
+  //   - only before a line that is complete (ends in a newline), so a half-written "- " or "```" is never judged.
+  var _ST_STRUCT = /^(\s*([-*+]|\d+[.)])\s|\s{2,}\S|\t|\s*\||\s*>|\s*-{3,}\s*$|\s*<!--)/;
+  // Fence state after one line, the way the renderer's own pattern reads it: outside a fence the first ``` on a line
+  // opens one and the rest of that line is its info string; inside, the first ``` closes it wherever it stands, and
+  // what follows on the line is ordinary text again (so it may open the next one). Returns [inFence, touched].
+  function _fenceAfter(line, fence) {
+    var pos = 0, touched = false;
+    for (;;) {
+      var at = line.indexOf("```", pos);
+      if (at === -1) return [fence, touched || fence];
+      touched = true;
+      if (!fence) return [true, true];
+      fence = false;
+      pos = at + 3;
+    }
+  }
+  function streamCut(text, from) {
+    text = String(text == null ? "" : text);
+    var n = text.length, i = Math.max(0, from | 0), cut = i;
+    if (i === 0 && /^\uFEFF?---[ \t]*\r?\n/.test(text)) {
+      var fm = FRONTMATTER_RE.exec(text);
+      if (!fm || fm[0].charAt(fm[0].length - 1) !== "\n") return 0;   // frontmatter still open: nothing is settled
+      i = fm[0].length;
+    }
+    var fence = false, comment = false, blank = false, prevPlain = false, seen = false;
+    while (i < n) {
+      var nl = text.indexOf("\n", i);
+      if (nl === -1) break;                    // the last line is still being written
+      var line = text.slice(i, nl), start = i;
+      i = nl + 1;
+      var wasFence = fence;
+      var fa = _fenceAfter(line, fence);
+      fence = fa[0];
+      if (wasFence) {
+        prevPlain = false; blank = false; seen = true;
+        continue;
+      }
+      if (comment) {
+        fence = false;                          // a ``` inside a hidden comment is not a fence
+        if (line.indexOf("-->") !== -1) comment = false;
+        prevPlain = false; blank = false; seen = true;
+        continue;
+      }
+      if (!line.trim()) { blank = true; continue; }
+      var plain = !fa[1] && !_ST_STRUCT.test(line);
+      if (plain && blank && prevPlain && seen) cut = start;
+      if (!fence) {
+        var oc = line.lastIndexOf("<!--");
+        if (oc !== -1 && line.indexOf("-->", oc) === -1) { comment = true; plain = false; }
+      }
+      prevPlain = plain; blank = false; seen = true;
+    }
+    return cut;
+  }
+
   function visibleMarkdown(raw) {
     raw = String(raw == null ? "" : raw);
     // Bo HTML comment (khoi dieu khien JAVIS_* luon vo hinh), ke ca comment chua dong luc stream
@@ -620,7 +878,9 @@
 
   function _mdToHtmlThan(raw) {
     var ph = [];
-    function put(html) { ph.push(html); return OPEN + (ph.length - 1) + CLOSE; }
+    var tag = _phTag = newPlaceholderTag();
+    function put(html) { ph.push(html); return OPEN + tag + (ph.length - 1) + CLOSE; }
+    raw = String(raw == null ? "" : raw).replace(SENTINEL_RE, "");
     // 0.201.0: JAVIS_CARD blocks (charts, number tiles, buttons) are drawn in place before hidden comments go (chat-card.js).
     if (typeof window !== "undefined" && window.JavisCard) raw = window.JavisCard.replaceIn(raw, put);
     raw = visibleMarkdown(raw);
@@ -640,10 +900,16 @@
     //    (vd `Javis/loops/x.md`) -> boc link bam mo khung doc/sua luon.
     raw = raw.replace(/`([^`\n]+)`/g, function (_m, c) {
       var code = "<code>" + esc(c) + "</code>";
+      // Full path outside the brain: show just the name, the whole path sits in the tooltip.
+      var lt = codeLocalTarget(c);
+      if (lt && lt.local && canOpenLocal()) return put("<a " + localLinkAttrs(lt.local, "jv-fcode") + "><code>" + esc(localName(lt.local)) + "</code></a>");
+      if (lt && lt.vault) return put("<a " + vaultLink(lt.vault, "jv-fcode") + ">" + code + "</a>");
       var p = codeFilePath(c);
       if (p) return put("<a " + vaultLink(p, "jv-fcode") + ">" + code + "</a>");
       return put(code);
     });
+    // 2b) cong thuc toan (sau code de `$x$` trong code giu nguyen). Trinh sua bo qua: turndown khong doc nguoc duoc KaTeX.
+    if (!_choTrinhSua) raw = replaceMath(raw, put);
     // 3) anh vault ![[..]] + anh markdown ![]() (giu URL qua placeholder de khong bi escape)
     raw = raw.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, function (_m, name, after) {
       name = name.trim();
@@ -671,15 +937,26 @@
       }
       return put(imgHtml(resolveSrc(src), alt, src));
     });
+    // Chu cua link co the boc dam/nghieng: AI hay viet [**Tai file**](...). Link da cat vao
+    // placeholder nen buoc dam/nghieng sau nay khong cham toi, va nguoi doc thay nguyen "**" (video
+    // iPad 05/11/2026). Chi dam va nghieng, sau khi da escape.
+    function chuLink(t) {
+      return esc(t).replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+?)__/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, "$1<em>$2</em>");
+    }
     // 4) link []() : URL ngoai -> tab moi; file/thu muc vault -> mo dung vi tri trong Tep tin; con lai giu cu
     raw = raw.replace(/\[([^\]]+)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, function (_m, t, href) {
       href = href.replace(/\s+(["']).*\1\s*$/, "").trim();
+      if (/^<.*>$/.test(href)) href = href.slice(1, -1).trim();   // [x](</path with spaces/a.html>)
+      var lt = localTarget(href);
+      if (lt && lt.local && canOpenLocal()) return put('<a ' + localLinkAttrs(lt.local) + ">" + chuLink(t) + "</a>");
+      if (lt && lt.vault) return put('<a ' + vaultLink(lt.vault) + ">" + chuLink(t) + "</a>");
       var appRef = appFileRef(href);
-      if (appRef) return put('<a ' + vaultLink(appRef.path, "", appRef.brain) + ">" + esc(t) + "</a>");
+      if (appRef) return put('<a ' + vaultLink(appRef.path, "", appRef.brain) + ">" + chuLink(t) + "</a>");
       // file:// tro sang brain khac / khong suy ra duoc: van la link vault de cu bam ra khung
       // "khong thay file" (co goi y ten gan dung), thay vi mo tab moi 404 hay khong lam gi ca.
       var fu = fileUriPath(href);
-      if (fu != null) return put('<a ' + vaultLink(fu.replace(/^\/+/, "")) + ">" + esc(t) + "</a>");
+      if (fu != null) return put('<a ' + vaultLink(fu.replace(/^\/+/, "")) + ">" + chuLink(t) + "</a>");
       // Link tro toi mot cong su: "#cs=<agent|workflow>:<slug>[:<ma phien>]". Server dat link
       // nay khi mot quy trinh / tro ly chay xong tu khung Tro chuyen, de nguoi doc nhay thang
       // toi dung cuoc hoi thoai da lam viec do. KHONG phai URL ngoai, khong mo tab moi.
@@ -689,14 +966,14 @@
         // vi chuoi thay the nay dang chay giua .replace(). Giai ma duoc thi dung, khong thi
         // giu nguyen chuoi tho (slug va ma phien deu la ASCII nen van mo dung).
         try { spec = decodeURIComponent(spec); } catch (err) {}
-        return put('<a class="jv-cs" href="' + esc(href) + '" title="' + esc(href) + '" data-cs="' + esc(spec) + '">' + esc(t) + "</a>");
+        return put('<a class="jv-cs" href="' + esc(href) + '" title="' + esc(href) + '" data-cs="' + esc(spec) + '">' + chuLink(t) + "</a>");
       }
-      if (/^(https?:|mailto:)/i.test(href)) return put('<a href="' + esc(href) + '" title="' + esc(href) + '" target="_blank" rel="noopener">' + esc(t) + "</a>");
+      if (/^(https?:|mailto:)/i.test(href)) return put('<a href="' + esc(href) + '" title="' + esc(href) + '" target="_blank" rel="noopener">' + chuLink(t) + "</a>");
       // URL that thi GIU nguyen ma hoa (do la duong dan mang); chi duong dan trong vault moi go
       // ra, vi no se di thang toi ten file tren dia. Xem decodeVaultPath.
       if (isVaultRel(href)) {
         var vp = decodeVaultPath(href);
-        var lk = '<a ' + vaultLink(vp) + ">" + esc(t) + "</a>";
+        var lk = '<a ' + vaultLink(vp) + ">" + chuLink(t) + "</a>";
         // 0.202.0: a voice note or any audio file in the brain gets a player next to its link (server/voice_note.py).
         if (AUDIO_EXT_RE.test(vp.split(/[?#]/)[0])) {
           lk = '<audio class="jv-audio" controls preload="none" src="' + esc(fileUrl(vp.replace(/^\.?\//, ""))) + '"></audio> ' + lk;
@@ -704,7 +981,7 @@
         return put(lk);
       }
       var resolved = resolveSrc(href);
-      return put('<a href="' + esc(resolved) + '" title="' + esc(resolved) + '" target="_blank" rel="noopener">' + esc(t) + "</a>");
+      return put('<a href="' + esc(resolved) + '" title="' + esc(resolved) + '" target="_blank" rel="noopener">' + chuLink(t) + "</a>");
     });
     // 4b) URL tran (AI go thang, khong boc markdown) -> tu thanh link mo tab moi. Chay SAU khi link/anh/
     //     code da cat vao placeholder (sentinel) nen khong dung vao chung; loai dau cau/ngoac o duoi URL.
@@ -722,8 +999,8 @@
     var html = blockParse(raw);
 
     // 7) tra lai placeholder (lap vai lan vi co the long: link trong bang, ...)
-    var reIns = new RegExp(OPEN + "(\\d+)" + CLOSE, "g");
-    var reHas = new RegExp(OPEN + "\\d+" + CLOSE);
+    var reIns = new RegExp(OPEN + tag + "(\\d+)" + CLOSE, "g");
+    var reHas = new RegExp(OPEN + tag + "\\d+" + CLOSE);
     for (var pass = 0; pass < 6 && reHas.test(html); pass++) {
       html = html.replace(reIns, function (_m, idx) { return ph[+idx] != null ? ph[+idx] : ""; });
     }
@@ -1011,7 +1288,9 @@
     var q = hasExt ? base.replace(WK_EXT, "") : base;
     return Promise.all([
       wkGetHome(b),
-      fetch("/files/search?brain=" + encodeURIComponent(b) + "&q=" + encodeURIComponent(q) + "&limit=200")
+      // mode=name (issue 1534): the default mode=all also counts files that only mention q in their text, and with a
+      // short name like [[log]] those fill the 200 results before the walk reaches wiki/log.md, so the link missed.
+      fetch("/files/search?brain=" + encodeURIComponent(b) + "&q=" + encodeURIComponent(q) + "&limit=200&mode=name")
         .then(function (r) { return r.ok ? r.json() : {}; }).catch(function () { return {}; }),
     ]).then(function (rs) {
       var home = rs[0] || "";
@@ -1104,7 +1383,36 @@
     } catch (e) { return false; }
   }
   var DUOI_ANH_RE = /\.(?:png|jpe?g|gif|webp|bmp|svg|heic)$/i;
+  var DUOI_PDF_RE = /\.pdf$/i;
   var DUOI_XEM_RE = /\.(?:png|jpe?g|gif|webp|bmp|svg|heic|pdf|mp4|mov|m4v|webm|mp3|m4a|wav|aac|txt)$/i;
+  // Short notice at the bottom of the screen, same look as the Settings toast (.mp-toast).
+  var _localToastTimer = 0;
+  function localToast(text, isError) {
+    if (typeof document === "undefined") return;
+    var old = document.getElementById("jvLocalToast");
+    if (old) old.remove();
+    clearTimeout(_localToastTimer);
+    var n = document.createElement("div");
+    n.id = "jvLocalToast";
+    n.className = "mp-toast";
+    n.setAttribute("role", isError ? "alert" : "status");
+    if (isError) n.style.background = "var(--danger, #b42318)";
+    n.textContent = String(text || "");
+    document.body.appendChild(n);
+    _localToastTimer = setTimeout(function () { n.remove(); }, isError ? 5000 : 2500);
+  }
+  // Ask the server to open a file outside the brain with the owner's own app (see localTarget).
+  function openLocalFile(p) {
+    var fd = new FormData();
+    fd.append("path", p);
+    fd.append("brain", brainPath() || "brain");
+    fetch("/files/open-local", { method: "POST", body: fd }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+    }).then(function (res) {
+      if (!res.ok) { localToast((res.j && res.j.error) || tw("crender.open_local_fail"), true); return; }
+      localToast(tw(res.j.action === "reveal" ? "crender.revealed_local" : "crender.opened_local", { name: localName(p) }));
+    }).catch(function () { localToast(tw("crender.open_local_fail"), true); });
+  }
   // Link nao la TAI FILE: co thuoc tinh download, hoac tro toi duong phuc vu file cua may chu
   // (cung origin). Link #open= (mo trinh sua trong app) va link ngoai http khong dinh o day.
   function laLinkTaiFile(a) {
@@ -1455,7 +1763,17 @@
         veZoom();
         return;
       }
-      _lb.classList.toggle("that");             // vua man <-> co that (1:1), keo xem chi tiet
+      // vua man <-> co that (1:1), keo xem chi tiet. Vao co that thi giu diem vua bam nam ngay duoi con tro,
+      // de anh lon hon man hinh khong mo ra o goc trai tren ma dung cho nguoi xem muon soi.
+      var doDuoc = typeof img.getBoundingClientRect === "function" && typeof ev.clientX === "number";
+      var r0 = doDuoc ? img.getBoundingClientRect() : null;
+      var rx = r0 && r0.width ? (ev.clientX - r0.left) / r0.width : 0.5;
+      var ry = r0 && r0.height ? (ev.clientY - r0.top) / r0.height : 0.5;
+      if (_lb.classList.toggle("that") && r0) {
+        var r1 = img.getBoundingClientRect();
+        khung.scrollLeft += r1.left + rx * r1.width - ev.clientX;
+        khung.scrollTop += r1.top + ry * r1.height - ev.clientY;
+      }
     });
     _lb.addEventListener("click", function (ev) {
       var b = ev.target.closest ? ev.target.closest("[data-lb]") : null;
@@ -1528,15 +1846,27 @@
       if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button > 0) return;
       var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
       if (!a || !laLinkTaiFile(a)) return;
-      if (a.target === "_blank") return;                 // da mo cua so moi san, iOS co nut Xong
       if (e.target.closest('[contenteditable="true"]')) return;
-      e.preventDefault();
-      e.stopPropagation();
       var href = a.href || a.getAttribute("href") || "";
-      if (/^(blob|data):/i.test(href)) { chiaSeBlob(href, a.getAttribute("download") || "file"); return; }
       var xem = href.replace(/([?&])dl=1(&|$)/, function (m, dau, sau) { return sau ? dau : ""; });
       var ten = a.getAttribute("data-vault-path") || a.getAttribute("download") || "";
-      ten = (ten || decodeURIComponent((/[?&]path=([^&]*)/.exec(href) || [0, ""])[1] || "")).split("/").pop();
+      ten = (ten || decodeURIComponent((/[?&](?:path|name)=([^&]*)/.exec(href) || [0, ""])[1] || "")).split("/").pop();
+      // PDF (video iPad cua chu repo 05/11/2026): link PDF trong chat co target="_blank", truoc day cho
+      // iOS tu mo. Tren iPad cai ra man hinh chinh, iOS KHONG mo lop Safari co nut Xong ma THAY
+      // ca app bang trang PDF: khong nut quay lai, khong nut tai, phai tat app. Nen PDF (bam xem
+      // hay bam tai deu vay) mo trong khung xem NGAY TRONG APP: nut Dong, nut Back, nut Tai ve
+      // qua bang chia se cua iOS. Khung xem do khong co link nao nen khong quay lai day.
+      var moPdf = window.JavisFileEditor && window.JavisFileEditor.openPdf;
+      if (DUOI_PDF_RE.test(ten || xem.split("?")[0]) && typeof moPdf === "function" && !/^(blob|data):/i.test(href)) {
+        e.preventDefault();
+        e.stopPropagation();
+        moPdf(xem, ten);
+        return;
+      }
+      if (a.target === "_blank") return;                 // da mo cua so moi san, iOS co nut Xong
+      e.preventDefault();
+      e.stopPropagation();
+      if (/^(blob|data):/i.test(href)) { chiaSeBlob(href, a.getAttribute("download") || "file"); return; }
       // Anh: xem ngay trong app. Dang o trong lightbox (nut Tai ve) thi KHONG mo lightbox chong
       // len nua, ma mo cua so moi de nguoi dung bam giu anh -> "Luu vao Anh".
       if (DUOI_ANH_RE.test(ten || xem.split("?")[0]) && !_lb) { moLightbox(xem, ten); return; }
@@ -1586,6 +1916,12 @@
       // mot file .md deu roi vao hang rao do va bam khong di dau ca - trong khi [[wikilink]]
       // ngay canh no thi di duoc, du hai cai nhin y het nhau. Luat da chon tu truoc cho
       // wikilink: trong ban render, link la de DI, muon sua chu cua link thi bat che do Nguon.
+      var lo = e.target.closest ? e.target.closest("a.jv-flocal") : null;
+      if (lo && lo.getAttribute("data-local-path")) {
+        e.preventDefault();
+        openLocalFile(lo.getAttribute("data-local-path"));
+        return;
+      }
       var loc = e.target.closest ? e.target.closest("a.jv-floc") : null;
       if (loc && loc.getAttribute("data-vault-path") != null) {
         if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button > 0) return;
@@ -1652,7 +1988,9 @@
 
   if (typeof window !== "undefined") {
     window.mdToHtml = mdToHtml;
+    window.JavisMath = { upgrade: upgradeMath, load: loadKatex };
     window.JavisVisibleMarkdown = visibleMarkdown;
+    window.JavisStreamCut = streamCut;
     // Bo to mau chung: code-hl.js goi lai cho cac ngon ngu kieu C (js/py/sh...) de mot luat
     // chi nam o mot cho. Markup/CSS/JSON thi code-hl tu doc lay (xem chu thich ben do).
     window.JavisHighlight = highlight;
@@ -1665,9 +2003,12 @@
     window.JavisFileRef = appFileRef;
   }
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { mdToHtml: mdToHtml, visibleMarkdown: visibleMarkdown,
+    module.exports = { mdToHtml: mdToHtml, visibleMarkdown: visibleMarkdown, streamCut: streamCut,
       highlight: highlight, wkResolve: wkResolve,
       appFilePath: appFilePath, appFileRef: appFileRef, fileUriPath: fileUriPath,
+      localTarget: localTarget, codeLocalTarget: codeLocalTarget, splitLineSuffix: splitLineSuffix,
+      // Tests: set what the page knows about opening local files (true, false, or null to look again).
+      setLocalOpen: function (v) { _localOpen = v; },
       isDownloadFile: isDownloadFile, imageSize: imageSize,
       laLinkTaiFile: laLinkTaiFile, laIOS: laIOS,
       // Xuat them de test chay THAT chuoi du phong cua anh (xem ungVienAnh / imgGone).

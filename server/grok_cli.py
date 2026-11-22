@@ -147,6 +147,7 @@ def find_grok_cli() -> Optional[str]:
     # Installer chính chủ thả binary vào ~/.local/bin (Unix) hoặc %LOCALAPPDATA% (Windows).
     for p in (home / ".local" / "bin" / "grok",
               home / ".grok" / "bin" / "grok",
+              home / ".grok" / "bin" / "grok.exe",   # official Windows installer
               Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "grok" / "grok.exe"):
         try:
             if p.exists():
@@ -158,6 +159,15 @@ def find_grok_cli() -> Optional[str]:
 
 def lenh_cai() -> str:
     return LENH_CAI_WIN if os.name == "nt" else LENH_CAI
+
+
+def _mark_env(env, tag):
+    """`env` plus the background-work mark of turn `tag` (tien_trinh_nen.mark_env). Never fails a turn."""
+    try:
+        import tien_trinh_nen
+        return tien_trinh_nen.mark_env(env, tag)
+    except Exception:  # noqa: BLE001
+        return env
 
 
 def _moi_truong(home=None) -> dict:
@@ -276,6 +286,18 @@ def permission_cho_mode(mode: Optional[str]) -> list:
         for r in luat:
             args += ["--deny", r]
     return args
+
+
+# Kept only when the CLI build lacks `--permission-mode` (see `GrokCLI.turn_cap`).
+NO_PERMISSION_FLAG_CAP = 900.0
+
+
+def turn_cap_seconds() -> float:
+    """JAVIS_GROK_TIMEOUT in seconds; unset, 0, negative or garbage = no cap (the default since 2026-11-07)."""
+    try:
+        return max(0.0, float(os.environ.get("JAVIS_GROK_TIMEOUT") or 0))
+    except ValueError:
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1055,13 +1077,19 @@ class GrokCLI:
         # Độ sâu suy nghĩ (`main._cli_do_sau_khac` đặt). None = không truyền cờ nào.
         # Chỉ tới được dòng lệnh khi `co_effort` thấy bản CLI này khai đủ cờ lẫn giá trị.
         self.effort = None
-        # Trần wall-clock cho MỘT lượt. Đây không phải phòng xa: `permission_cho_mode()` fail-
-        # closed, nên trên một bản CLI không khai `--permission-mode` nó không truyền cờ nào -
-        # và headless mà CLI dừng lại hỏi duyệt là treo tới vô tận, im lặng, không một dòng ra
-        # stdout để vòng readline thoát. Watchdog dưới đây là thứ duy nhất gỡ được ca đó.
-        self.timeout = float(os.environ.get("JAVIS_GROK_TIMEOUT") or 900)
+        # Wall-clock cap for ONE turn, in seconds; 0 = none, the default since 2026-11-07 (owner: remove every model
+        # time cap). Read it through `turn_cap()`: on a CLI build without `--permission-mode` Javis passes no approval
+        # flag, a headless run that stops to ask hangs silently forever, and the watchdog is the only way out, so that
+        # case alone keeps NO_PERMISSION_FLAG_CAP.
+        self.timeout = turn_cap_seconds()
         # Folder of an extra Grok account (plan_accounts.use, 0.353.0). None = account 1 (~/.grok).
         self.grok_home = None
+
+    def turn_cap(self) -> float:
+        """The cap this turn really runs under, in seconds; 0 = none."""
+        if self.timeout and self.timeout > 0:
+            return float(self.timeout)
+        return 0.0 if co_co("--permission-mode") else NO_PERMISSION_FLAG_CAP
 
     def is_available(self) -> bool:
         return self.cli_path is not None
@@ -1199,7 +1227,8 @@ class GrokCLI:
                     args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, cwd=self.cwd, text=True, encoding="utf-8",
                     errors="replace", bufsize=1, creationflags=_no_window(),
-                    env=_moi_truong(getattr(self, "grok_home", None)), start_new_session=(os.name != "nt"),
+                    env=_mark_env(_moi_truong(getattr(self, "grok_home", None)), self.tag),
+                    start_new_session=(os.name != "nt"),
                 )
                 try:   # lệnh chạy ngầm Grok bỏ lại sẽ được theo dõi sau lượt (tien_trinh_nen)
                     import tien_trinh_nen
@@ -1221,9 +1250,11 @@ class GrokCLI:
                         except Exception:
                             pass
 
-                canh = threading.Timer(self.timeout, cat)
-                canh.daemon = True
-                canh.start()
+                cap = self.turn_cap()
+                if cap > 0:
+                    canh = threading.Timer(cap, cat)
+                    canh.daemon = True
+                    canh.start()
                 for line in iter(proc.stdout.readline, ""):
                     line = line.strip()
                     if not line:
@@ -1251,11 +1282,12 @@ class GrokCLI:
                     loop.call_soon_threadsafe(
                         hang.put_nowait,
                         {"_exit": -1, "_err": localefmt.chu(
-                            f"Grok CLI chạy quá {int(self.timeout)}s nên bị "
+                            f"Grok CLI chạy quá {int(cap)}s nên bị "
                             f"cắt. Nếu việc thật sự dài thì nâng biến môi "
-                            f"trường JAVIS_GROK_TIMEOUT.",
-                            f"Grok CLI ran over {int(self.timeout)}s and was cut off. "
-                            f"If the job really is long, raise the environment variable JAVIS_GROK_TIMEOUT.")})
+                            f"trường JAVIS_GROK_TIMEOUT, hoặc đặt 0 để bỏ trần.",
+                            f"Grok CLI ran over {int(cap)}s and was cut off. "
+                            f"If the job really is long, raise the environment variable JAVIS_GROK_TIMEOUT, "
+                            f"or set it to 0 for no cap.")})
                 elif ma != 0:
                     loop.call_soon_threadsafe(hang.put_nowait, {"_exit": ma, "_err": err})
                 elif err:
@@ -1304,13 +1336,21 @@ class GrokCLI:
 
         threading.Thread(target=doc_luong, name=f"javis-grok-{self.tag}", daemon=True).start()
 
+        import text_breaks
+        sau_tool = False   # a tool call came since the last text: the next text starts a new paragraph
         while True:
             ev = await hang.get()
             if ev is HET:
                 break
             _n = len(cac_manh)
             for ra in self._doi_su_kien(ev, cac_manh, chan):
+                if ra.get("type") == "tool_call":
+                    sau_tool = True
                 yield ra
+            # 2026-11-16: text before and after a tool call used to reach the chat glued together.
+            if sau_tool and len(cac_manh) > _n and "_raw" not in ev:
+                text_breaks.break_after_tool(cac_manh, _n)
+                sau_tool = False
             # 0.438.6: chữ xem trước, ra ngay từng mẩu như Codex/Claude Code. Câu trả lời thật vẫn
             # là sự kiện `final` cuối lượt; nơi nào không biết `delta` thì bỏ qua (bot, việc nền).
             # Dòng không phải JSON (`_raw`) có thể là log lọt ra stdout nên không hiện trước.

@@ -168,6 +168,9 @@
 .ib-v5 .ht-msg.bot .ht-bubble { background: var(--ib-ai-wash); border-color: color-mix(in srgb, var(--ib-ai) 35%, transparent); }
 .ib-v5 .ht-msg.nguoi .ht-bubble { background: var(--ib-owner); border-color: var(--ib-owner); color: #fff; }
 .ib-v5 .ht-msg.bot .ht-msg-h { color: var(--ib-ai-ink); }
+.ib-v5 .ht-who.ai, .ib-v5 .ht-who.ai b { color: var(--ib-ai-ink); }
+.ib-v5 .ht-who-tag { background: var(--ib-ai-wash); border-color: color-mix(in srgb, var(--ib-ai) 35%, transparent); }
+.ib-v5 .ht-who.human, .ib-v5 .ht-who.human b { color: var(--ib-owner-ink); }
 .ib-v5 .ht-msg.hethong .ht-bubble, .ib-v5 .ht-silent, .ib-v5 .ht-older, .ib-v5 .ht-foot { font-size: 16px; }
 .ib-silent-ask { border: 0; background: none; padding: 0; color: var(--ib-ai-ink); font: inherit; cursor: pointer; text-decoration: underline; }
 .ib-v5 .ht-compose { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--hairline); }
@@ -186,6 +189,29 @@
   font-size: 16px; }
 .ib-draft-a { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .ib-draft-a button { font-size: 16px; display: inline-flex; align-items: center; gap: 6px; }
+.ib-dr-learn { margin-right: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 16px; color: var(--ib-ai-ink);
+  cursor: pointer; min-height: 44px; }
+.ib-dr-learn[hidden] { display: none; }
+.ib-dr-learn input { width: 18px; height: 18px; margin: 0; accent-color: var(--ib-ai); cursor: pointer; }
+/* "A.I. is writing" (owner 2026-11-18: a still button made people think it broke): a pulsing sparkle, what it does now,
+   the seconds so far, and three moving lines where the draft will land. Reduced motion keeps it still. */
+.ib-aiw .ib-draft-h { font-weight: 600; }
+.ib-aiw-ic { display: inline-flex; animation: ib-aiw-pulse 1.4s ease-in-out infinite; }
+.ib-aiw-st { flex: 1; min-width: 0; }
+.ib-aiw-s { flex: none; color: var(--text3); font-weight: 500; font-variant-numeric: tabular-nums; }
+.ib-aiw-o { color: var(--text2); font-size: 16px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.ib-aiw-lines { display: grid; gap: 8px; padding: 4px 0 6px; }
+.ib-aiw-lines span { display: block; height: 12px; border-radius: 6px; background-size: 200% 100%;
+  background-image: linear-gradient(90deg, color-mix(in srgb, var(--ib-ai) 12%, transparent) 25%,
+    color-mix(in srgb, var(--ib-ai) 34%, transparent) 50%, color-mix(in srgb, var(--ib-ai) 12%, transparent) 75%);
+  animation: ib-aiw-shimmer 1.6s linear infinite; }
+.ib-aiw-lines span:nth-child(2) { width: 86%; }
+.ib-aiw-lines span:nth-child(3) { width: 58%; }
+.ib-aiw-slow { color: var(--text3); font-size: 16px; margin-top: 2px; }
+.ib-aiw-slow[hidden] { display: none; }
+@keyframes ib-aiw-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@keyframes ib-aiw-pulse { 0%, 100% { opacity: .55; transform: scale(.9); } 50% { opacity: 1; transform: scale(1.1); } }
+@media (prefers-reduced-motion: reduce) { .ib-aiw-ic, .ib-aiw-lines span { animation: none; } }
 
 /* ---- Info panel ---- */
 .ht-info { width: 320px; flex: none; border-left: 1px solid var(--hairline); overflow-y: auto; background: var(--bg2); }
@@ -205,11 +231,16 @@
 .ht-info .ht-tagrow { padding: 0; border: 0; flex-wrap: wrap; }
 .ib-notebox { width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; min-height: 64px; resize: vertical;
   background: var(--bg3); color: var(--text); font: inherit; font-size: 16px; }
+.ib-notebox[data-profile] { min-height: 190px; line-height: 1.5; }
+.ib-prof-at { margin: 0; }
 .ib-fld { display: flex; flex-direction: column; gap: 4px; }
 .ib-fld label { color: var(--text2); }
 .ib-fld select { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--bg3); color: var(--text);
   font: inherit; font-size: 16px; width: 100%; }
 .ib-fld .ib-hint { margin: 0; }
+/* Block / Leave group / Delete at the foot of Info: the "..." menu's rows, at a 44px touch size. */
+.ib-sec.ib-acts { padding: 8px; gap: 2px; border-bottom: 0; }
+.ib-acts .ht-rm-it { min-height: 44px; }
 
 /* toast with Undo */
 .ib-toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 80; display: flex; gap: 14px; align-items: center;

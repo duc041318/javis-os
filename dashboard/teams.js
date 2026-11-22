@@ -59,13 +59,13 @@
   var CAP_KEY = { task_turns: "teams.cap.task_turns", task_steps: "teams.cap.task_steps", daily_turns: "teams.cap.daily_turns",
     mentions: "teams.cap.mentions", help_depth: "teams.cap.help_depth", busy_wait_s: "teams.cap.busy_wait_s",
     judge_daily: "teams.cap.judge_daily", volunteer_k: "teams.cap.volunteer_k", judge_off_batch: "teams.cap.judge_off_batch",
-    reply_parallel: "teams.cap.reply_parallel" };
+    reply_parallel: "teams.cap.reply_parallel", auto_jobs: "teams.cap.auto_jobs" };
   var TAB_KEY = { info: "teams.tab_info", jobs: "teams.tab_jobs", team: "teams.tab_team" };
   var LATE = ["late_cancelled", "late", "old_revision", "member_left", "leader_changed", "lease_lost"];
   // Trần chủ nhóm chỉnh được (team_store.OWNER_CAPS). Bốn trần đầu có "Không giới hạn" (lưu null, GOAL T1 mục 9).
-  var CAP_FIELDS = ["task_turns", "task_steps", "help_depth", "daily_turns", "mentions", "busy_wait_s", "judge_daily",
-    "volunteer_k"];
-  var OWNER_UNL = ["task_turns", "task_steps", "help_depth", "daily_turns", "judge_daily"];
+  var CAP_FIELDS = ["task_turns", "task_steps", "help_depth", "mentions", "busy_wait_s", "judge_daily",
+    "volunteer_k", "auto_jobs"];
+  var OWNER_UNL = ["task_turns", "task_steps", "help_depth", "judge_daily"];
   // Ô chọn chế độ (T3 phần J): phán xử khi Cộng hưởng của trợ lý tắt, 1 = lọc code + lô, 0 = chỉ lọc code. Chỉ chủ chỉnh.
   // 0.260.0: reply_parallel, 1 = mọi người được @ trả lời cùng lúc, 0 = lần lượt theo thứ tự @.
   var CAP_MODES = ["judge_off_batch", "reply_parallel"];
@@ -89,7 +89,8 @@
     agent_daily_calls: "teams.limits.agent_daily_calls",
     provider_quota: "teams.limits.provider_quota", account: "teams.limits.account" };
   // Toàn quyền (T3, spec 13): trần trưởng nhóm đổi được trong trần trần của chủ.
-  var AUTH_CAPS = ["task_turns", "task_steps", "help_depth", "daily_turns"];
+  // 17/11/2026: no daily reply cap any more (team_store.FIXED_CAPS), so it is not a row to set.
+  var AUTH_CAPS = ["task_turns", "task_steps", "help_depth"];
   var AUTH_CAP_KEY = { task_turns: "teams.cap.task_turns", task_steps: "teams.cap.task_steps",
     help_depth: "teams.cap.help_depth", daily_turns: "teams.cap.daily_turns", judge_daily: "teams.cap.judge_daily",
     volunteer_k: "teams.cap.volunteer_k" };
@@ -105,7 +106,7 @@
   // Ba mức tự quyết của trưởng nhóm (T5), đặt lên Toàn quyền của T3. Mức 2: trần tối đa vừa phải, không ngắt việc.
   // Mức 3: trần tối đa không giới hạn và được ngắt việc; lượt model vẫn theo trần của nhóm vì không provider nào được
   // Không giới hạn (D6), nên vẫn trong hạn mức gói của chủ.
-  var LEVEL2_CEILINGS = { task_turns: 24, task_steps: 12, help_depth: 3, daily_turns: 200 };
+  var LEVEL2_CEILINGS = { task_turns: 24, task_steps: 12, help_depth: 3 };
   var LEVELS = [{ n: 1, key: "teams.level_1", desc: "teams.level_1_desc" },
     { n: 2, key: "teams.level_2", desc: "teams.level_2_desc" },
     { n: 3, key: "teams.level_3", desc: "teams.level_3_desc" }];
@@ -179,11 +180,20 @@
     try { return require("./chat-quote.js"); } catch (e) { return null; }
   }
 
+  // A reply quote is "Name: words" (replyTarget). Returns {who, words}; who is "" when there is no name in front.
+  var QUOTE_WHO = /^([^:\n]{1,60}):\s+([\s\S]*)$/;
+  function quoteParts(q) {
+    var mm = QUOTE_WHO.exec(String(q == null ? "" : q));
+    return mm ? { who: mm[1], words: mm[2] } : { who: "", words: String(q == null ? "" : q) };
+  }
+
   function quoteHtml(q) {
-    var mm = /^([^:\n]{1,60}):\s+([\s\S]*)$/.exec(q);
+    var p = quoteParts(q);
     // 0.192.0: the quote carries the same quote mark as the main chat's quote chip.
-    return '<div class="tm-quote"><span class="tm-quote-ico" aria-hidden="true">' + ic("quote") + "</span><span class=\"tm-quote-body\">" +
-      (mm ? "<b>" + esc(mm[1]) + "</b>" + esc(mm[2]) : esc(q)).replace(/\n/g, "<br>") + "</span></div>";
+    // 2026-11-14: it is a button. A tap scrolls back to the words it quotes, like the main chat (jumpToQuoted).
+    return '<button type="button" class="tm-quote tm-quote-src" data-quote-src="1" title="' + esc(tw("cact.quote_jump")) + '">' +
+      '<span class="tm-quote-ico" aria-hidden="true">' + ic("quote") + "</span><span class=\"tm-quote-body\">" +
+      (p.who ? "<b>" + esc(p.who) + "</b>" + esc(p.words) : esc(p.words)).replace(/\n/g, "<br>") + "</span></button>";
   }
 
   // 0.192.0 (owner, 16/10/2026: "agent phản hồi ai thì phải tag vào hoặc quote lại"): an assistant's message that answers
@@ -236,14 +246,15 @@
     var text = String(m.content == null ? "" : m.content);
     if (mine) {
       var Q = quoteApi();
-      var t = Q ? Q.tach(text) : { quote: "", rest: text };
+      var sk = skillSplit(text);
+      var t = Q ? Q.tach(sk.rest) : { quote: "", rest: sk.rest };
       // 0.191.0: files sent with the message show as chips; the paperclip names line stored for the team turns is not repeated.
       var files = ((m.meta || {}).files || []).filter(function (f) { return f && f.path; });
       var rest = files.length ? t.rest.replace(/(?:\n\n)?\uD83D\uDCCE [^\n]*$/, "") : t.rest;
       // A long message collapses to ten lines with "Show more", like the main chat (chat-acts.js).
       var A = actsApi();
       var long = !!(A && A.isLongText && A.isLongText(rest));
-      return (t.quote ? quoteHtml(t.quote) : "") + (rest ? '<div class="tm-text utext' + (long && !open ? " clamped" : "") + '">' +
+      return skillChipHtml(sk.slug) + (t.quote ? quoteHtml(t.quote) : "") + (rest ? '<div class="tm-text utext' + (long && !open ? " clamped" : "") + '">' +
         esc(rest).replace(/\n/g, "<br>") + "</div>" + (long ? A.clampButtonHtml(!!open) : "") : "") +
         (files.length ? '<div class="tm-files">' + files.map(function (f) { return fileChipHtml(f, m.ts); }).join("") + "</div>" : "");
     }
@@ -279,9 +290,38 @@
   }
 
   // One-line plain preview of a message for the reply bar and the quote: markdown marks and an earlier quote dropped.
+  // 0.449.0: /skill in the team composer. The message carries the main chat's block (chat-slash.js buildSkillInvocation):
+  // "[SKILL: slug\n...]\n\n" before the owner's words. The server reads the skill into every member turn of that message
+  // or job (team_runner._skills); the chat shows the owner's own words and a small "/slug" chip.
+  var SKILL_HEAD = /^\[SKILL: ([A-Za-z0-9_-]+)\n[^\]]*\]\n\n/;
+  function skillSplit(text) {
+    var s = String(text == null ? "" : text), m = s.match(SKILL_HEAD);
+    return m ? { slug: m[1], rest: s.slice(m[0].length) } : { slug: "", rest: s };
+  }
+  // The skill a typed message calls: "/slug words" at the start, or a known "/slug" inside the sentence (the last one,
+  // like the main chat). `known` is the brain's skill slugs. Returns {cmd, rest, mid} or null. Inside a sentence the name
+  // stays in the words ("make /viet-email the main skill" still reads right); at the start it is an address and goes.
+  function skillCall(typed, known) {
+    var list = (known || []).map(function (x) { return String(x || "").toLowerCase(); });
+    var t = String(typed || "");
+    var head = t.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/);
+    if (head && list.indexOf(head[1].toLowerCase()) >= 0) return { cmd: head[1].toLowerCase(), rest: (head[2] || "").trim(), mid: false };
+    // Punctuation right after the name ("/viet-email," "/viet-email.") still counts, as in the main chat.
+    var re = /(^|\s)\/([a-zA-Z0-9_-]+)(?=[.,!?;:\u2026)\]"'\u201d]*(?:\s|$))/g, m, hit = null;
+    while ((m = re.exec(t)) !== null) { if (list.indexOf(m[2].toLowerCase()) >= 0) hit = m; }
+    if (!hit) return null;
+    var start = hit.index + hit[1].length;
+    var rest = (t.slice(0, start) + hit[2] + t.slice(start + 1 + hit[2].length)).trim().replace(/\s{2,}/g, " ");
+    return { cmd: hit[2].toLowerCase(), rest: rest, mid: true };
+  }
+  function skillChipHtml(slug) {
+    return slug ? '<span class="tm-skill-chip" title="' + esc(tw("teams.skill_used", { name: slug })) + '">' + ic("sparkles") +
+      "<span>/" + esc(slug) + "</span></span>" : "";
+  }
+
   function plainPreview(text, n) {
     var Q = quoteApi();
-    var s = String(text == null ? "" : text);
+    var s = skillSplit(text).rest;
     if (Q) s = Q.tach(s).rest;
     // Hidden blocks (JAVIS_CARD, JAVIS_ASK... are HTML comments) never show in a preview or a quote.
     s = s.replace(/<!--[\s\S]*?-->/g, " ").replace(/<!--[\s\S]*$/, " ");
@@ -457,7 +497,18 @@
         seen[k].n++;
       });
     });
-    return out.sort(function (a, b) { return a.ten.localeCompare(b.ten, "vi"); });
+    return tagOrder(out);
+  }
+  // 0.454.0: the owner's own tag order (reorder-dialog.js, saved per page), else by name.
+  function tagOrder(list) {
+    var R = typeof window !== "undefined" && window.JavisReorder;
+    return R ? R.sortTags(list, "tags_teams", function (g) { return g.key; }, function (g) { return g.ten; })
+      : list.sort(function (a, b) { return a.ten.localeCompare(b.ten, "vi"); });
+  }
+  function reorderTags(tags) {
+    var R = window.JavisReorder;
+    R.open({ title: tw("reorder.title_tags"), items: tags.map(function (g) { return { id: g.key, label: g.ten, icon: "tag" }; }),
+      save: function (keys) { return R.saveTags("tags_teams", keys); } });
   }
 
   function hasTag(t, key) {
@@ -497,6 +548,10 @@
     tags.forEach(function (g) {
       rows.push({ label: g.ten, icon: "tag", right: String(g.n), on: key === g.key, run: function () { pick(g.key); } });
     });
+    if (tags.length > 1 && typeof window !== "undefined" && window.JavisReorder) {
+      rows.push({ sep: true });
+      rows.push({ label: tw("reorder.menu_tags"), icon: "arrow-up-down", run: function () { reorderTags(tags); } });
+    }
     return rows;
   }
 
@@ -507,7 +562,7 @@
     var seen = {};
     allTags(teams).forEach(function (g) { seen[g.key] = 1; out.push({ ten: g.ten, key: g.key, on: !!mine[g.key] }); });
     Object.keys(mine).forEach(function (k) { if (!seen[k]) out.push({ ten: mine[k], key: k, on: true }); });
-    return out.sort(function (a, b) { return a.ten.localeCompare(b.ten, "vi"); });
+    return tagOrder(out);
   }
 
   function tagPicker() {
@@ -600,7 +655,7 @@
     if ((x.reason === "engine" || x.reason === "engine_unavailable" || x.reason === "timeout" || x.reason === "auth") && slug) {
       out.push({ act: "agent", key: "teams.reply.act.agent", slug: slug });
     }
-    if (x.reason === "cap") out.push({ act: "limits", key: "teams.reply.act.limits" });
+    // 17/11/2026: no limit numbers to open any more (Advanced is gone, the daily reply cap too): Try again is the way on.
     if (x.reason === "no_leader" || (x.reason === "member_left" && ctx.leaderKey === x.agent_key) ||
         x.reason === "leader_changed") {
       out.push({ act: "leader", key: "teams.reply.act.leader" });
@@ -613,7 +668,8 @@
   }
 
   function replyStatusHtml(m, ctx) {
-    var rows = (m.replies || []).filter(function (x) { return x.status !== "done"; });
+    // A reply folded into the answer of a later message (18/11/2026) keeps one quiet line, so the owner sees it was read.
+    var rows = (m.replies || []).filter(function (x) { return x.status !== "done" || x.reason === "merged"; });
     if (!rows.length) return "";
     var retrying = (ctx && ctx.retrying) || {};
     return '<div class="tm-replies">' + rows.map(function (x) {
@@ -637,14 +693,20 @@
           "</b> " + esc(tw(slot ? "teams.reply.error_slot" : "teams.reply.error")) + ": " + esc(whyText) + detail + "</span>" +
           '<span class="tm-reply-acts">' + replyActions(x, ctx) + (canRetry ? retryBtn : "") + "</span></div>";
       }
+      if (x.status === "done") {
+        return '<div class="tm-reply tm-reply-merged" role="status">' + face + '<span class="tm-reply-main"><b>' + esc(who) +
+          "</b> " + esc(tw("teams.reply.merged")) + "</span></div>";
+      }
       var answering = x.status === "running" && x.reason === "answering";
+      var steered = x.status === "running" && x.reason === "steered";
       var waiting = x.status === "running" && x.reason === "waiting_busy";
       var stuck = x.status === "queued" && x.updated_at && (Date.now() / 1000 - Number(x.updated_at)) > STUCK_QUEUED_S;
       if (stuck) {
         return '<div class="tm-reply tm-reply-error" role="status">' + face + '<span class="tm-reply-main"><b>' + esc(who) +
           "</b> " + esc(tw("teams.reply.stuck")) + '</span><span class="tm-reply-acts">' + retryBtn + "</span></div>";
       }
-      var label = answering ? tw("teams.reply.answering") : waiting ? (x.detail ? tw("teams.reply.waiting_busy_in",
+      var label = answering ? tw("teams.reply.answering") : steered ? tw("teams.reply.steered") :
+        waiting ? (x.detail ? tw("teams.reply.waiting_busy_in",
         { team: x.detail }) : tw("teams.reply.waiting_busy")) : tw("teams.reply.queued");
       return '<div class="tm-reply tm-reply-' + (answering ? "answering" : "queued") + '" role="status">' + face +
         '<span class="tm-reply-main"><b>' + esc(who) + "</b> " + esc(label) +
@@ -775,24 +837,196 @@
       label + "</button>";
   }
 
-  function blockedCardHtml(t) {
-    var kind = t.block_kind || "failed";
-    return '<div class="tm-jcard"><div class="tm-jcard-text"><strong class="tm-qtitle">' + esc(t.title) + "</strong>" +
-      '<span class="tm-qwhy">' + esc(t.block_reason || tw(BLOCK_KEY[kind] || BLOCK_KEY.failed)) + "</span></div>" +
-      '<span class="tm-actions">' + blockedButtonHtml(t) +
-      // 0.209.0 review: criteria can be set on a stopped job too (acceptance_failed re-checks without redoing the work).
-      (kind === "acceptance_review" || kind === "acceptance_checking" ? "" :
-        '<button type="button" class="ws-btn" data-acc-edit="' + esc(t.id) + '">' + esc(tw("teams.acc.set")) + "</button>") +
-      '<button type="button" class="ws-btn" data-cancel="' + esc(t.id) + '">' + esc(tw("teams.cancel")) + "</button></span></div>";
+  // ───────────── Jobs tab cards (16/11/2026) ─────────────
+  // Owner, 16/11/2026: "cải tiến phần việc của team giống trải nghiệm của trang nhiệm vụ, anh cần biết các agent đang có
+  // những nhiệm vụ gì và ux ui có nhiều icon ít button", "có nhiệm vụ chính, và các thành viên đang làm gì sẽ hiện bên
+  // dưới". One card per job, in the pattern of the Tasks page: a status icon, the title (a press shows the job's
+  // messages), a meta line, and at most three icon buttons on the right. Under a job that runs or waits for the owner:
+  // one line per step, who and what. The only button with words is the way out of a job that waits for the owner.
+  var JOBS_PER_PAGE = 5;
+  var STEP_STATE = { done: "done", running: "run", waiting_owner: "ask", queued: "wait", held: "wait", waiting: "wait" };
+  var STATE_ICON = { run: "loader-circle", ask: "circle-alert", done: "circle-check", off: "circle-x" };
+  var STATE_KEY = { done: "teams.jb.st.done", run: "teams.jb.st.run", wait: "teams.jb.st.wait", ask: "teams.jb.st.ask",
+    off: "teams.jb.st.off" };
+
+  function stepState(status, fallback) { return STEP_STATE[status] || (status ? "off" : fallback || "off"); }
+
+  function stateIcon(state) {
+    if (state === "wait") return '<span class="tm-jb-ring" aria-hidden="true"></span>';
+    return '<span class="tm-jb-s tm-jb-s-' + state + '" aria-hidden="true">' + ic(STATE_ICON[state] || STATE_ICON.off) + "</span>";
   }
 
-  function runningRowHtml(t, withView) {
-    return '<div class="tm-qrow tm-jrun"><span class="tm-spin" aria-hidden="true">' + ic("loader") + "</span>" +
-      '<span class="tm-qtitle">' + esc(tw("teams.doing", { title: t.title })) + '</span><span class="tm-actions">' +
-      (withView ? '<button type="button" class="ws-btn" data-view-task="' + esc(t.id) + '">' + esc(tw("teams.view_msgs")) + "</button>" : "") +
-      '<button type="button" class="ws-btn" data-amend="' + esc(t.id) + '">' + esc(tw("teams.amend")) + "</button>" +
-      (withView ? '<button type="button" class="ws-btn" data-acc-edit="' + esc(t.id) + '">' + esc(tw("teams.acc.set")) + "</button>" : "") +
-      '<button type="button" class="ws-btn" data-cancel="' + esc(t.id) + '">' + esc(tw("teams.cancel")) + "</button></span></div>";
+  function jobIcon(name, attrs, label, extra) {
+    return '<button type="button" class="tm-jb-ic' + (extra ? " " + extra : "") + '" ' + attrs + ' aria-label="' + esc(label) +
+      '" title="' + esc(label) + '">' + ic(name) + "</button>";
+  }
+
+  // "21:30" for today, "14/11" for another day (the year only when it is not this one).
+  function shortWhen(sec) {
+    if (!sec) return "";
+    var d = new Date(Number(sec) * 1000), n = new Date();
+    var two = function (x) { return (x < 10 ? "0" : "") + x; };
+    if (d.toDateString() === n.toDateString()) return two(d.getHours()) + ":" + two(d.getMinutes());
+    return d.getDate() + "/" + (d.getMonth() + 1) + (d.getFullYear() !== n.getFullYear() ? "/" + d.getFullYear() : "");
+  }
+
+  // When a job ended: the hour for today ("22:31"), the day and the hour for another day ("14/11, 22:31").
+  function endedWhen(sec) {
+    var d = new Date(Number(sec) * 1000);
+    var two = function (x) { return (x < 10 ? "0" : "") + x; };
+    var hour = two(d.getHours()) + ":" + two(d.getMinutes());
+    return d.toDateString() === new Date().toDateString() ? hour : shortWhen(sec) + ", " + hour;
+  }
+
+  function faceName(members, key) {
+    var m = memberOf(members, key) || { name: key };
+    return '<span class="tm-jb-m">' + agentAva(m, 16) + "<span>" + esc(m.name || m.slug || key) + "</span></span>";
+  }
+
+  function givenMeta(t) {
+    return t.created_at ? '<span class="tm-jb-m">' + ic("clock") + esc(tw("teams.jb.given", { t: shortWhen(t.created_at) })) + "</span>" : "";
+  }
+
+  // Folded or open: the owner's last press wins; before any press a running job shows its members, the others fold.
+  function jobOpen(t, view, byDefault) {
+    var f = (view.fold || {})[t.id];
+    return f === undefined ? byDefault : !!f;
+  }
+
+  function jobFoldHtml(t, open) {
+    var steps = t.steps || [];
+    if (!steps.length) return "";
+    var done = steps.filter(function (x) { return x.status === "done"; }).length;
+    var label = tw("teams.jb.fold", { a: done, b: steps.length });
+    return '<button type="button" class="tm-jb-fold" data-job-fold="' + esc(t.id) + '" data-open="' + (open ? "1" : "0") +
+      '" aria-expanded="' + (open ? "true" : "false") + '" aria-label="' + esc(label) + '" title="' + esc(label) + '">' +
+      ic("list-checks") + done + "/" + steps.length + ic(open ? "chevron-up" : "chevron-down") + "</button>";
+  }
+
+  // One line per step: where it stands, who, in which role, and the first lines of what they were asked to do.
+  function jobStepsHtml(steps, members, fallback) {
+    if (!steps || !steps.length) return "";
+    return '<div class="tm-jb-steps">' + steps.map(function (st) {
+      var m = memberOf(members, st.agent_key) || { name: st.agent_key };
+      var state = stepState(st.status, fallback);
+      return '<div class="tm-jb-step tm-jb-step-' + state + '"><span class="tm-jb-lead" title="' + esc(tw(STATE_KEY[state])) + '">' +
+        stateIcon(state) + '</span><div class="tm-jb-stext"><span class="tm-jb-who">' + agentAva(m, 20) + "<span>" +
+        esc(m.name || m.slug || st.agent_key) + "</span><small>" + esc(tw(ROLE_KEY[st.kind] || "teams.role.work")) + "</small></span>" +
+        (st.brief ? '<span class="tm-jb-what">' + esc(st.brief) + "</span>" : "") + "</div></div>";
+    }).join("") + "</div>";
+  }
+
+  // `title` is the only plain text and is escaped here; everything in `o` is HTML the caller built (icons included),
+  // which is why the title is not a field of `o` (tests/python/test_icons.py: no icon into a function that escapes).
+  function jobCardHtml(title, o) {
+    return '<div class="tm-jb ' + o.cls + '"><div class="tm-jb-head"><span class="tm-jb-lead">' + o.lead + "</span>" +
+      '<button type="button" class="tm-jb-title" ' + o.titleAttr + ">" + esc(title) + "</button>" +
+      '<span class="tm-jb-acts">' + (o.icons || "") + "</span></div>" +
+      (o.meta ? '<div class="tm-jb-meta">' + o.meta + "</div>" : "") + (o.below || "") + "</div>";
+  }
+
+  // ───────────── reply box of a "Waiting for you" job (19/11/2026) ─────────────
+  // Owner: "một số việc chờ như này không hỏi lại được cũng không tương tác được để làm rõ yêu cầu", "nó chỉ có nút thử
+  // lại thôi mà thử lại không được thì chỉ có ấn X để tắt thôi, phải tương tác phản hồi và trao đổi lại được". A job that
+  // stopped on a step gets a Reply button next to Retry. Answer: the words go to the chat and the member does the step
+  // again with them (POST .../answer). Ask: a chat message to that member, quoting why it stopped; the job keeps waiting.
+  var ANSWER_KINDS = ["failed", "no_progress", "interrupted", "auto_retry"];
+  var JOB_REPLY = { id: "", mode: "answer", draft: "", cid: "" };
+  var JR_MODES = [
+    { id: "answer", icon: "play", key: "teams.jr.mode_answer", ph: "teams.jr.ph_answer", send: "teams.jr.send_answer",
+      sugs: ["teams.jr.sug_skip", "teams.jr.sug_current", "teams.jr.sug_simpler"] },
+    { id: "ask", icon: "circle-help", key: "teams.jr.mode_ask", ph: "teams.jr.ph_ask", send: "teams.jr.send_ask",
+      sugs: ["teams.jr.sug_need", "teams.jr.sug_where", "teams.jr.sug_other"] }];
+
+  function canAnswer(t) { return ANSWER_KINDS.indexOf(t.block_kind || "failed") >= 0; }
+
+  // The member whose step stopped the job: the last failed or interrupted step ("" when none is listed).
+  function stuckAgent(t) {
+    var steps = t.steps || [];
+    for (var i = steps.length - 1; i >= 0; i--) {
+      if (steps[i].status === "failed" || steps[i].status === "interrupted") return steps[i].agent_key || "";
+    }
+    return "";
+  }
+
+  function jobReplyButtonHtml(t, open) {
+    return '<button type="button" class="ws-btn tm-jr-open' + (open ? " tm-ap-reply-on" : "") + '" data-jr-open="' + esc(t.id) +
+      '" aria-expanded="' + (open ? "true" : "false") + '">' + ic("reply") + "<span>" + esc(tw("teams.jr.reply")) + "</span></button>";
+  }
+
+  function jobReplyHtml(t, ui, members) {
+    var mode = JR_MODES.filter(function (x) { return x.id === ui.mode; })[0] || JR_MODES[0];
+    var who = memberOf(members, stuckAgent(t));
+    var seg = JR_MODES.map(function (x) {
+      return '<button type="button" role="radio" class="tm-ap-seg-b" aria-checked="' + (x.id === mode.id ? "true" : "false") +
+        '" data-jr-mode="' + x.id + '">' + ic(x.icon) + "<span>" + esc(tw(x.key)) + "</span></button>";
+    }).join("");
+    var sugs = mode.sugs.map(function (k) {
+      return '<button type="button" class="tm-ap-sug" data-jr-sug="' + esc(k) + '">' + esc(tw(k)) + "</button>";
+    }).join("");
+    var ph = tw(mode.ph, { name: who ? (who.name || who.slug) : tw("teams.jr.member") });
+    return '<div class="tm-ap-rp tm-jr-rp" data-jr-rp="' + esc(t.id) + '"><div class="tm-ap-seg tm-jr-seg" role="radiogroup" aria-label="' +
+      esc(tw("teams.jr.reply")) + '">' + seg + '</div><textarea class="tm-jr-ta" rows="3" placeholder="' + esc(ph) + '" aria-label="' +
+      esc(ph) + '"></textarea><div class="tm-ap-sugs">' + sugs + '</div><div class="tm-ap-rp-foot"><button type="button" ' +
+      'class="ws-btn tm-ap-cancel" data-jr-open="">' + esc(tw("teams.cancel")) + '</button><button type="button" class="ws-btn tm-ap-send" ' +
+      'data-jr-send="' + mode.id + '" data-jr-task="' + esc(t.id) + '">' + ic("send") + "<span>" + esc(tw(mode.send)) + "</span></button></div></div>";
+  }
+
+  // What Send posts. Both carry the reason quoted above the words, so the chat shows what was answered. Answer: the job's
+  // answer route (the step runs again). Ask: a plain chat message to the member whose step stopped (the leader when
+  // that member left), the job keeps waiting.
+  function jobReplyPayload(t, mode, words, members, cid) {
+    var Q = quoteApi();
+    var reason = String(t.block_reason || tw(BLOCK_KEY[t.block_kind || "failed"] || BLOCK_KEY.failed)).replace(/\s+/g, " ").slice(0, 400);
+    var quote = tw("teams.jr.quote", { title: t.title || "" }) + ": " + reason;
+    var text = Q ? Q.ghep(quote, words) : quote + "\n\n" + words;
+    if (mode === "ask") {
+      var key = stuckAgent(t), mem = key ? memberOf(members, key) : null;
+      return { mode: "ask", path: "/messages", body: { text: text, as_job: false, client_msg_id: cid,
+        mentions: mem && (!mem.status || mem.status === "active") ? [key] : [] } };
+    }
+    return { mode: "answer", path: "/tasks/" + encodeURIComponent(t.id) + "/answer",
+      body: { answer: words, text: text, client_msg_id: cid } };
+  }
+
+  function blockedCardHtml(t, view) {
+    view = view || {};
+    var kind = t.block_kind || "failed";
+    var open = jobOpen(t, view, false);
+    // 0.209.0 review: criteria can be set on a stopped job too (acceptance_failed re-checks without redoing the work).
+    var checking = kind === "acceptance_review" || kind === "acceptance_checking";
+    var answerable = canAnswer(t);
+    var replying = answerable && view.reply && view.reply.id === t.id;
+    return jobCardHtml(t.title, { cls: "tm-jb-ask", lead: stateIcon("ask"), titleAttr: 'data-view-task="' + esc(t.id) + '"',
+      icons: (checking ? "" : jobIcon("clipboard-check", 'data-acc-edit="' + esc(t.id) + '"', tw("teams.acc.set"))) +
+        jobIcon("x", 'data-cancel="' + esc(t.id) + '"', tw("teams.jb.cancel"), "tm-jb-bad"),
+      meta: (view.leaderKey ? faceName(view.members, view.leaderKey) : "") + jobFoldHtml(t, open),
+      below: '<div class="tm-jb-why">' + esc(t.block_reason || tw(BLOCK_KEY[kind] || BLOCK_KEY.failed)) + '</div><div class="tm-jb-go">' +
+        (answerable ? jobReplyButtonHtml(t, replying) : "") + blockedButtonHtml(t) + "</div>" +
+        (replying ? jobReplyHtml(t, view.reply, view.members) : "") + (open ? jobStepsHtml(t.steps, view.members) : "") });
+  }
+
+  function runningCardHtml(t, view) {
+    var open = jobOpen(t, view, true);
+    return jobCardHtml(t.title, { cls: "tm-jb-run", lead: stateIcon("run"), titleAttr: 'data-view-task="' + esc(t.id) + '"',
+      icons: jobIcon("pencil", 'data-amend="' + esc(t.id) + '"', tw("teams.amend")) +
+        jobIcon("clipboard-check", 'data-acc-edit="' + esc(t.id) + '"', tw("teams.acc.set")) +
+        jobIcon("square", 'data-cancel="' + esc(t.id) + '"', tw("teams.jb.cancel"), "tm-jb-bad"),
+      meta: (view.leaderKey ? faceName(view.members, view.leaderKey) : "") + jobFoldHtml(t, open) + givenMeta(t),
+      below: open ? jobStepsHtml(t.steps, view.members) : "" });
+  }
+
+  function waitingCardHtml(t, pos) {
+    var star = t.team_prio != null;
+    var label = tw(star ? "teams.unprioritize" : "teams.prioritize");
+    return jobCardHtml(t.title, { cls: "tm-jb-wait", lead: '<span class="tm-jb-pos">' + pos + "</span>",
+      titleAttr: 'data-view-task="' + esc(t.id) + '"',
+      icons: jobIcon("clipboard-check", 'data-acc-edit="' + esc(t.id) + '"', tw("teams.acc.set")) +
+        jobIcon("x", 'data-cancel="' + esc(t.id) + '"', tw("teams.jb.cancel"), "tm-jb-bad") +
+        '<button type="button" class="tm-jb-ic tm-jb-star' + (star ? " is-on" : "") + '" data-prio="' + esc(t.id) + '" data-on="' +
+        (star ? "0" : "1") + '" aria-pressed="' + (star ? "true" : "false") + '" aria-label="' + esc(label) + '" title="' +
+        esc(label) + '">' + ic("star") + "</button>",
+      meta: givenMeta(t) });
   }
 
   // 0.209.0: acceptance criteria of a job, one per line (parsed by parseCriteria):
@@ -955,20 +1189,124 @@
       qualityUsageHtml(detail.usage) + "</details>";
   }
 
-  // Dải việc ở đầu khung chat: việc đang làm (một dòng) và việc đang chờ chủ (thẻ có nút giải quyết).
-  function jobStripHtml(q) {
-    q = q || {};
-    var running = q.running || [], blocked = q.blocked || [];
-    var h = running.length ? runningRowHtml(running[0], false) : "";
-    h += blocked.slice(0, 2).map(blockedCardHtml).join("");
-    if (blocked.length > 2) {
-      h += '<button type="button" class="ws-btn tm-jmore" data-open-jobs="1">' +
-        esc(tw("teams.blocked_more", { n: blocked.length - 2 })) + "</button>";
-    }
-    return h;
+  // Job strip (owner, 17/11/2026: "các thông tin này có thể co gọn lại và để xuống dưới giống như việc kanban nền chạy"):
+  // one pill right above the composer, like the background-work pill of the main chat (background-strip.js, same
+  // classes), and a press opens the details above it. Amber when a job waits for the owner, green while jobs run.
+  // A job that waits for the owner leaves the pill once the owner has written in the chat after it stopped (owner, same
+  // day: "khi đã nhắn ở khung chat xử lý vấn đề thông báo rồi thì phải tự tắt cái thông báo đó đi"); it stays in the
+  // Jobs tab and in the header chip until it is resolved.
+  // A message that hands the team a NEW job (Giao việc) is not an answer to the one that stopped, so it does not count.
+  function ownerSaidAt(msgs) {
+    var at = 0;
+    (msgs || []).forEach(function (m) {
+      if (!m || m.author_kind !== "owner" || (m.meta && m.meta.as_job)) return;
+      var ts = Number(m.ts) || 0;
+      if (ts > 1e12) ts = ts / 1000;
+      if (ts > at) at = ts;
+    });
+    return at;
   }
 
-  // Tab Việc trong ngăn: Đang làm, Chờ bạn, Sắp làm (đánh số đúng thứ tự chạy).
+  // 18/11/2026 (owner: "nếu có tin được tag vào thì phải có 1 nút popup nhỏ để ấn vào sẽ lướt lên tin được tag"): the
+  // messages that call the owner and still wait to be read, oldest first. `asks`: [{id, ts}] of the messages drawn with
+  // the "asks you" flag. A message no longer waits once the owner wrote in the chat after it (`ownerTs`, ownerSaidAt) or
+  // once it has been on screen (`seen`: {id: true}).
+  function atPending(asks, ownerTs, seen) {
+    return (asks || []).filter(function (a) {
+      var ts = Number(a && a.ts) || 0;
+      if (ts > 1e12) ts = ts / 1000;
+      return a && !(seen || {})[a.id] && !(ownerTs && ts <= ownerTs);
+    }).map(function (a) { return Number(a.id); }).sort(function (x, y) { return x - y; });
+  }
+  // The round button at the top of the chat: an up arrow (the messages are above, owner 18/11/2026), and under it "@"
+  // with the number of messages waiting.
+  function atJumpHtml(n) {
+    return n ? ic("chevrons-up") + '<span class="notification-badge tm-at-n">@' + (n > 99 ? "99+" : n) + "</span>" : "";
+  }
+
+  function stripState(q, seenAt) {
+    q = q || {};
+    var asks = (q.blocked || []).filter(function (t) { return !(seenAt && Number(t.updated_at || 0) <= seenAt); });
+    var runs = q.running || [];
+    return { asks: asks, runs: runs, tone: asks.length ? "ask" : runs.length ? "run" : "" };
+  }
+
+  function stripAskRow(t) {
+    var kind = t.block_kind || "failed";
+    return '<li class="bg-row tm-sr tm-sr-ask"><div class="tm-sr-head">' + stateIcon("ask") +
+      '<button type="button" class="tm-sr-title" data-view-task="' + esc(t.id) + '">' + esc(t.title) + "</button>" +
+      jobIcon("x", 'data-cancel="' + esc(t.id) + '"', tw("teams.jb.cancel"), "tm-jb-bad") + "</div>" +
+      '<div class="tm-sr-why">' + esc(t.block_reason || tw(BLOCK_KEY[kind] || BLOCK_KEY.failed)) + "</div>" +
+      '<div class="tm-sr-go">' + (canAnswer(t) ? jobReplyButtonHtml(t, false) : "") + blockedButtonHtml(t) + "</div></li>";
+  }
+
+  function stripRunRow(t, members) {
+    var steps = t.steps || [];
+    var now = steps.filter(function (x) { return x.status === "running"; });
+    var done = steps.filter(function (x) { return x.status === "done"; }).length;
+    return '<li class="bg-row tm-sr"><div class="tm-sr-head">' + stateIcon("run") +
+      '<button type="button" class="tm-sr-title" data-view-task="' + esc(t.id) + '">' + esc(t.title) + "</button>" +
+      jobIcon("pencil", 'data-amend="' + esc(t.id) + '"', tw("teams.amend")) +
+      jobIcon("square", 'data-cancel="' + esc(t.id) + '"', tw("teams.jb.cancel"), "tm-jb-bad") + "</div>" +
+      (now.length || steps.length ? '<div class="tm-sr-meta">' + now.slice(0, 3).map(function (x) {
+        return faceName(members, x.agent_key);
+      }).join("") + (steps.length ? '<span class="tm-jb-m">' + ic("list-checks") + done + "/" + steps.length + "</span>" : "") + "</div>" : "") +
+      "</li>";
+  }
+
+  // The pill and its details. `opts.seenAt`: when the owner last wrote in the chat (seconds), `opts.open`: details shown.
+  function jobStripHtml(q, members, opts) {
+    opts = opts || {};
+    var s = stripState(q, opts.seenAt);
+    if (!s.tone) return "";
+    var first = s.tone === "ask" ? s.asks[0] : s.runs[0];
+    var more = s.asks.length + s.runs.length - 1;
+    var text = s.tone === "ask" ? tw("teams.strip.ask", { title: first.title }) : first.title;
+    var head = [];
+    if (s.asks.length) head.push(tw("teams.strip.head_ask", { n: s.asks.length }));
+    if (s.runs.length) head.push(tw("teams.strip.head_run", { n: s.runs.length }));
+    var open = !!opts.open;
+    return '<button type="button" class="bg-pill" data-strip="1" aria-haspopup="dialog" aria-controls="tm-strip-pop" aria-expanded="' +
+      (open ? "true" : "false") + '" title="' + esc(head.join(" · ") + " · " + tw("bgs.pill_hint")) + '">' +
+      '<span class="bg-dot" aria-hidden="true"></span><span class="bg-pill-txt">' + esc(text) + "</span>" +
+      (more > 0 ? '<span class="bg-pill-more">+' + more + "</span>" : "") + '<span class="bg-caret" aria-hidden="true"></span></button>' +
+      '<div class="bg-pop" id="tm-strip-pop" role="dialog" aria-label="' + esc(head.join(" · ")) + '"' + (open ? "" : " hidden") + ">" +
+      '<div class="bg-pop-head"><span class="bg-dot" aria-hidden="true"></span><span>' + esc(head.join(" · ")) + "</span></div>" +
+      '<ul class="bg-list">' + s.asks.map(stripAskRow).join("") +
+      s.runs.slice(0, 3).map(function (t) { return stripRunRow(t, members); }).join("") + "</ul>" +
+      '<button type="button" class="bg-open" data-open-jobs="1">' + esc(tw("teams.strip.open")) + "</button></div>";
+  }
+
+  // The tab a team opens on (owner, 17/11/2026: "chưa có việc nào thì mặc định vào tab thông tin nhưng có việc thì sẽ
+  // show việc"): Jobs when the Jobs tab has anything above the Archive (running, waiting for you, up next, finished),
+  // else Info. `counts` is the team list row (open jobs only), used before the queue itself has loaded.
+  function defaultTab(queue, counts) {
+    var q = queue || {};
+    var n = (q.running || []).length + (q.blocked || []).length + (q.waiting || []).length + (q.finished || []).length;
+    if (!queue && counts) n = (Number(counts.running) || 0) + (Number(counts.blocked) || 0) + (Number(counts.waiting) || 0);
+    return n ? "jobs" : "info";
+  }
+
+  // Tabs of the side panel (owner, 16/11/2026: "menu thông tin, việc team cũng nên có icon"): icon, word, and on Jobs the
+  // number of jobs still open, like the tabs of the Tasks page.
+  var TAB_ICON = { info: "info", jobs: "list-checks", team: "users" };
+  function sideTabsHtml(tab, queue) {
+    queue = queue || {};
+    var open = (queue.running || []).length + (queue.blocked || []).length + (queue.waiting || []).length;
+    // 17/11/2026 (owner): "thứ tự sẽ là Việc, thông tin, rồi mới đến team".
+    return ["jobs", "info", "team"].map(function (k) {
+      return '<button type="button" class="tm-tab" role="tab" data-tab="' + k + '" aria-selected="' + (tab === k ? "true" : "false") +
+        '">' + ic(TAB_ICON[k]) + "<span>" + esc(tw(TAB_KEY[k])) + "</span>" +
+        (k === "jobs" && open ? '<span class="tm-tab-n">' + open + "</span>" : "") + "</button>";
+    }).join("");
+  }
+
+  function groupHead(key, n, extra) {
+    return '<div class="tm-qhead tm-jb-h' + (extra ? " " + extra : "") + '">' + esc(tw(key)) + ' <span class="tm-qn">' + n + "</span></div>";
+  }
+
+  // Tab Việc trong ngăn: Chờ bạn (thứ cần chủ xử lý, lên đầu), Đang làm, Sắp làm (đánh số đúng thứ tự chạy), rồi việc đã
+  // hoàn thành và Lưu trữ.
   function queueHtml(q, view) {
     q = q || {};
     view = view || {};
@@ -978,89 +1316,130 @@
       return (fin ? "" : '<div class="tm-empty">' + esc(tw("teams.queue_empty")) + "</div>") + fin;
     }
     var h = "";
-    if (running.length) {
-      h += '<div class="tm-qhead">' + esc(tw("teams.queue_running")) + "</div>";
-      h += running.map(function (t) { return runningRowHtml(t, true) + accEditorHtml(t, view); }).join("");
-    }
     if (blocked.length) {
-      h += '<div class="tm-qhead">' + esc(tw("teams.queue_blocked")) + "</div>";
-      h += blocked.map(function (t) { return blockedCardHtml(t) + accEditorHtml(t, view); }).join("");
+      h += groupHead("teams.queue_blocked", blocked.length, "tm-jb-h-ask");
+      h += blocked.map(function (t) { return blockedCardHtml(t, view) + accEditorHtml(t, view); }).join("");
+    }
+    if (running.length) {
+      h += groupHead("teams.queue_running", running.length);
+      h += running.map(function (t) { return runningCardHtml(t, view) + accEditorHtml(t, view); }).join("");
     }
     if (waiting.length) {
-      h += '<div class="tm-qhead">' + esc(tw("teams.queue_waiting")) + "</div>";
-      h += waiting.map(function (t, i) {
-        var star = t.team_prio != null;
-        return '<div class="tm-qrow"><span class="tm-qpos">' + (i + 1) + "</span>" +
-          (star ? '<span class="tm-star" title="' + esc(tw("teams.prioritized")) + '">' + ic("star") + esc(tw("teams.prioritized")) + "</span>" : "") +
-          '<span class="tm-qtitle">' + esc(t.title) + '</span><span class="tm-actions">' +
-          '<button type="button" class="ws-btn" data-prio="' + esc(t.id) + '" data-on="' + (star ? "0" : "1") + '">' +
-          esc(tw(star ? "teams.unprioritize" : "teams.prioritize")) + "</button>" +
-          '<button type="button" class="ws-btn" data-acc-edit="' + esc(t.id) + '">' + esc(tw("teams.acc.set")) + "</button>" +
-          '<button type="button" class="ws-btn" data-cancel="' + esc(t.id) + '">' + esc(tw("teams.cancel")) + "</button></span></div>" +
-          accEditorHtml(t, view);
-      }).join("");
+      h += groupHead("teams.queue_waiting", waiting.length);
+      h += waiting.map(function (t, i) { return waitingCardHtml(t, i + 1) + accEditorHtml(t, view); }).join("");
     }
     return h + fin;
   }
 
-  // 0.193.0 (owner, 16/10/2026): finished jobs stay in the Jobs tab until the owner presses Done; Open shows a short report
-  // (what came out, who did which step); Done moves the job to the Archive below (nothing deleted); only in the Archive
-  // can a job be deleted, one by one or all at once.
+  // Five jobs a page (owner, 16/11/2026: "có cả phân trang những việc đã hoàn thành nếu nhiều quá"): the side panel is
+  // narrow, and the pager sits on the group title so it does not move when a card opens.
+  function clampPage(page, total) {
+    var pages = Math.max(1, Math.ceil(total / JOBS_PER_PAGE));
+    return Math.min(Math.max(0, Number(page) || 0), pages - 1);
+  }
+
+  // `per`: rows a page (the archive of files and links pages by 20; jobs by five).
+  function pagerHtml(key, page, total, per) {
+    var pages = Math.ceil(total / (per || JOBS_PER_PAGE));
+    if (pages < 2) return "";
+    var arrow = function (icon, label, dir, off) {
+      return '<button type="button" class="tm-jb-ic" data-job-page="' + key + '" data-dir="' + dir + '" aria-label="' + esc(label) +
+        '" title="' + esc(label) + '"' + (off ? " disabled" : "") + ">" + ic(icon) + "</button>";
+    };
+    return '<span class="tm-jb-pg">' + arrow("chevron-left", tw("teams.jb.prev"), -1, page <= 0) + '<span class="tm-jb-pgn">' +
+      (page + 1) + "/" + pages + "</span>" + arrow("chevron-right", tw("teams.jb.next"), 1, page >= pages - 1) + "</span>";
+  }
+
+  function filterJobs(list, query) {
+    var want = foldName(query || "").trim();
+    if (!want) return list;
+    return list.filter(function (j) { return foldName(j.title).indexOf(want) >= 0; });
+  }
+
+  // 0.193.0 (owner, 16/10/2026): finished jobs stay in the Jobs tab until the owner moves them to the Archive (nothing
+  // deleted); only in the Archive can a job be deleted, one by one or all at once. 16/11/2026: a press on a finished job
+  // opens what was done (result, who did what); the lists are paged; the Archive has a search box once it is longer
+  // than one page, and Delete all stands apart at its end.
+  function doneCardHtml(j, view, archived) {
+    var open = view.openFin === j.id;
+    var keys = archived ? (j.agents || []) : [];
+    if (!archived) (j.steps || []).forEach(function (st) { if (st.agent_key && keys.indexOf(st.agent_key) < 0) keys.push(st.agent_key); });
+    var toggle = 'data-fin-open="' + esc(j.id) + '" aria-expanded="' + (open ? "true" : "false") + '"';
+    var label = tw(open ? "teams.fin_close" : "teams.fin_open");
+    return jobCardHtml(j.title, { cls: "tm-jb-done" + (archived ? " tm-jb-arch" : "") + (j.cancelled ? " is-cancelled" : "") + (open ? " is-open" : ""),
+      lead: stateIcon(j.cancelled ? "off" : "done"), titleAttr: toggle,
+      icons: (open && j.task_id ? jobIcon("message-circle", 'data-view-task="' + esc(j.task_id) + '"', tw("teams.view_msgs")) : "") +
+        (archived ? jobIcon("undo-2", 'data-job-unarchive="' + esc(j.id) + '"', tw("teams.archive_back")) +
+          jobIcon("trash-2", 'data-job-delete="' + esc(j.id) + '"', tw("teams.archive_delete"), "tm-jb-bad")
+          : jobIcon("archive", 'data-job-archive="' + esc(j.id) + '"', tw("teams.jb.archive"))),
+      meta: keys.slice(0, 3).map(function (k) { return faceName(view.members, k); }).join("") +
+        (j.updated_at ? '<span class="tm-jb-m">' + ic("clock") + esc(shortWhen(j.updated_at)) + "</span>" : "") +
+        (j.cancelled ? '<span class="tm-jb-m">' + esc(tw("teams.jb.cancelled")) + "</span>" : "") +
+        '<button type="button" class="tm-jb-fold" ' + toggle + ' aria-label="' + esc(label) + '" title="' + esc(label) + '">' +
+        ic(open ? "chevron-up" : "chevron-down") + "</button>",
+      below: open ? reportHtml(j, view) : "" });
+  }
+
+  function archiveRowsHtml(list, page, view) {
+    if (!list.length) return '<div class="tm-jb-note">' + esc(tw("teams.jb.no_match")) + "</div>";
+    return list.slice(page * JOBS_PER_PAGE, page * JOBS_PER_PAGE + JOBS_PER_PAGE).map(function (j) { return doneCardHtml(j, view, true); }).join("");
+  }
+
   function finishedHtml(fin, arch, view) {
     var h = "";
     if (fin.length) {
-      h += '<div class="tm-qhead tm-qhead-done">' + esc(tw("teams.queue_finished")) + ' <span class="tm-qn">' + fin.length + "</span></div>";
-      h += fin.map(function (j) {
-        var open = view.openFin === j.id;
-        return '<div class="tm-qrow tm-jdone' + (j.cancelled ? " is-cancelled" : "") + '"><span class="tm-qok" aria-hidden="true">' +
-          ic(j.cancelled ? "circle-x" : "circle-check") + '</span><span class="tm-qtitle">' + esc(j.title) + "</span>" +
-          '<span class="tm-actions"><button type="button" class="ws-btn" data-fin-open="' + esc(j.id) + '" aria-expanded="' +
-          (open ? "true" : "false") + '">' + ic(open ? "chevron-up" : "file-text") + esc(tw(open ? "teams.fin_close" : "teams.fin_open")) +
-          '</button><button type="button" class="ws-btn tm-primary" data-job-archive="' + esc(j.id) + '">' + ic("check") +
-          esc(tw("teams.fin_done")) + "</button></span>" + (open ? reportHtml(j, view) : "") + "</div>";
-      }).join("");
+      var fp = clampPage(view.finPage, fin.length);
+      h += '<div class="tm-qhead tm-qhead-done tm-jb-h">' + esc(tw("teams.queue_finished")) + ' <span class="tm-qn">' + fin.length +
+        "</span>" + pagerHtml("fin", fp, fin.length) + "</div>";
+      h += fin.slice(fp * JOBS_PER_PAGE, fp * JOBS_PER_PAGE + JOBS_PER_PAGE).map(function (j) { return doneCardHtml(j, view, false); }).join("");
     }
     if (arch.length) {
       var aopen = !!view.archOpen;
-      h += '<div class="tm-qhead tm-qhead-arch"><button type="button" class="tm-arch-toggle" aria-expanded="' + (aopen ? "true" : "false") + '">' +
-        ic(aopen ? "chevron-down" : "chevron-right") + esc(tw("teams.archive")) + ' <span class="tm-qn">' + arch.length + "</span></button>" +
-        (aopen ? '<button type="button" class="ws-btn tm-arch-clear" data-job-delete-all="1">' + ic("trash-2") +
-          esc(tw("teams.archive_clear")) + "</button>" : "") + "</div>";
+      var list = filterJobs(arch, view.archQuery);
+      var ap = clampPage(view.archPage, list.length);
+      h += '<div class="tm-qhead tm-qhead-arch tm-jb-h"><button type="button" class="tm-arch-toggle" aria-expanded="' +
+        (aopen ? "true" : "false") + '">' + esc(tw("teams.archive")) + ' <span class="tm-qn">' + arch.length + "</span>" +
+        ic(aopen ? "chevron-down" : "chevron-right") + "</button>" + (aopen ? pagerHtml("arch", ap, list.length) : "") + "</div>";
       if (aopen) {
-        h += arch.map(function (j) {
-          return '<div class="tm-qrow tm-jarch"><span class="tm-qok" aria-hidden="true">' + ic("folder") + '</span><span class="tm-qtitle">' +
-            esc(j.title) + '</span><span class="tm-actions"><button type="button" class="ws-btn" data-fin-open="' + esc(j.id) + '">' +
-            esc(tw(view.openFin === j.id ? "teams.fin_close" : "teams.fin_open")) + '</button><button type="button" class="ws-btn" data-job-unarchive="' +
-            esc(j.id) + '">' + esc(tw("teams.archive_back")) + '</button><button type="button" class="ws-btn" data-job-delete="' + esc(j.id) +
-            '">' + ic("trash-2") + esc(tw("teams.archive_delete")) + "</button></span>" + (view.openFin === j.id ? reportHtml(j, view) : "") + "</div>";
-        }).join("");
+        if (arch.length > JOBS_PER_PAGE) {
+          h += '<label class="tm-jb-search">' + ic("search") + '<input type="search" class="tm-jb-q" value="' + esc(view.archQuery || "") +
+            '" placeholder="' + esc(tw("teams.jb.search")) + '" aria-label="' + esc(tw("teams.jb.search")) + '" enterkeyhint="search"></label>';
+        }
+        h += '<div class="tm-jb-archive">' + archiveRowsHtml(list, ap, view) + "</div>";
+        h += '<div class="tm-jb-danger"><button type="button" class="tm-jb-delall" data-job-delete-all="1">' + ic("trash-2") +
+          esc(tw("teams.archive_clear")) + "</button></div>";
       }
     }
     return h;
   }
 
+  // What was done (owner, 16/11/2026: "click vào việc đã hoàn thành thì phải có 1 tóm tắt những gì đã làm ... thì mới dễ
+  // kiểm soát"): when it ended and how long after it was given, the result the leader wrote (its first lines; Show more
+  // opens all of it), then one line per step. A finished job carries this already; an archived one is listed light, so
+  // its report is read when it is opened (`view.details`, by task id).
   function reportHtml(j, view) {
-    var members = view.members || [];
-    var who = {}, order = [];
-    (j.steps || []).forEach(function (st) {
-      if (!st.agent_key) return;
-      if (!who[st.agent_key]) { who[st.agent_key] = []; order.push(st.agent_key); }
-      who[st.agent_key].push(st);
-    });
+    var d = j.result !== undefined ? j : (view.details || {})[j.task_id];
+    if (d === "error") return '<div class="tm-report"><div class="tm-jb-note">' + esc(tw("teams.jb.load_err")) + "</div></div>";
+    if (!d || d === "loading") return '<div class="tm-report"><div class="tm-jb-note">' + esc(tw("teams.jb.loading")) + "</div></div>";
     var md = typeof window !== "undefined" && window.mdToHtml;
-    var res = String(j.result || "").trim();
+    var res = String(d.result || "").trim();
     var resHtml = res ? (md ? (function () { try { return '<div class="msg-javis tm-mdwrap"><div class="bubble">' + md(res, brain()) + "</div></div>"; }
       catch (e) { return esc(res); } })() : esc(res).replace(/\n/g, "<br>")) : '<p class="tm-sub">' + esc(tw("teams.fin_no_result")) + "</p>";
-    var when = j.updated_at ? new Date(Number(j.updated_at) * 1000).toLocaleString() : "";
+    var ended = d.updated_at || j.updated_at;
+    var when = ended ? endedWhen(ended) : "";
+    var took = d.created_at && ended ? Math.max(1, Math.round((Number(ended) - Number(d.created_at)) / 60)) : 0;
+    var long = res.length > 280 || res.split("\n").length > 4;
+    var full = !!(view.fullReport || {})[j.id];
+    var steps = d.steps || [];
     return '<div class="tm-report">' +
-      '<div class="tm-report-meta">' + esc(tw(j.cancelled ? "teams.fin_cancelled_at" : "teams.fin_done_at", { when: when })) + "</div>" +
-      (order.length ? '<div class="tm-report-who">' + order.map(function (k) {
-        var m = memberOf(members, k) || { name: k };
-        var kinds = who[k].map(function (st) { return tw(ROLE_KEY[st.kind] || "teams.role.work"); }).filter(function (x, i, a) { return a.indexOf(x) === i; });
-        return '<span class="tm-report-person">' + agentAva(m, 18) + "<b>" + esc(m.name || m.slug || k) + "</b>" + esc(kinds.join(", ")) + "</span>";
-      }).join("") + "</div>" : "") +
-      '<div class="tm-report-body">' + resHtml + "</div>" +
-      (j.task_id ? '<button type="button" class="ws-btn" data-view-task="' + esc(j.task_id) + '">' + esc(tw("teams.view_msgs")) + "</button>" : "") +
+      '<div class="tm-report-meta"><span class="tm-jb-m">' + ic(j.cancelled ? "circle-x" : "circle-check") +
+      esc(tw(j.cancelled ? "teams.fin_cancelled_at" : "teams.fin_done_at", { when: when })) + "</span>" +
+      (took ? '<span class="tm-jb-m">' + ic("hourglass") + esc(tw("teams.jb.took", { n: took })) + "</span>" : "") + "</div>" +
+      '<div class="tm-jb-sub">' + esc(tw("teams.jb.result")) + "</div>" +
+      '<div class="tm-report-body' + (long && !full ? " is-clamped" : "") + '">' + resHtml + "</div>" +
+      (long ? '<button type="button" class="tm-jb-more" data-rep-more="' + esc(j.id) + '" aria-expanded="' + (full ? "true" : "false") + '">' +
+        esc(tw(full ? "teams.fin_close" : "teams.jb.more")) + ic(full ? "chevron-up" : "chevron-right") + "</button>" : "") +
+      (steps.length ? '<div class="tm-jb-sub">' + esc(tw("teams.jb.who")) + "</div>" + jobStepsHtml(steps, view.members || [], "done") : "") +
       "</div>";
   }
 
@@ -1269,16 +1648,34 @@
   function rsText(on) { return tw(on ? "resonance.t0_state_on" : "resonance.t0_state_off"); }
 
   // Mỗi thành viên một dòng (tên đủ, vai ở dòng dưới); chạm dòng mở các thao tác.
+  // The model a member's turns run on (owner, 18/11/2026: "trong team nhìn được model của các thành viên, như vậy sẽ dễ
+  // kiểm soát hơn"): engine and model, marked when the member has no model of its own and follows the main model.
+  function memberModelText(m) {
+    var x = m && m.model;
+    if (!x || !x.label) return "";
+    var text = x.model && x.model !== x.label ? x.label + " · " + x.model : x.label;
+    return x.main ? tw("teams.model_main", { model: text }) : text;
+  }
+
   function membersHtml(team, agents, openKey) {
-    var mem = team.members || [];
+    // 18/11/2026 (owner: "tag phó nhóm trong cài đặt team nổi bật lên một chút vì phó nhóm sẽ điều phối toàn bộ team"):
+    // the deputy stands right under the owner, on a tinted row with its own badge, so the coordinator is seen first.
+    var mem = (team.members || []).slice().sort(function (a, b) {
+      return (b.agent_key === team.leader_key ? 1 : 0) - (a.agent_key === team.leader_key ? 1 : 0);
+    });
     var rows = mem.map(function (m) {
       var lead = m.agent_key === team.leader_key;
       var open = openKey === m.agent_key;
-      var sub = [tw(lead ? "teams.leader" : "teams.member")];
+      var sub = [tw(lead ? "teams.leader_role" : "teams.member")];
       if (m.resonance_enabled) sub.push(rsText(true));
-      return '<div class="tm-mrow"><button type="button" class="tm-mhead" data-expand="' + esc(m.agent_key) + '" aria-expanded="' +
+      var model = memberModelText(m);
+      return '<div class="tm-mrow' + (lead ? " tm-mrow-lead" : "") + '"><button type="button" class="tm-mhead" data-expand="' +
+        esc(m.agent_key) + '" aria-expanded="' +
         (open ? "true" : "false") + '">' + agentAva(m, 34) + '<span class="tm-mtext"><span class="tm-mname">' +
-        esc(m.name || m.slug) + '</span><span class="tm-mrole">' + esc(sub.join(" · ")) + "</span></span>" +
+        esc(m.name || m.slug) + '</span><span class="tm-mrole">' + esc(sub.join(" · ")) + "</span>" +
+        (model ? '<span class="tm-mmodel" title="' + esc(model) + '">' + ic("cpu") + "<span>" + esc(model) + "</span></span>" : "") +
+        "</span>" +
+        (lead ? '<span class="tmp-badge tm-lead-badge">' + ic("star") + "<span>" + esc(tw("teams.leader")) + "</span></span>" : "") +
         '<span class="tm-chev" aria-hidden="true">' + ic("chevron-down") + "</span></button>" +
         '<div class="tm-mact"' + (open ? "" : " hidden") + ">" +
         '<label class="tm-rs"><input type="checkbox" class="tm-rs-toggle" data-slug="' + esc(m.slug) + '"' +
@@ -1365,24 +1762,32 @@
       ? tw("teams.usage_today_unl", { n: u.today }) : tw("teams.usage_today", { n: u.today, cap: u.cap })) + "</div>";
   }
 
-  // Tên, mô tả, trạng thái của nhóm. Nút Lưu ở cuối.
+  // Tên, mô tả, ảnh và tạm dừng của nhóm. 17/11/2026 (chủ: "quá nhiều cài đặt ... các nút lưu bố trí cũng không hợp
+  // lý"): không còn nút Lưu, mỗi ô tự lưu khi đổi (tên, mô tả khi rời ô; công tắc tạm dừng ngay), như công tắc ghim.
   function settingsFormHtml(team) {
-    var st = ["active", "paused", "archived"].map(function (s) {
-      return '<label class="tm-radio"><input type="radio" name="tm-status" value="' + s + '"' + (team.status === s ? " checked" : "") +
-        "><span>" + esc(tw(TEAM_STATUS_KEY[s])) + "</span></label>";
-    }).join("");
-    // Ảnh nhóm (0.176.0): mặc định ghép từ gương mặt thành viên; "Tải ảnh lên" thay bằng ảnh riêng, lưu ngay không chờ nút Lưu.
+    // Ảnh nhóm (0.176.0): mặc định ghép từ gương mặt thành viên; "Tải ảnh lên" thay bằng ảnh riêng, lưu ngay.
     var A = typeof window !== "undefined" && window.JavisAvatar;
     var ava = A && A.uploadRowHtml ? '<div class="tm-field tm-ava-set"><span>' + esc(tw("teams.avatar")) + '</span><div class="tm-ava-row">' +
       teamAvatarHtml(team, 56) + '<div class="tm-ava-acts">' + A.uploadRowHtml(!!team.avatar_image, tw("teams.avatar_use_faces")) +
       "</div></div></div>" : "";
+    var off = team.status === "archived" ? " disabled" : "";
     return '<form class="tm-form" onsubmit="return false">' + ava +
-      '<label class="tm-field"><span>' + esc(tw("teams.name")) + '</span><input name="tm-set-name" value="' + esc(team.name) + '"></label>' +
-      '<label class="tm-field"><span>' + esc(tw("teams.description")) + '</span><textarea name="tm-set-desc" rows="2">' + esc(team.description) + "</textarea></label>" +
-      '<div class="tm-field"><span>' + esc(tw("teams.status")) + '</span><div class="tm-radios">' + st + "</div></div>" +
-      '<div class="tm-actions"><button type="button" class="ws-btn tm-save">' + esc(tw("teams.save")) + "</button>" +
+      '<label class="tm-field"><span>' + esc(tw("teams.name")) + '</span><input name="tm-set-name" data-team-field="name" value="' +
+        esc(team.name) + '"' + off + "></label>" +
+      '<label class="tm-field"><span>' + esc(tw("teams.description")) + '</span><textarea name="tm-set-desc" data-team-field="description" rows="2"' +
+        off + ">" + esc(team.description) + "</textarea></label>" +
+      '<label class="tm-rs tm-pause-row"><input type="checkbox" class="tm-pause-toggle"' + (team.status === "paused" ? " checked" : "") +
+        off + "><span>" + esc(tw("teams.pause_team")) + "</span></label></form>";
+  }
+
+  // Vùng nguy hiểm ở cuối tab (design-style mục 9): Lưu trữ (hay Mở lại khi đã lưu trữ) và Xoá team, đứng riêng, màu đỏ.
+  function dangerZoneHtml(team) {
+    var arch = team.status === "archived";
+    return '<section class="tm-sec tm-danger-zone" aria-label="' + esc(tw("teams.danger_zone")) + '"><div class="tm-actions">' +
+      (arch ? '<button type="button" class="ws-btn" data-team-unarchive="1">' + ic("archive-restore") + esc(tw("teams.unarchive_team")) + "</button>"
+        : '<button type="button" class="ws-btn tm-danger" data-team-archive="1">' + ic("archive") + esc(tw("teams.archive_team")) + "</button>") +
       '<button type="button" class="ws-btn tm-danger" data-delete-team="' + esc(team.team_id) + '">' + ic("trash-2") +
-      esc(tw("teams.delete_team")) + "</button></div></form>";
+      esc(tw("teams.delete_team")) + "</button></div></section>";
   }
 
   // Các số giới hạn của nhóm (trong Nâng cao). Nút Lưu ở cuối.
@@ -1507,10 +1912,9 @@
         '<div class="tm-note-line">' + esc(tw("teams.auth.need_leader")) + "</div></section>";
     }
     return '<section class="tm-auth" aria-label="' + esc(tw("teams.auth.title")) + '"><div class="tm-qhead">' +
-      esc(tw("teams.auth.title")) + "</div>" +
+      esc(tw("teams.auth.title")) + infoBtn() + "</div>" + infoBody(esc(tw("teams.auth.scope"))) +
       '<div class="tm-auth-status' + (auth ? " tm-auth-on" : "") + '">' + esc(status) + "</div>" +
       '<div class="tm-react-sub">' + esc(tw("teams.auth.now", { caps: now })) + "</div>" +
-      '<div class="tm-react-sub">' + esc(tw("teams.auth.scope")) + "</div>" +
       '<div class="tm-react-sub">' + esc(managed.length ? tw("teams.auth.managed", { names: managed.join(", ") })
         : tw("teams.auth.managed_none")) + "</div>" +
       '<div class="tm-qhead">' + esc(tw("teams.auth.caps_head")) + "</div>" + rows +
@@ -1580,10 +1984,10 @@
     var list = function (obj, label) {
       return Object.keys(obj).map(function (k) { return esc(label(k)) + " " + obj[k]; }).join(" · ");
     };
-    return '<div class="tm-turns"><div class="tm-qhead">' + esc(tw("teams.turns_today", { n: today, cap: capText((team.caps || {}).daily_turns) })) + "</div>" +
+    return '<div class="tm-turns"><div class="tm-qhead">' + esc(tw("teams.turns_today", { n: today, cap: capText((team.caps || {}).daily_turns) })) +
+      infoBtn() + "</div>" + infoBody(esc(tw("teams.turns_note"))) +
       "<div>" + esc(tw("teams.turns_by_agent")) + ": " + list(byAgent, function (k) { return nameOf(team.members, k); }) + "</div>" +
-      "<div>" + esc(tw("teams.turns_by_role")) + ": " + list(byRole, function (k) { return tw(k); }) + "</div>" +
-      '<div class="tm-sub">' + esc(tw("teams.turns_note")) + "</div></div>";
+      "<div>" + esc(tw("teams.turns_by_role")) + ": " + list(byRole, function (k) { return tw(k); }) + "</div></div>";
   }
 
   // 0.208.0: department mandate (team_mandate.py). Kinds, levels and states with literal keys for test_i18n.
@@ -1611,9 +2015,12 @@
   function mandateFormHtml(m) {
     m = m || {};
     var b = m.budget || {};
-    var area = function (name, key, val, rows) {
-      return '<label class="tm-field"><span>' + esc(tw(key)) + '</span><textarea name="' + name + '" rows="' + (rows || 2) +
-        '">' + esc(val || "") + "</textarea></label>";
+    // `help`: an explanation folded into an (i) beside the label. The label's for= keeps the textarea as its control, so the
+    // (i) button inside the label does not steal the click target.
+    var area = function (name, key, val, rows, help) {
+      return '<label class="tm-field" for="' + name + '"><span>' + esc(tw(key)) + (help ? infoBtn() : "") + '</span><textarea id="' +
+        name + '" name="' + name + '" rows="' + (rows || 2) + '">' + esc(val || "") + "</textarea></label>" +
+        (help ? infoBody(esc(tw(help))) : "");
     };
     var num = function (name, key, val) {
       return '<label class="tm-field tm-cap"><span>' + esc(tw(key)) + '</span><input type="number" min="0" name="' + name +
@@ -1629,8 +2036,7 @@
     return '<form class="tm-form tm-md-form" onsubmit="return false">' +
       area("tm-md-outcome", "teams.md.outcome", m.outcome, 2) +
       area("tm-md-metrics", "teams.md.metrics", (m.metrics || []).join("\n"), 3) +
-      area("tm-md-sources", "teams.md.sources", (m.sources || []).join("\n"), 3) +
-      '<div class="tm-sub">' + esc(tw("teams.md.sources_help")) + "</div>" +
+      area("tm-md-sources", "teams.md.sources", (m.sources || []).join("\n"), 3, "teams.md.sources_help") +
       area("tm-md-scope", "teams.md.scope", m.scope, 2) +
       num("tm-md-cadence", "teams.md.cadence", m.cadence_min || 60) +
       num("tm-md-obs", "teams.md.observe_per_day", b.observe_per_day == null ? 48 : b.observe_per_day) +
@@ -1729,40 +2135,104 @@
       }).join("") + "</section>";
   }
 
-  // 0.207.0: an approval request card in the team chat. State comes from the server (never guessed): waiting with three
-  // buttons, approved / used / rejected / void with who and why.
-  function approvalCardHtml(m) {
-    var ap = (m.meta || {}).approval || {};
-    var st = ap.status || "pending";
+  // 0.207.0: an approval request card in the team chat. State comes from the server (never guessed).
+  // 17/11/2026 (owner: "cần phải trả lời được lại các yêu cầu này chứ không chỉ duyệt hoặc không duyệt ... rất nhiều lúc anh
+  // muốn hỏi rõ về phần yêu cầu duyệt và muốn chỉnh sửa"): two big buttons, Approve and Reply. Reply opens a box in the
+  // card with three kinds of answer: Ask (a chat message quoting the card, the card keeps waiting), Change (the old
+  // "changes" decision) and Reject. A quote button on each line asks about that exact line. Evidence and calls fold away.
+  // The reply box state lives in AP_REPLY (one card at a time); the browser part fills it.
+  var AP_REPLY = { id: "", mode: "ask", quote: -1, draft: "" };
+  var AP_MODES = [
+    { id: "ask", icon: "circle-help", key: "teams.ap.mode_ask", ph: "teams.ap.ph_ask", send: "teams.ap.send_ask",
+      sugs: ["teams.ap.sug_ask_why", "teams.ap.sug_ask_cost", "teams.ap.sug_ask_other"] },
+    { id: "changes", icon: "pencil", key: "teams.ap.mode_changes", ph: "teams.ap.changes_prompt", send: "teams.ap.send_changes",
+      sugs: ["teams.ap.sug_fix_smaller", "teams.ap.sug_fix_show", "teams.ap.sug_fix_later"] },
+    { id: "reject", icon: "ban", key: "teams.ap.mode_reject", ph: "teams.ap.reject_prompt", send: "teams.ap.send_reject",
+      sugs: ["teams.ap.sug_rej_notnow", "teams.ap.sug_rej_cost", "teams.ap.sug_rej_wrong"] }];
+
+  // The lines of a card the owner can quote: [label key, text].
+  function apRows(ap) {
     var rows = [];
     if (ap.action) rows.push(["teams.ap.action", ap.action]);
     if (ap.scope) rows.push(["teams.ap.scope", ap.scope]);
     if (ap.impact) rows.push(["teams.ap.impact", ap.impact]);
-    var body = rows.map(function (r) {
-      return '<div class="tm-ap-row"><span class="tm-ap-k">' + esc(tw(r[0])) + "</span><span>" +
-        esc(r[1]).replace(/\n/g, "<br>") + "</span></div>";
+    return rows;
+  }
+
+  // "còn 5 giờ" from the deadline (seconds). Past it: "hết hạn".
+  function apDueText(deadline, now) {
+    var left = Number(deadline) - (now === undefined ? Date.now() / 1000 : Number(now));
+    if (!(left > 0)) return tw("teams.ap.due_over");
+    if (left < 3600) return tw("teams.ap.due_min", { n: Math.max(1, Math.round(left / 60)) });
+    if (left < 48 * 3600) return tw("teams.ap.due_h", { n: Math.round(left / 3600) });
+    return tw("teams.ap.due_d", { n: Math.round(left / 86400) });
+  }
+
+  // A path shows as its file name; the whole path stays in the tooltip.
+  function apShortRef(e) {
+    var t = String(e == null ? "" : e).trim();
+    var m = /^(.*?)([^\/\\]+\.[A-Za-z0-9]{1,8})(\s.*)?$/.exec(t);
+    return m && /[\/\\]/.test(m[1]) ? m[2] + (m[3] || "") : t;
+  }
+
+  function apFoldHtml(icon, key, items) {
+    if (!items.length) return "";
+    return '<details class="tm-ap-more"><summary>' + ic(icon) + "<span>" + esc(tw(key)) + '</span><span class="tm-ap-n">' +
+      items.length + "</span>" + ic("chevron-down") + "</summary><ul>" + items.join("") + "</ul></details>";
+  }
+
+  // The reply box under the two buttons, for the card whose reply is open.
+  function apReplyHtml(ap, rows, ui) {
+    var mode = AP_MODES.filter(function (x) { return x.id === ui.mode; })[0] || AP_MODES[0];
+    var seg = AP_MODES.map(function (x) {
+      return '<button type="button" role="radio" class="tm-ap-seg-b' + (x.id === "reject" ? " tm-ap-seg-rej" : "") + '" aria-checked="' +
+        (x.id === mode.id ? "true" : "false") + '" data-ap-mode="' + x.id + '">' + ic(x.icon) + "<span>" + esc(tw(x.key)) + "</span></button>";
     }).join("");
-    var acts = (ap.actions || []).map(function (a) {
-      return '<li><code>' + esc(a.call || a.label) + "</code>" + (a.used ? " · " + esc(tw("teams.ap.used")) : "") + "</li>";
+    var q = rows[ui.quote];
+    var quote = q ? '<div class="tm-ap-qchip"><span class="tm-quote-ico" aria-hidden="true">' + ic("quote") + '</span><span class="tm-ap-qbody"><b>' +
+      esc(tw(q[0])) + "</b> " + esc(String(q[1]).replace(/\s+/g, " ").slice(0, 160)) + '</span><button type="button" class="tm-ap-qx" data-ap-unquote="1" aria-label="' +
+      esc(tw("teams.ap.unquote")) + '" title="' + esc(tw("teams.ap.unquote")) + '">' + ic("x") + "</button></div>" : "";
+    var sugs = mode.sugs.map(function (k) {
+      return '<button type="button" class="tm-ap-sug" data-ap-sug="' + esc(k) + '">' + esc(tw(k)) + "</button>";
     }).join("");
-    if (acts) body += '<div class="tm-ap-k">' + esc(tw("teams.ap.calls")) + '</div><ul class="tm-ap-calls">' + acts + "</ul>";
-    var ev = (ap.evidence || []).map(function (e) { return "<li>" + esc(e) + "</li>"; }).join("");
-    if (ev) body += '<div class="tm-ap-k">' + esc(tw("teams.ap.evidence")) + '</div><ul class="tm-ap-ev">' + ev + "</ul>";
-    if (ap.deadline_at) {
-      body += '<div class="tm-ap-row"><span class="tm-ap-k">' + esc(tw("teams.ap.deadline")) + "</span><span>" +
-        esc(new Date(Number(ap.deadline_at) * 1000).toLocaleString()) + "</span></div>";
-    }
+    return '<div class="tm-ap-rp" data-ap-rp="' + esc(ap.approval_id) + '"><div class="tm-ap-seg" role="radiogroup" aria-label="' +
+      esc(tw("teams.ap.reply")) + '">' + seg + "</div>" + quote +
+      '<textarea class="tm-ap-ta" rows="3" placeholder="' + esc(tw(mode.ph)) + '" aria-label="' + esc(tw(mode.ph)) + '"></textarea>' +
+      '<div class="tm-ap-sugs">' + sugs + '</div><div class="tm-ap-rp-foot"><button type="button" class="ws-btn tm-ap-cancel" data-ap-close="1">' +
+      esc(tw("teams.cancel")) + '</button><button type="button" class="ws-btn tm-ap-send' + (mode.id === "reject" ? " tm-ap-send-rej" : "") +
+      '" data-ap-send="' + mode.id + '" data-ap="' + esc(ap.approval_id) + '" data-ap-rev="' + esc(ap.team_rev) + '">' + ic("send") +
+      "<span>" + esc(tw(mode.send)) + "</span></button></div></div>";
+  }
+
+  function approvalCardHtml(m, ui) {
+    ui = ui || AP_REPLY;
+    var ap = (m.meta || {}).approval || {};
+    var st = ap.status || "pending";
+    var pending = st === "pending";
+    var open = pending && ui.id && ui.id === ap.approval_id;
+    var rows = apRows(ap);
+    var body = rows.length ? '<div class="tm-ap-rows">' + rows.map(function (r, i) {
+      return '<div class="tm-ap-row' + (open && ui.quote === i ? " tm-ap-row-sel" : "") + '"><div class="tm-ap-row-b"><span class="tm-ap-k">' +
+        esc(tw(r[0])) + '</span><span class="tm-ap-v">' + esc(r[1]).replace(/\n/g, "<br>") + "</span></div>" +
+        (pending ? '<button type="button" class="tm-ap-q" data-ap-quote="' + i + '" data-ap="' + esc(ap.approval_id) + '" aria-label="' +
+          esc(tw("teams.ap.quote_row")) + '" title="' + esc(tw("teams.ap.quote_row")) + '">' + ic("quote") + "</button>" : "") + "</div>";
+    }).join("") + "</div>" : "";
+    body += apFoldHtml("list-todo", "teams.ap.calls", (ap.actions || []).map(function (a) {
+      return "<li><code>" + esc(a.call || a.label) + "</code>" + (a.used ? " · " + esc(tw("teams.ap.used")) : "") + "</li>";
+    }));
+    body += apFoldHtml("file-text", "teams.ap.evidence", (ap.evidence || []).map(function (e) {
+      return '<li title="' + esc(e) + '">' + esc(apShortRef(e)) + "</li>";
+    }));
     // A prose question: what Approve means sits behind the (i) in the card head.
     var prose = ap.kind === "question";
     if (prose) body = infoBody(esc(tw("teams.ap.prose"))) + body;
     var foot;
-    if (st === "pending") {
-      var b = function (d, k, cls) {
-        return '<button type="button" class="ws-btn' + (cls || "") + '" data-ap-decide="' + d + '" data-ap="' +
-          esc(ap.approval_id) + '" data-ap-rev="' + esc(ap.team_rev) + '">' + esc(tw(k)) + "</button>";
-      };
-      foot = '<div class="tm-actions">' + b("approve", "teams.ap.approve", " tm-primary") + b("changes", "teams.ap.changes") +
-        b("reject", "teams.ap.reject") + "</div>";
+    if (pending) {
+      foot = '<div class="tm-ap-acts"><button type="button" class="ws-btn tm-ap-ok" data-ap-decide="approve" data-ap="' +
+        esc(ap.approval_id) + '" data-ap-rev="' + esc(ap.team_rev) + '">' + ic("check") + "<span>" + esc(tw("teams.ap.approve")) +
+        '</span></button><button type="button" class="ws-btn tm-ap-reply' + (open ? " tm-ap-reply-on" : "") + '" data-ap-reply="' +
+        esc(ap.approval_id) + '" aria-expanded="' + (open ? "true" : "false") + '">' + ic("reply") + "<span>" + esc(tw("teams.ap.reply")) +
+        "</span></button></div>" + (open ? apReplyHtml(ap, rows, ui) : "");
     } else {
       foot = '<div class="tm-ap-state tm-ap-' + esc(st) + '">' + esc(tw(AP_ST_KEY[st] || AP_ST_KEY.pending)) +
         (ap.decision_note ? " · " + esc(ap.decision_note) : "") + (ap.close_reason && st !== "consumed" ? " · " +
@@ -1770,27 +2240,39 @@
         (st === "approved" ? '<div class="tm-actions"><button type="button" class="ws-btn" data-ap-decide="revoke" data-ap="' +
           esc(ap.approval_id) + '">' + esc(tw("teams.ap.revoke")) + "</button></div>" : "");
     }
-    return '<div class="tm-ap tm-ap-' + esc(st) + '" data-mid="' + esc(m.id) + '" role="group" aria-label="' +
-      esc(tw("teams.ap.title")) + '"><div class="tm-ap-head">' + ic("shield") + "<b>" + esc(tw("teams.ap.title")) +
-      "</b> " + esc(ap.title || "") + (prose ? infoBtn() : "") + "</div>" + body + foot + "</div>";
+    var head = '<div class="tm-ap-head"><span class="tm-ap-ico" aria-hidden="true">' + ic("shield") + "</span><span>" +
+      esc(tw("teams.ap.title")) + "</span>" + (pending ? '<span class="tm-ap-pill">' + esc(tw("teams.ap.pill_wait")) + "</span>" : "") +
+      (pending && ap.deadline_at ? '<span class="tm-ap-due" title="' + esc(tw("teams.ap.deadline")) + ": " +
+        esc(new Date(Number(ap.deadline_at) * 1000).toLocaleString()) + '">' + ic("clock") + esc(apDueText(ap.deadline_at)) + "</span>" : "") +
+      (prose ? infoBtn() : "") + "</div>";
+    return '<div class="tm-ap tm-ap-' + esc(st) + '" data-mid="' + esc(m.id) + '" data-ap-card="' + esc(ap.approval_id) +
+      '" role="group" aria-label="' + esc(tw("teams.ap.title")) + '">' + head +
+      (ap.title ? '<p class="tm-ap-title">' + esc(ap.title) + "</p>" : "") + body + foot + "</div>";
   }
 
   // Tab Nhóm: thành viên, mức tự quyết, số lần đã dùng hôm nay, tên và trạng thái; mọi con số trong Nâng cao (đóng sẵn).
+  //
+  // 2026-11-12 (a customer: "cài đặt của team khá phức tạp, nhiều thông số quá, cần đơn giản hơn, tập trung vào mục tiêu
+  // thôi"). What an owner decides for a team stays in view, in this order: who is in
+  // it, what it is for (the goal), how far the coordinator decides alone, whether outside actions need approval, its
+  // name and status. Acceptance, the usage figures, every limit, the detailed rights and the reply log sit in Advanced,
+  // closed by default. Nothing was removed and no handler changed: the blocks only moved.
   function teamTabHtml(team, agents, ui) {
     ui = ui || {};
     var nAct = (team.members || []).filter(function (m) { return !m.status || m.status === "active"; }).length;
     return '<section class="tm-sec"><div class="tm-qhead">' + esc(tw("teams.tab_members")) + " · " +
       esc(tw("teams.head_people", { n: nAct })) + "</div>" +
       membersHtml(team, agents, ui.openMember) + "</section>" +
-      '<section class="tm-sec">' + levelsHtml(team) + usageHtml(team) + "</section>" +
-      workModeHtml(team) + qualityPolicyHtml(team) + qualityUsageHtml(team.quality_usage, (team.quality_policy || {}).reference_usd) +
       mandateHtml(team, ui.mandateEdit) +
+      '<section class="tm-sec">' + levelsHtml(team) + "</section>" +
+      workModeHtml(team) +
       '<section class="tm-sec"><div class="tm-qhead">' + esc(tw("teams.tab_team")) + "</div>" +
       '<label class="tm-rs tm-pin-row"><input type="checkbox" class="tm-pin-toggle"' + (team.pinned_at ? " checked" : "") +
       "><span>" + esc(tw("teams.pin_top")) + "</span></label>" + settingsFormHtml(team) + "</section>" +
-      '<details class="tm-adv"' + (ui.advOpen ? " open" : "") + '><summary class="tm-adv-sum">' + esc(tw("teams.advanced")) +
-      '</summary><div class="tm-sub">' + esc(tw("teams.advanced_note")) + "</div>" + capsFormHtml(team) + authorityHtml(team) +
-      limitsHtml(team) + turnsHtml(ui.turns || [], team) + "</details>";
+      // 17/11/2026 (owner: "quá nhiều cài đặt ... anh muốn lược bỏ hết để tự động thôi, không ai động vào đâu"): the
+      // Advanced section (acceptance policy, usage, limit numbers, the deputy's detailed rights, limits table, reply log)
+      // is gone from the tab. The server keeps its automatic defaults; the three levels above set the deputy's rights.
+      dangerZoneHtml(team);
   }
 
   // Băng báo gọn, kèm nút giải quyết khi có: tạm dừng thì Bật lại, chưa có trưởng nhóm thì Chọn.
@@ -1836,6 +2318,14 @@
 
   // ───────────── phần chạy trong trình duyệt ─────────────
 
+  // A file opened from the chat covers the whole chat column (.tm-edit). Opening another team closes it first, so the
+  // team just picked shows instead of the last team's file. closeNote writes what is still unsaved, nothing typed is lost.
+  function closeDockedFile() {
+    var ed = typeof document !== "undefined" ? document.getElementById("noteEditor") : null;
+    if (!ed || !S || !S.el || !S.el.contains(ed)) return;
+    if (typeof window.JavisCloseNote === "function") { try { window.JavisCloseNote(); } catch (e) {} }
+  }
+
   function brain() {
     try {
       if (window.JavisSessions && window.JavisSessions.brain) return window.JavisSessions.brain();
@@ -1874,9 +2364,11 @@
       focusPicker: false, focusBack: null, searchOpen: false, searchResults: null, searchQuery: "", jumped: null,
       openMember: null, advOpen: false, turns: [], sideOpener: null, rowMenu: null, focusRowMenu: false, swallowClick: false,
       picked: [], retrying: {}, pickSt: null, pickOpener: null, pickHost: null, roster: [],
-      renaming: "", renamingHead: false, replyTo: null, plusOpen: false, dict: null, dictBase: "", dictState: "idle",
-      atts: [], folder: null, info: null, typing: [], pinned: [], pinsOpen: false, tagFilter: readTagFilter(),
-      autoOpened: false, unclamped: {}, outbox: [] };
+      renaming: "", renamingHead: false, replyTo: null, plusOpen: false, dict: null, dictBase: "", dictState: "idle", dictSend: false,
+      atts: [], folder: null, repos: [], ghIcon: null, skills: null, skillsBrain: "", info: null, typing: [], pinned: [], pinsOpen: false, tagFilter: readTagFilter(),
+      autoOpened: false, unclamped: {}, outbox: [],
+      jobFold: {}, finPage: 0, archPage: 0, archQuery: "", jobDetails: {}, fullReport: {},
+      atBtn: null, atObs: null, atSeen: null, atPend: [], olderBusy: null };
   }
 
   function teamUrl(path) { return "/teams/" + q(S.activeId) + (path || ""); }
@@ -1910,14 +2402,20 @@
     S.el.innerHTML =
       '<div class="tm-page" data-view="' + S.view + '" data-side="0">' +
       '<aside class="tm-list"><div class="tm-bar tm-list-bar"><strong class="tm-list-title">' + esc(tw("page.teams.label")) + "</strong>" +
-      '<button type="button" class="ws-btn tm-new">' + ic("plus") + esc(tw("teams.create")) + "</button>" +
+      '<button type="button" class="ws-btn tm-new" title="' + esc(tw("teams.create")) + '">' + ic("plus") + esc(tw("teams.create")) + "</button>" +
       '<button type="button" class="ws-btn tm-import" title="' + esc(tw("teams.import_title")) + '">' + ic("upload-cloud") +
       esc(tw("teams.import")) + "</button></div>" +
       '<div class="cside-proj ws-nhom-bar tm-tagbar" hidden></div>' +
       '<div class="tm-teams"></div><button type="button" class="ws-btn tm-more-teams" hidden>' + esc(tw("teams.next_page")) + "</button></aside>" +
       '<section class="tm-chat"><div class="tm-bar tm-chat-head"></div><div class="tm-search" hidden></div>' +
-      '<div class="tm-banners"></div><div class="tm-jobs" hidden></div>' +
-      '<div class="tm-filterbar" hidden></div><div class="tm-pinbar" hidden></div><div class="tm-msgs" aria-live="polite"></div><div class="tm-composer"></div></section>' +
+      '<div class="tm-banners"></div>' +
+      '<div class="tm-filterbar" hidden></div><div class="tm-pinbar" hidden></div><div class="tm-msgs" aria-live="polite"></div>' +
+      '<div class="tm-jobs bg-strip" hidden></div><div class="tm-composer"></div>' +
+      // 2026-11-15 (owner: files the team writes could not be clicked open): the frame the file editor docks into when a
+      // file link in the chat is clicked, like the Partners page's #wsEdit. It takes the whole chat column while open
+      // (console.css .tm-chat.edit-on); closing the file brings the chat back as it was. `data-ne-host` is how
+      // console.js finds it; without it the editor opened behind this page and nothing showed.
+      '<div class="tm-edit" data-ne-host></div></section>' +
       // Vùng thông báo chung NGOÀI khung chat: trên điện thoại khung chat bị ẩn khi đang ở danh sách, thông báo (vd. ghim
       // lỗi) vẫn phải nhìn thấy (review 4f6268bd #2).
       '<aside class="tm-side" hidden></aside><div class="tm-scrim" hidden></div><div class="tm-note" role="status" aria-live="polite" hidden></div></div>';
@@ -1938,7 +2436,8 @@
     }
     var shown = filterTeams(S.teams, S.tagFilter);
     if (box) box.innerHTML = S.loaded || S.teams.length ? (S.tagFilter && !shown.length ? '<p class="tm-empty">' +
-      esc(tw("teams.tags_none")) + "</p>" : teamListHtml(shown, S.activeId, undefined, S.rowMenu, S.renaming, S.tagMenu)) : "";
+      esc(tw("teams.tags_none")) + "</p>" : teamListHtml(shown, S.activeId, undefined, S.rowMenu, S.renaming, S.tagMenu))
+      : loadingHtml("teams.loading_list");
     bindTagPicker(box);
     if (S.renaming) focusRename(box, rd);
     if (box && S.rowMenu && S.focusRowMenu) {
@@ -2010,13 +2509,27 @@
   }
 
   // Đang lọc tin theo một việc: một băng nói rõ, kèm nút Xem tất cả (thay ô chọn lọc cũ).
+  // The bar shown while the chat holds one job's messages. Owner, 17/11/2026 (a phone screenshot: "rối như tơ vò ...
+  // không thể nào mà thao tác với đọc hiểu dữ liệu đc"): it took three lines on a phone (the sentence, a "Show all"
+  // button, the acceptance and usage folder) and pushed the chat down. Now ONE line: the job's name cut to fit, an
+  // icon for its acceptance and usage (opens a panel under the line, folded by default) and an X to show every message.
+  function filterbarHtml(title, quality, open) {
+    var usage = tw("teams.quality.task_usage"), all = tw("teams.filter_clear");
+    return '<span class="tm-fb-ic" aria-hidden="true">' + ic("message-circle") + "</span>" +
+      '<span class="tm-fb-text" title="' + esc(tw("teams.filter_on", { title: title })) + '">' + esc(tw("teams.filter_short", { title: title })) + "</span>" +
+      (quality ? '<button type="button" class="tm-jb-ic tm-fb-q" data-fb-quality="1" aria-expanded="' + (open ? "true" : "false") +
+        '" aria-label="' + esc(usage) + '" title="' + esc(usage) + '">' + ic("chart-column") + "</button>" : "") +
+      '<button type="button" class="tm-jb-ic tm-filter-clear" aria-label="' + esc(all) + '" title="' + esc(all) + '">' + ic("x") + "</button>" +
+      (quality && open ? '<div class="tm-fb-panel">' + quality.replace('<details class="tm-task-quality">', '<details class="tm-task-quality" open>') + "</div>" : "");
+  }
+
   function drawFilterbar() {
     var bar = S.el.querySelector(".tm-filterbar");
     if (!bar) return;
     bar.hidden = !S.filterTask || !S.team;
-    bar.innerHTML = bar.hidden ? "" : "<span>" + esc(tw("teams.filter_on", { title: S.taskTitles[S.filterTask] || S.filterTask })) +
-      '</span><button type="button" class="ws-btn tm-filter-clear">' + esc(tw("teams.filter_clear")) + "</button>" +
-      (S.taskDetail && S.taskDetail.task && S.taskDetail.task.id === S.filterTask ? taskQualityHtml(S.taskDetail) : "");
+    if (bar.hidden) { S.fbQuality = false; bar.innerHTML = ""; return; }
+    var quality = S.taskDetail && S.taskDetail.task && S.taskDetail.task.id === S.filterTask ? taskQualityHtml(S.taskDetail) : "";
+    bar.innerHTML = filterbarHtml(S.taskTitles[S.filterTask] || S.filterTask, quality, !!S.fbQuality);
   }
 
   function runSearch() {
@@ -2113,8 +2626,11 @@
       return it.nodes.every(function (n) { return n.parentNode === box; });
     });
     var keep = box.lastChild && box.lastChild.classList && box.lastChild.classList.contains("jv-new-msg") ? box.lastChild : null;
+    // The "@" button (18/11/2026) is the list's FIRST child, so `position: sticky; top` keeps it at the top: kept there.
+    var lead = box.firstChild && box.firstChild.classList && box.firstChild.classList.contains("tm-at-jump") ? box.firstChild : null;
     if (!usable) {
       while (box.firstChild) box.removeChild(box.firstChild);
+      if (lead) box.appendChild(lead);
       items.forEach(function (it) {
         it.nodes = make(it.html);
         it.nodes.forEach(function (n) { box.appendChild(n); });
@@ -2128,7 +2644,7 @@
     prev.forEach(function (it) {
       if (!want[it.key]) it.nodes.forEach(function (n) { box.removeChild(n); });
     });
-    var cursor = box.firstChild;
+    var cursor = lead ? lead.nextSibling : box.firstChild;
     items.forEach(function (it) {
       var was = old[it.key];
       if (was && was.html === it.html) {
@@ -2144,6 +2660,11 @@
       if (was) was.nodes.forEach(function (n) { if (n.parentNode === box) box.removeChild(n); });
     });
     return items;
+  }
+
+  // A small "Loading..." line with a spinner (.pg-loading in console.css), the same as on the Partners page.
+  function loadingHtml(key) {
+    return '<div class="pg-loading" role="status" aria-live="polite">' + esc(tw(key)) + "</div>";
   }
 
   function htmlNodes(html) {
@@ -2162,8 +2683,13 @@
     var items = [
       { key: "jumped", html: S.jumped !== null && S.jumped !== undefined ? '<div class="tm-jumped">' + esc(tw("teams.search_viewing")) +
         ' <button type="button" class="ws-btn tm-jump-back">' + ic("chevrons-down") + esc(tw("teams.search_back")) + "</button></div>" : "" },
-      { key: "older", html: S.hasMore ? '<button type="button" class="ws-btn tm-older">' + esc(tw("teams.older")) + "</button>" : "" },
-      { key: "empty", html: !list.length && !S.hasMore ? '<div class="tm-empty tm-empty-chat">' + esc(tw("teams.chat_empty")) + "</div>" : "" }];
+      // Both labels are always in the button and the list's `tm-older-busy` class picks one: the keyed list reuses a node
+      // whose markup did not change, so a label written into the node would stay after the load.
+      { key: "older", html: S.hasMore ? '<button type="button" class="ws-btn tm-older"><span class="tm-older-idle">' + esc(tw("teams.older")) +
+        '</span><span class="tm-older-wait">' + esc(tw("teams.older_loading")) + "</span></button>" : "" },
+      // Messages of this team not loaded yet: say so, rather than "no message yet" (2026-11-09, owner).
+      { key: "empty", html: !list.length && !S.hasMore ? (S.msgsFor !== S.activeId ? loadingHtml("teams.loading_chat")
+        : '<div class="tm-empty tm-empty-chat">' + esc(tw(S.filterTask ? "teams.chat_empty_job" : "teams.chat_empty")) + "</div>") : "" }];
     list.forEach(function (m) {
       var mm = m;
       if (S.skipped["p" + m.id] && m.meta && m.meta.proposal) mm = Object.assign({}, m, { meta: Object.assign({}, m.meta, { proposal: null }) });
@@ -2180,20 +2706,105 @@
     return { items: items, list: list };
   }
 
+  // ───────────── the "@" button: messages that call the owner (18/11/2026) ─────────────
+  // What has been read is kept per team on this device, so reopening the team does not count the same messages again.
+  var AT_SEEN_KEY = "javis.teams.atSeen";
+  function readAtSeen(teamId) {
+    try {
+      var all = JSON.parse(localStorage.getItem(AT_SEEN_KEY) || "{}") || {}, out = {};
+      (all[teamId] || []).forEach(function (id) { out[id] = true; });
+      return out;
+    } catch (e) { return {}; }
+  }
+  function atSeenMap() {
+    var id = S.team && S.team.team_id;
+    if (!id) return {};
+    if (!S.atSeen || S.atSeen.team !== id) S.atSeen = { team: id, ids: readAtSeen(id) };
+    return S.atSeen.ids;
+  }
+  function markAtSeen(mid) {
+    var seen = atSeenMap();
+    if (!S.atSeen || seen[mid]) return false;
+    seen[mid] = true;
+    try {
+      var all = JSON.parse(localStorage.getItem(AT_SEEN_KEY) || "{}") || {};
+      all[S.atSeen.team] = Object.keys(seen).map(Number).sort(function (a, b) { return a - b; }).slice(-200);
+      localStorage.setItem(AT_SEEN_KEY, JSON.stringify(all));
+    } catch (e) {}
+    return true;
+  }
+  // A message calling the owner counts as read once half of it (or half the chat's height, for a long one) is on screen.
+  function onAtSeen(entries) {
+    var changed = false;
+    entries.forEach(function (en) {
+      if (!en.isIntersecting) return;
+      var tall = en.rootBounds && en.intersectionRect.height >= en.rootBounds.height * 0.5;
+      if (en.intersectionRatio < 0.5 && !tall) return;
+      if (markAtSeen(Number(en.target.getAttribute("data-mid")))) changed = true;
+      if (S.atObs) S.atObs.unobserve(en.target);
+    });
+    if (changed) updateAtJump(false);
+  }
+  // `watch`: the list was drawn again, so the messages to watch are new nodes.
+  function updateAtJump(watch) {
+    var btn = S.atBtn, box = S.el.querySelector(".tm-msgs");
+    if (!btn || !box) return;
+    var IO = typeof IntersectionObserver !== "undefined" ? IntersectionObserver : null;
+    var asks = S.team && IO ? Array.prototype.map.call(box.querySelectorAll(".tm-msg-asks[data-mid]"), function (el) {
+      var id = Number(el.getAttribute("data-mid")), m = msgById(id);
+      return { id: id, ts: m ? m.ts : 0, el: el };
+    }) : [];
+    var pend = S.atPend = atPending(asks, ownerSaidAt(S.msgs), atSeenMap());
+    // Drawn again on every update of the list: the button is only rewritten when its count changes.
+    if (btn.getAttribute("data-n") !== String(pend.length)) {
+      btn.setAttribute("data-n", String(pend.length));
+      btn.innerHTML = atJumpHtml(pend.length);
+      var label = tw("teams.at_jump", { n: pend.length });
+      btn.title = label;
+      btn.setAttribute("aria-label", label);
+      btn.classList.toggle("show", pend.length > 0);
+    }
+    if (!watch || !IO) return;
+    if (!S.atObs || S.atObs.root !== box) S.atObs = new IO(onAtSeen, { root: box, threshold: [0, 0.1, 0.25, 0.5, 0.75, 1] });
+    S.atObs.disconnect();
+    asks.forEach(function (a) { if (pend.indexOf(a.id) >= 0) S.atObs.observe(a.el); });
+  }
+  // Pressed: the oldest message still waiting comes to the middle of the chat and flashes; the next press goes on.
+  function atJump() {
+    var box = S.el.querySelector(".tm-msgs"), id = (S.atPend || [])[0];
+    var el = id != null && box ? box.querySelector('.tm-msg[data-mid="' + id + '"]') : null;
+    if (!el) return updateAtJump(true);
+    if (S.scroll) S.scroll.setStuck(false);
+    if (el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.add("tm-msg-flash");
+    setTimeout(function () { el.classList.remove("tm-msg-flash"); }, 1600);
+    markAtSeen(id);
+    updateAtJump(false);
+  }
+
   function drawMsgs(stick) {
     var box = S.el.querySelector(".tm-msgs");
     if (!box) return;
     drawPins();
+    drawJobs();
     // T3 (6.2): khung tin của nhóm đang mở; pulse-seen.js đọc mã nhóm ở đây để báo tin của trợ lý đã được xem.
     if (S.team) box.setAttribute("data-seen-team", S.team.team_id); else box.removeAttribute("data-seen-team");
     if (!S.team) {
       S.listCache = null;
-      box.innerHTML = S.teams.length ? '<div class="tm-empty tm-empty-chat">' + esc(tw("teams.pick_team")) + "</div>" : "";
+      // A team being opened, or the list itself still on its way: "Loading", not "pick a team" (2026-11-09, owner).
+      box.innerHTML = S.activeId || !S.loaded ? loadingHtml(S.activeId ? "teams.loading_chat" : "teams.loading_list")
+        : S.teams.length ? '<div class="tm-empty tm-empty-chat">' + esc(tw("teams.pick_team")) + "</div>" : "";
       return;
     }
     var built = listItems();
     var prev = S.listCache && S.listCache.team === S.team.team_id && S.listCache.box === box ? S.listCache.items : null;
-    S.listCache = { team: S.team.team_id, box: box, items: listSync(box, built.items, prev, htmlNodes) };
+    // Performance (2026-11-05): Alpine walks every node added anywhere on the page looking for x- directives; message
+    // nodes never carry one. Same two steps as the main chat (app.js chatAppend): the list itself is flagged, and the
+    // sync runs inside Alpine.mutateDom so what is written into a message is not walked either.
+    box._x_ignoreMutationObserver = true;
+    var A = typeof window !== "undefined" && window.Alpine;
+    var sync = function () { return listSync(box, built.items, prev, htmlNodes); };
+    S.listCache = { team: S.team.team_id, box: box, items: A && typeof A.mutateDom === "function" ? A.mutateDom(sync) : sync() };
     // The latest assistant message keeps its Like button visible (like Zalo); older ones show it on hover.
     var lastAgent = null;
     for (var li = built.list.length - 1; li >= 0; li--) if (built.list[li].author_kind === "agent") { lastAgent = built.list[li].id; break; }
@@ -2202,6 +2813,12 @@
     if (lastRx) lastRx.classList.add("is-last");
     // The jump-to-latest button (chat-scroll.js) is the list's last child, so `position: sticky` keeps it at the bottom.
     if (S.scroll) { if (box.lastChild !== S.scroll.button) box.appendChild(S.scroll.button); S.scroll.update(); }
+    // The "@" button is the list's first child, sticky at the top right (owner, 18/11/2026: "nút nó phải ở phía trên",
+    // like Zalo: the messages it leads to are above).
+    if (S.atBtn) {
+      if (box.firstChild !== S.atBtn) box.insertBefore(S.atBtn, box.firstChild);
+      updateAtJump(true);
+    }
     applyReveal(box);
     // Bảng đang "mở" mà không vẽ ra (tin đã đổi, đã ghim): bỏ trạng thái mở, kẻo tin mới không còn tự cuộn xuống.
     if (S.picker !== null && !box.querySelector('[data-panel="' + S.picker + '"]')) S.picker = null;
@@ -2211,6 +2828,8 @@
       if (stick) toLatest(true);
       else if (!S.scroll || S.scroll.stuck()) toLatest(false);
     }
+    // The reply box of an approval card keeps what was typed if the card was drawn again (17/11/2026).
+    if (AP_REPLY.id) apRestore(false);
     if (S.focusPicker) {
       // Mở bộ chọn: focus vào nút đầu của bảng (bàn phím và trình đọc màn hình vào được bảng, Escape đóng được).
       S.focusPicker = false;
@@ -2237,9 +2856,21 @@
   function drawJobs() {
     var bar = S.el.querySelector(".tm-jobs");
     if (!bar) return;
-    var h = S.team ? jobStripHtml(S.queue) : "";
+    // The newest owner message seen in this team so far: while the chat shows one job's messages, the owner's answer
+    // in the whole chat still counts (it is not in that job's list).
+    var seenAt = S.seenAt = Math.max(S.seenAt || 0, ownerSaidAt(S.msgs));
+    var st = S.team ? stripState(S.queue, seenAt) : { tone: "" };
+    if (!st.tone) S.stripOpen = false;
+    var h = st.tone ? jobStripHtml(S.queue, S.team.members, { seenAt: seenAt, open: S.stripOpen }) : "";
     bar.hidden = !h;
-    bar.innerHTML = h;
+    bar.className = "tm-jobs bg-strip" + (st.tone ? " bg-" + (st.tone === "ask" ? "stall" : "run") : "");
+    if (bar.innerHTML !== h) bar.innerHTML = h;
+  }
+
+  function setStrip(open) {
+    if (!S || !!S.stripOpen === !!open) return;
+    S.stripOpen = !!open;
+    drawJobs();
   }
 
   function drawComposer() {
@@ -2267,6 +2898,8 @@
     grow(box.querySelector(".tm-input"));
     drawHint();
     drawTyping();
+    if (S.plusOpen) placePlusMenu(box);
+    if (teamSuggest) teamSuggest.refresh();
     if (S.focusComposer && !off) {
       S.focusComposer = false;
       var inp = box.querySelector(".tm-input");
@@ -2294,15 +2927,39 @@
 
   // The "+" menu of the composer: Assign as a job (on/off), Mention an assistant, Search this team. Room for more later
   // without growing the composer row (the old always-visible "Assign job" pill took a third of a phone's width).
+  // The GitHub mark of the main chat (github-connect.js), so a team chat's repo looks the same (owner, 2026-11-06).
+  // The branch icon only when that file is missing.
+  function ghLogo() {
+    var G = typeof window !== "undefined" && window.JavisGithubRepos;
+    return G && G.logo ? G.logo : ic("git-branch");
+  }
+
+  // The + menu and the panels it opens (folder, GitHub) sit just above the + button, not above the whole composer: with a
+  // reply bar, files attached or a few lines typed, the composer's top is far from the button (owner, 14/11/2026, the
+  // same fix as the main chat's popovers in model-picker.js).
+  function placePlusMenu(box) {
+    var menu = box.querySelector(".tm-plus-menu"), pb = box.querySelector(".tm-plus");
+    if (!menu || !pb || pb.offsetParent !== box) return;
+    menu.style.bottom = Math.max(0, box.clientHeight - pb.offsetTop + 6) + "px";
+  }
+  function placeAbovePlus(pop, comp) {
+    var r = comp.getBoundingClientRect(), pb = comp.querySelector(".tm-plus");
+    var top = pb && pb.offsetParent ? pb.getBoundingClientRect().top : r.top;
+    pop.style.left = Math.max(8, r.left + 8) + "px";
+    pop.style.bottom = Math.max(8, window.innerHeight - top + 6) + "px";
+  }
+
   function plusMenuHtml(off) {
     if (!S.plusOpen || off) return "";
+    // `icon` is an icon name, or ready markup when it starts with "<" (the GitHub logo).
     var item = function (attr, icon, label, checked) {
-      return '<button type="button" ' + attr + ">" + ic(icon) + "<span>" + esc(label) + "</span>" +
+      return '<button type="button" ' + attr + ">" + (icon.charAt(0) === "<" ? icon : ic(icon)) + "<span>" + esc(label) + "</span>" +
         (checked ? '<span class="tm-plus-on">' + ic("check") + "</span>" : "") + "</button>";
     };
     return '<div class="tm-plus-menu" role="menu" aria-label="' + esc(tw("teams.plus")) + '">' +
       item('role="menuitem" data-plus-attach="1"', "paperclip", tw("teams.attach")) +
       item('role="menuitem" data-plus-folder="1"', "folder", tw("cp.pin_folder")) +
+      item('role="menuitem" data-plus-github="1"', ghLogo(), tw("gh.menu")) +
       item('role="menuitemcheckbox" aria-checked="' + (S.asJob ? "true" : "false") + '" class="tm-asjob" title="' +
         esc(tw("teams.as_job_title")) + '"', "list-todo", tw("teams.as_job"), S.asJob) +
       item('role="menuitem" data-insert-at="1"', "at-sign", tw("teams.mention_insert")) +
@@ -2321,6 +2978,13 @@
 
   // ───────────── mic: speak, the words land in the input (dictate.js) ─────────────
 
+  // The last messages of the open team, for the rewrite at the end of a dictation (dictate.js polish).
+  function dictContext() {
+    var D = typeof window !== "undefined" && window.JavisDictate;
+    var box = S.el && S.el.querySelector(".tm-msgs");
+    return D && D.recentMessages ? D.recentMessages(box, ".tm-msg .tm-text", 4) : [];
+  }
+
   function toggleMic() {
     var D = typeof window !== "undefined" && window.JavisDictate;
     if (!D) { setNote(tw("teams.mic_unsupported")); return; }
@@ -2328,19 +2992,35 @@
     if (S.dictState === "transcribing") return;
     var input = S.el.querySelector(".tm-input");
     S.dictBase = input ? input.value : "";
-    var forTeam = S.activeId;
+    S.dictSend = false;
+    var forTeam = S.activeId, heard = "";
+    // A computer shows the words in the box while speaking (owner, 2026-11-06: in the chat box, not a bubble above); a
+    // phone keeps them for the end. When the recording ends the main brain rewrites the sentence in context and that is
+    // what lands, or is sent (see composer-dictate.js).
+    var live = !(D.isPhoneUA && D.isPhoneUA());
     S.dict = D.create({
-      onText: function (text) {
-        var inp = S.el.querySelector(".tm-input");
-        if (!inp || S.activeId !== forTeam) return;
-        inp.value = D.joinText(S.dictBase, text);
-        S.pending = null;
-        grow(inp);
-        drawHint();
+      context: dictContext,
+      onText: function (text, final) {
+        heard = String(text || "");
+        if (final || !live || S.dictState !== "listening" || S.activeId !== forTeam) return;
+        var box = S.el.querySelector(".tm-input");
+        if (box) { box.value = D.joinText(S.dictBase, heard); grow(box); box.scrollTop = box.scrollHeight; }
       },
       onState: function (st) {
+        var was = S.dictState;
         S.dictState = st;
+        // Send pressed while recording (button or Enter): it waited for the rewritten words, now it goes.
+        var sendNow = st === "idle" && was !== "idle" && S.dictSend;
+        if (st === "idle") S.dictSend = false;
         if (S.activeId !== forTeam) return;
+        var inp0 = st === "idle" && heard ? S.el.querySelector(".tm-input") : null;
+        if (inp0) {
+          inp0.value = D.joinText(S.dictBase, heard);
+          heard = "";
+          S.pending = null;
+          grow(inp0);
+          drawHint();
+        }
         var btn = S.el.querySelector(".tm-mic");
         if (!btn) return;
         btn.classList.toggle("is-rec", st !== "idle");
@@ -2348,6 +3028,7 @@
         var lab = tw(st === "idle" ? "teams.mic" : st === "transcribing" ? "teams.mic_busy" : "teams.mic_stop");
         btn.setAttribute("aria-label", lab); btn.title = lab;
         btn.innerHTML = ic(st === "idle" ? "mic" : st === "transcribing" ? "loader" : "square");
+        if (sendNow) { send(); return; }
         if (st === "idle") { var inp = S.el.querySelector(".tm-input"); if (inp) inp.focus(); }
       },
       onError: function (code) {
@@ -2355,7 +3036,7 @@
         var ios = D.isIOS && D.isIOS();
         setNote(tw(code === "denied" ? (ios ? "dict.denied_ios" : "teams.mic_denied")
           : code === "service" ? (ios ? "dict.service_ios" : "dict.service") : code === "unsupported" ? "teams.mic_unsupported"
-          : code === "nothing" ? "dict.nothing" : "teams.mic_failed"));
+          : code === "nothing" ? (D.nothingKey ? D.nothingKey() : "dict.nothing") : "teams.mic_failed"));
       }
     });
     S.dict.start();
@@ -2422,6 +3103,36 @@
     if (inp) { try { inp.focus(); } catch (e) {} }
   }
 
+  // Owner, 2026-11-14: a tap on the quote on top of the owner's message scrolls back to the exact words it quotes and
+  // marks them for a moment, like the main chat (quote-jump.js). Only the words after "Name: " are looked for. Not on
+  // screen any more: older pages load until it is. The message is found again by id after each load redraws the list.
+  function jumpToQuoted(btn) {
+    var J = typeof window !== "undefined" && window.JavisQuoteJump;
+    var host = btn && btn.closest && btn.closest(".tm-msg");
+    if (!J || !host || !S) return;
+    var mid = host.getAttribute("data-mid"), cid = host.getAttribute("data-cid");
+    var m = mid ? msgById(Number(mid)) : null;
+    var p = !m && cid ? S.outbox.filter(function (x) { return x.cid === cid; })[0] : null;
+    var Q = quoteApi();
+    var text = m ? String(m.content == null ? "" : m.content) : p ? String(p.text || "") : "";
+    var quote = Q ? Q.tach(skillSplit(text).rest).quote : "";
+    var self = function () {
+      return S.el.querySelector(mid ? '.tm-msgs [data-mid="' + Number(mid) + '"]' : '.tm-msgs [data-cid="' + String(cid).replace(/"/g, "") + '"]');
+    };
+    J.go({
+      quote: quoteParts(quote).words,
+      candidates: function () {
+        var box = S.el.querySelector(".tm-msgs");
+        return box ? J.before(box.querySelectorAll(".tm-msg[data-mid]"), self()) : [];
+      },
+      roots: function (el) { return Array.prototype.slice.call(el.querySelectorAll(".tm-text")); },
+      scroller: function () { return S.el.querySelector(".tm-msgs"); },
+      beforeScroll: function () { if (S.scroll) S.scroll.setStuck(false); },
+      loadOlder: function () { return loadOlder(); },
+      flashClass: "tm-msg-flash"
+    });
+  }
+
   // What Copy puts on the clipboard, the same as the main chat: an assistant's answer as its visible markdown (headings,
   // bold, links kept; hidden metadata blocks dropped), the owner's own words without the quote of an earlier message.
   function copyTextOf(m) {
@@ -2429,7 +3140,8 @@
     var text = String(m.content == null ? "" : m.content);
     if (m.author_kind === "owner") {
       var Q = quoteApi();
-      return Q ? Q.tach(text).rest : text;
+      var sk = skillSplit(text);
+      return Q ? Q.tach(sk.rest).rest : sk.rest;
     }
     var vm = typeof window !== "undefined" && window.JavisVisibleMarkdown;
     return vm ? vm(text) : text;
@@ -2601,6 +3313,44 @@
     if (S) S.rv = null;
   }
 
+  function jobsView() {
+    return { openFin: S.openFin, archOpen: S.archOpen, members: S.team ? S.team.members : [], accEdit: S.accEdit,
+      leaderKey: S.team ? S.team.leader_key : "", fold: S.jobFold, finPage: S.finPage, archPage: S.archPage,
+      archQuery: S.archQuery, details: S.jobDetails, fullReport: S.fullReport, reply: JOB_REPLY };
+  }
+
+  // The Archive is listed without results (it can hold hundreds of jobs): one job's report is read when it is opened.
+  function loadJobDetail(id) {
+    var lists = S.queue || {};
+    var job = (lists.archived || []).concat(lists.finished || []).filter(function (j) { return j.id === id; })[0];
+    if (!job || job.result !== undefined || !job.task_id) return;
+    var known = S.jobDetails[job.task_id];
+    if (known && known !== "error") return;
+    S.jobDetails[job.task_id] = "loading";
+    var forTeam = S.activeId;
+    call("GET", teamUrl("/tasks/" + q(job.task_id))).then(function (r) {
+      if (!S || S.activeId !== forTeam) return;
+      var task = r.code === 200 && r.j ? r.j.task : null;
+      S.jobDetails[job.task_id] = task ? { result: task.result || "", steps: r.j.steps || [], created_at: task.created_at,
+        updated_at: task.updated_at } : "error";
+      if (S.side && S.tab === "jobs") drawSide(true);
+    });
+  }
+
+  // Typing in the Archive search box redraws only the rows and the pager, so the box keeps its focus and its caret.
+  function drawArchive() {
+    var rows = S.el.querySelector(".tm-side-body .tm-jb-archive");
+    if (!rows) return;
+    var view = jobsView();
+    var list = filterJobs((S.queue || {}).archived || [], view.archQuery);
+    var page = clampPage(view.archPage, list.length);
+    rows.innerHTML = archiveRowsHtml(list, page, view);
+    var head = S.el.querySelector(".tm-side-body .tm-qhead-arch");
+    var old = head && head.querySelector(".tm-jb-pg");
+    if (old) old.parentNode.removeChild(old);
+    if (head) head.insertAdjacentHTML("beforeend", pagerHtml("arch", page, list.length));
+  }
+
   function markJobs(ids, state) {
     return call("POST", "/jobs/marks", { brain: brain(), ids: ids, state: state }).then(function (r) {
       if (r.code !== 200) return fail(r);
@@ -2716,12 +3466,12 @@
     if (side.hidden) { side.innerHTML = ""; return; }
     var keep = side.querySelector(".tm-side-body");
     var top = keep ? keep.scrollTop : 0;
-    var tabs = ["info", "jobs", "team"].map(function (k) {
-      return '<button type="button" class="tm-tab" role="tab" data-tab="' + k + '" aria-selected="' + (S.tab === k ? "true" : "false") +
-        '">' + esc(tw(TAB_KEY[k])) + "</button>";
-    }).join("");
-    var body = S.tab === "info" ? infoTabHtml(S.team) : S.tab === "jobs" ? queueHtml(S.queue,
-      { openFin: S.openFin, archOpen: S.archOpen, members: S.team ? S.team.members : [], accEdit: S.accEdit })
+    // A forced redraw while typing in the archive search: the box comes back with the cursor where it was.
+    var typing = typeof document !== "undefined" && document.activeElement && side.contains(document.activeElement) &&
+      document.activeElement.classList.contains("tm-as-q") ? document.activeElement.selectionStart : -1;
+    var tabs = sideTabsHtml(S.tab, S.queue);
+    var body = S.tab === "info" ? (S.assets ? assetsHtml(S.assets, (S.info && S.info.counts) || {}) : infoTabHtml(S.team))
+      : S.tab === "jobs" ? queueHtml(S.queue, jobsView())
       : teamTabHtml(S.team, S.agents, { openMember: S.openMember, advOpen: S.advOpen, turns: S.turns, mandateEdit: S.mandateEdit });
     side.innerHTML = '<div class="tm-bar tm-side-bar"><div class="tm-tabs" role="tablist">' + tabs + "</div>" +
       '<button type="button" class="ws-btn tm-icon tm-close" aria-label="' + esc(tw("teams.close")) + '" title="' +
@@ -2729,6 +3479,8 @@
       esc(tw(TAB_KEY[S.tab])) + '">' + body + "</div>";
     var nb = side.querySelector(".tm-side-body");
     if (nb && keep) nb.scrollTop = top;
+    var qbox = typing >= 0 ? side.querySelector(".tm-as-q") : null;
+    if (qbox) { try { qbox.focus({ preventScroll: true }); qbox.setSelectionRange(typing, typing); } catch (e) { /* old browser */ } }
     attachSideResize(side);
     if (window.JavisPulse) {
       Array.prototype.forEach.call(side.querySelectorAll(".tm-pulse[data-pulse-slug]"), function (el) {
@@ -2739,6 +3491,7 @@
       });
     }
     if (window.JavisAgentJudge && window.JavisAgentJudge.hydrate) window.JavisAgentJudge.hydrate(side);
+    jrRestore(false);
   }
 
   function drawAll(stick) {
@@ -2751,6 +3504,8 @@
       : opener.matches(".tm-gear") ? ".tm-gear" : opener.matches(".tm-ava-btn") ? ".tm-ava-btn" : null;
     S.side = true;
     S.tab = tab;
+    S.tabAuto = false;
+    rememberSide(true);
     drawSide(true);
     drawHead();
     if (tab === "team") loadAgents().then(function () { if (S.side && S.tab === "team") drawSide(); });
@@ -2772,13 +3527,13 @@
       return;
     }
     if (kind === "resume") return call("PATCH", teamUrl(), { status: "active" }).then(function (r) { act(r, drawAll); });
-    // Giới hạn nằm ở Nâng cao của ngăn Nhóm; điều phối chọn trong danh sách thành viên của cùng ngăn.
-    if (kind === "limits") S.advOpen = true;
     openSide("team", btn);
   }
 
   function closeSide() {
     S.side = false;
+    S.assets = null;
+    rememberSide(false);
     drawSide(true);
     drawHead();
     var back = S.el.querySelector(S.sideOpener || ".tm-gear") || S.el.querySelector(".tm-gear");
@@ -2794,7 +3549,12 @@
 
   function loadTeams(append) {
     var url = "/teams" + (append && S.next ? "?before=" + q(S.next) : "");
+    var mine = S, forBrain = brain();
     return call("GET", url).then(function (r) {
+      // A list asked by an earlier draw of this page, or for another brain (the picker changed meanwhile, which redraws
+      // the page), must not replace the current one: an answer arriving late showed another brain's teams here, and a
+      // team opened from it was "not found" (user report, 08/11/2026).
+      if (S !== mine || brain() !== forBrain) return;
       if (r.code !== 200) return fail(r);
       S.teams = append ? S.teams.concat(r.j.teams || []) : (r.j.teams || []);
       S.next = r.j.next || null;
@@ -2905,11 +3665,53 @@
         drawFilterbar();
       }
       S.msgs = older ? got.concat(S.msgs) : got;
+      S.msgsFor = forTeam;
       S.hasMore = !S.filterTask && !!r.j.has_more;
       // Older messages go in above what the owner is reading: keep them on the same message (the main chat does too).
       if (older && S.scroll) S.scroll.keep(function () { drawMsgs(false); });
       else drawMsgs(!older);
     });
+  }
+
+  // 18/11/2026 (owner: "chỉ tải những tin gần nhất thôi lúc nào cuộn lên mới tải cả các tin bên trên"): a team opens on
+  // its newest page only, and older pages come in by themselves as the owner scrolls near the top, like the main chat
+  // and the Chatbot page. One page at a time: two loads from the same cursor (a double press, a scroll during a press)
+  // used to put the same messages in twice. Resolves true when older messages were added.
+  var OLDER_NEAR_PX = 240;
+  function loadOlder() {
+    if (!S || !S.activeId || !S.hasMore || S.filterTask || !S.msgs.length) return Promise.resolve(false);
+    if (S.olderBusy) return S.olderBusy.team === S.activeId ? S.olderBusy.p : Promise.resolve(false);
+    var mine = { team: S.activeId }, n = S.msgs.length;
+    var box = S.el.querySelector(".tm-msgs");
+    var done = function () {
+      if (S.olderBusy !== mine) return;
+      S.olderBusy = null;
+      if (box) box.classList.remove("tm-older-busy");
+    };
+    S.olderBusy = mine;
+    if (box) box.classList.add("tm-older-busy");
+    mine.p = loadMsgs(true).then(function () {
+      done();
+      var more = S.activeId === mine.team && S.msgs.length > n;
+      if (more) fillOlder();
+      return more;
+    }, function () { done(); return false; });
+    return mine.p;
+  }
+
+  // A newest page of short messages may not fill the chat: with nothing to scroll, the top is never reached. Load older
+  // pages until the chat can scroll (the Chatbot page does the same). A hidden chat (height 0) loads nothing, and so
+  // does a chat still showing "Loading" while the team's record is on its way (no list on screen yet).
+  function fillOlder() {
+    var box = S && S.el && S.el.querySelector(".tm-msgs");
+    if (!box || !S.team || !S.hasMore || S.olderBusy || !box.clientHeight || box.scrollHeight > box.clientHeight + 40) return;
+    loadOlder();
+  }
+
+  function onMsgsScroll(e) {
+    var box = e && e.currentTarget;
+    if (!S || !box || !S.activeId || !S.team || !S.hasMore || S.olderBusy) return;
+    if (box.scrollTop < OLDER_NEAR_PX) loadOlder();
   }
 
   function loadTurns() {
@@ -2921,21 +3723,86 @@
     });
   }
 
+  // 2026-11-05: the last state of the teams opened lately (the record, the queue, the newest page of messages). Opening
+  // one of them again draws it at once from here while the same three requests refresh it behind; before, every
+  // switch showed an empty chat until the slowest of them answered. Lives outside S, which each visit rebuilds.
+  var TEAM_CACHE = {}, TEAM_CACHE_MAX = 12, TEAM_CACHE_MS = 5 * 60 * 1000;
+  function keepTeam() {
+    if (!S || !S.activeId || !S.team || S.filterTask || (S.jumped !== null && S.jumped !== undefined)) return;
+    TEAM_CACHE[S.activeId] = { at: Date.now(), team: S.team, queue: S.queue, msgs: S.msgs.slice(-60), hasMore: S.hasMore || S.msgs.length > 60,
+      pinned: S.pinned || [], taskTitles: Object.assign({}, S.taskTitles) };
+    var ids = Object.keys(TEAM_CACHE);
+    if (ids.length > TEAM_CACHE_MAX) {
+      ids.sort(function (a, b) { return TEAM_CACHE[a].at - TEAM_CACHE[b].at; });
+      ids.slice(0, ids.length - TEAM_CACHE_MAX).forEach(function (k) { delete TEAM_CACHE[k]; });
+    }
+  }
+  function useTeam(id) {
+    var c = TEAM_CACHE[id];
+    if (!c || S.filterTask) return false;
+    if (Date.now() - c.at > TEAM_CACHE_MS) { delete TEAM_CACHE[id]; return false; }
+    S.team = c.team; S.queue = c.queue; S.msgs = c.msgs.slice(); S.hasMore = c.hasMore; S.pinned = c.pinned; S.msgsFor = id;
+    S.taskTitles = Object.assign({}, c.taskTitles);
+    return true;
+  }
+
   function openTeam(id, taskId) {
+    keepTeam();
+    dropNextSug();
+    closeDockedFile();
     S.jumped = null; S.searchResults = null; S.searchQuery = ""; S.searchOpen = false;
     S.activeId = id; S.view = "chat"; S.asJob = false; S.pending = null; S.filterTask = String(taskId || "");
-    S.team = null; S.queue = null; S.msgs = []; S.taskTitles = {}; S.side = false; S.openMember = null; S.turns = [];
+    S.team = null; S.queue = null; S.msgs = []; S.msgsFor = ""; S.taskTitles = {}; S.openMember = null; S.turns = [];
+    // The last team's "more above" and its older load in flight belong to that team.
+    S.hasMore = false; S.olderBusy = null;
+    var msgsBox = S.el.querySelector(".tm-msgs");
+    if (msgsBox) msgsBox.classList.remove("tm-older-busy");
+    S.jobFold = {}; S.finPage = 0; S.archPage = 0; S.archQuery = ""; S.jobDetails = {}; S.fullReport = {}; S.openFin = null;
+    S.seenAt = 0; S.fbQuality = false; S.stripOpen = false;
+    // 2026-11-09 (owner): a team opens with its Info tab showing on a wide screen, unless the owner closed the panel
+    // last time (remembered per device). A phone keeps the panel as a drawer that opens on demand.
+    S.side = sideByDefault();
+    // Picked again once the jobs are known, unless the owner picks a tab first (`tabAuto`).
+    var listed = (S.teams || []).filter(function (x) { return x.team_id === id; })[0];
+    S.tabAuto = S.side;
+    if (S.side) S.tab = defaultTab(null, listed && listed.counts);
     S.picker = null; S.draft = null; S.picked = []; S.retrying = {};
-    S.replyTo = null; S.plusOpen = false; S.renamingHead = false; forgetAtts(S.atts); S.atts = []; S.folder = null; S.info = null;
+    S.replyTo = null; S.plusOpen = false; S.renamingHead = false; forgetAtts(S.atts); S.atts = []; S.folder = null; S.repos = []; S.ghIcon = null; S.info = null; S.infoFind = null; S.assets = null;
     S.typing = []; S.pinned = []; S.pinsOpen = false; S.unclamped = {}; S.listCache = null; S.outbox = []; stopReveal();
     closeFolderPanel();
+    closeGithubPanel();
     stopMic();
     var input = S.el.querySelector(".tm-input");
     if (input) input.value = "";
     setNote("");
+    useTeam(id);
+    // Performance (2026-11-05): ask the server FIRST, then draw. Drawing the whole page (header, cached messages,
+    // composer) took 150-300 ms on a 4x slowed CPU, and the three requests only left after it: every switch waited
+    // for that drawing plus the round trip. Now the round trip runs while the page draws.
+    var loads = Promise.all([loadTeam(), loadQueue(), loadMsgs(false)]);
     drawAll(true);
-    Promise.all([loadTeam(), loadQueue(), loadMsgs(false)]).then(function () { if (S.activeId === id) { drawAll(true); loadFolder(); } });
+    loads.then(function () {
+      if (S.activeId !== id) return;
+      if (S.tabAuto && S.side) S.tab = defaultTab(S.queue);
+      S.tabAuto = false;
+      // Drawn from the cache, the chat was already on screen: this redraw reuses the unchanged message nodes.
+      drawAll(true);
+      keepTeam(); loadFolder(); loadSkills();
+      if (S.side && S.tab === "info") loadInfo();
+      fillOlder();
+    });
     markOpened(id);
+  }
+
+  // The side panel's open/closed choice on a wide screen, per device (localStorage). Never stored: open.
+  var SIDE_CLOSED_KEY = "javis.teams.sideClosed";
+  function sideByDefault() {
+    var wide = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(min-width: 1061px)").matches;
+    if (!wide) return false;
+    try { return localStorage.getItem(SIDE_CLOSED_KEY) !== "1"; } catch (e) { return true; }
+  }
+  function rememberSide(open) {
+    try { localStorage.setItem(SIDE_CLOSED_KEY, open ? "0" : "1"); } catch (e) { /* a blocked storage only forgets it */ }
   }
 
   // 0.195.0: the owner works in this team now, so next visit (any device) opens it. Best effort: a failure changes nothing.
@@ -3083,11 +3950,33 @@
     }).catch(function (e) { a.busy = false; a.err = uploadError(e); drawComposer(); });
   }
 
-  function pickFiles(onDone) {
+  // The file picker input lives IN the page until the pick is done (2026-11-15). Owner, on an iPhone: "chọn được nhưng
+  // gửi không được, không đính kèm được" when several photos were picked. The input used to be created and clicked
+  // without ever joining the page, so nothing held it while iOS Safari prepared the photos (several take seconds); it
+  // was dropped and its change event never came, so no chip appeared. One photo was quick enough to slip through. The
+  // main chat never had this: its #fileInput is in index.html. One picker at a time; the next pick replaces it.
+  var pickerEl = null;
+  function dropPicker() {
+    if (pickerEl && pickerEl.parentNode) pickerEl.parentNode.removeChild(pickerEl);
+    pickerEl = null;
+  }
+  function pickFiles(onDone, accept) {
+    dropPicker();
     var inp = document.createElement("input");
-    inp.type = "file"; inp.multiple = true;
-    inp.addEventListener("change", function () { onDone(Array.prototype.slice.call(inp.files || [])); });
+    inp.type = "file";
+    if (accept) inp.accept = accept; else inp.multiple = true;
+    inp.className = "tm-picker";
+    inp.style.display = "none";
+    inp.addEventListener("change", function () {
+      var files = Array.prototype.slice.call(inp.files || []);
+      if (files.length) onDone(files);
+    });
+    // Closed without a pick: nothing to keep (browsers without this event drop it at the next pick).
+    inp.addEventListener("cancel", function () { if (pickerEl === inp) dropPicker(); });
+    document.body.appendChild(inp);
+    pickerEl = inp;
     inp.click();
+    return inp;
   }
 
   function attachFiles(files) {
@@ -3179,6 +4068,17 @@
         '<button type="button" class="tm-chip-x" data-folder-unpin="1" aria-label="' + esc(tw("cp.pin_unpin")) + '" title="' +
         esc(tw("cp.pin_unpin")) + '">' + ic("x") + "</button></span>";
     }
+    if (S.repos.length) {
+      // 0.449.0: the GitHub repos of the team chat. The name opens the picker; the status (once pushed) opens the detail.
+      // 21/11/2026 (owner: "cho anh nút x rõ ràng khi ghim ở khung chat"): an X like the folder chip's takes them off.
+      var G = window.JavisTeamGithub, names = S.repos.map(function (r) { return r.full_name; });
+      var stKey = S.ghIcon && S.ghIcon.state ? "gh.st_" + S.ghIcon.state : "";
+      var rmText = names.length > 1 ? tw("gh.remove_all", { n: names.length }) : tw("gh.remove_chat", { name: names[0] });
+      h += '<span class="tm-chip tm-chip-gh' + (S.ghBusy ? " is-busy" : "") + '" title="' + esc(tw("gh.chip_label", { names: names.join(", ") })) + '">' + ghLogo() +
+        '<button type="button" class="tm-chip-name" data-gh-open="1">' + esc(G ? G.chipText(names, 18) : names[0]) + "</button>" +
+        (stKey ? '<button type="button" class="tm-chip-st tm-gh-st" data-gh-status="1">' + esc(tw(stKey)) + "</button>" : "") +
+        '<button type="button" class="tm-chip-x" data-gh-remove="1" aria-label="' + esc(rmText) + '" title="' + esc(rmText) + '">' + ic("x") + "</button></span>";
+    }
     S.atts.forEach(function (a, i) {
       h += '<span class="tm-chip' + (a.err ? " is-err" : "") + (a.url ? " has-thumb" : "") + '" data-att="' + i + '">' +
         (a.url ? '<img class="tm-chip-thumb" src="' + esc(a.url) + '" alt="">' : ic(a.kind === "image" ? "image" : "paperclip")) +
@@ -3204,7 +4104,81 @@
         S.folder = (d && d.folder) || null;
         drawComposer();
         if (S.side && S.tab === "info") drawSide(true);
-      }).catch(function () {});
+      }).catch(function () {}).then(loadRepos);
+  }
+
+  // 0.449.0: GitHub repos attached to the team chat (team-github.js). Work/Help steps edit them and Javis pushes once a
+  // job is done, like a private chat.
+  function loadRepos() {
+    var sid = sessionId(), G = window.JavisTeamGithub;
+    if (!sid || !G) return Promise.resolve();
+    return G.load(sid, brain()).then(function (d) {
+      if (!d || sessionId() !== sid) return;
+      setRepos(d);
+    });
+  }
+  function setRepos(d) {
+    S.repos = (d && d.repos) || [];
+    S.ghIcon = d && d.icon && d.icon.state ? d.icon : null;
+    drawComposer();
+    if (S.side && S.tab === "info") drawSide(true);
+  }
+  function closeGithubPanel() {
+    var pop = document.querySelector(".tm-gh-pop");
+    if (pop) pop.remove();
+    document.removeEventListener("mousedown", githubOutside, true);
+    document.removeEventListener("keydown", githubEsc, true);
+  }
+  // The (i) explanation opens in its own pop-up (info-tip.js); reading it must not close the picker.
+  function githubOutside(e) { if (!(e.target.closest && e.target.closest(".tm-gh-pop, .info-pop, .info-pop-bg"))) closeGithubPanel(); }
+  function githubEsc(e) { if (e.key === "Escape") closeGithubPanel(); }
+  // The X of the repo chip: every repo leaves the team chat, one request each. A repo that holds unsaved work stays,
+  // and the picker opens on it with the question "keep it, or remove it anyway".
+  function removeTeamRepos() {
+    var sid = sessionId(), G = window.JavisTeamGithub;
+    if (!sid || !G || !G.detach || S.ghBusy) return;
+    S.ghBusy = true;
+    drawComposer();
+    S.repos.map(function (r) { return r.full_name; }).reduce(function (p, name) {
+      return p.then(function (stop) {
+        if (stop) return stop;
+        return G.detach(sid, brain(), name, false).then(function (d) { return d && d.ok !== false ? null : { name: name, d: d || {} }; });
+      });
+    }, Promise.resolve(null)).then(function (stop) {
+      S.ghBusy = false;
+      if (sessionId() !== sid) return;
+      drawComposer();
+      return loadRepos().then(function () {
+        if (!stop || sessionId() !== sid) return;
+        if (stop.d.code === "work_at_risk") openGithubPanel({ name: stop.name, risk: stop.d.risk, count: stop.d.count });
+        else setNote(stop.d.error || tw("gh.err_net"));
+      });
+    });
+  }
+  function openGithubPanel(ask) {
+    var G = window.JavisTeamGithub;
+    var comp = S.el.querySelector(".tm-composer");
+    if (!G || !comp || !S.team || !sessionId()) return;
+    closeGithubPanel();
+    closeFolderPanel();
+    var pop = document.createElement("div");
+    pop.className = "cp-menu tm-folder-pop tm-gh-pop";
+    placeAbovePlus(pop, comp);
+    pop.innerHTML = '<div class="cp-mi cp-back">' + esc(tw("gh.menu")) + infoBtn() + "</div>" +
+      infoBody(esc(tw("teams.gh_how"))) + '<div class="cp-sep"></div><div class="tm-gh-body"></div>';
+    document.body.appendChild(pop);
+    var sid = sessionId();
+    G.panel(pop.querySelector(".tm-gh-body"), {
+      sid: function () { return sessionId() === sid ? sid : ""; }, brain: brain,
+      current: function () { return S.repos.map(function (x) { return x.full_name; }); },
+      changed: function (d) { if (sessionId() === sid) setRepos(d); },
+      ask: ask || null,
+      close: closeGithubPanel,
+      connections: function () { try { window.Alpine.store("nav").go("mcp"); } catch (e) { location.hash = "#p=mcp"; } } });
+    setTimeout(function () {
+      document.addEventListener("mousedown", githubOutside, true);
+      document.addEventListener("keydown", githubEsc, true);
+    }, 0);
   }
 
   function pinTeamFolder(p) {
@@ -3234,11 +4208,9 @@
     var comp = S.el.querySelector(".tm-composer");
     if (!P || !comp || !S.team) return;
     closeFolderPanel();
-    var r = comp.getBoundingClientRect();
     var pop = document.createElement("div");
     pop.className = "cp-menu tm-folder-pop";
-    pop.style.left = Math.max(8, r.left + 8) + "px";
-    pop.style.bottom = Math.max(8, window.innerHeight - r.top + 6) + "px";
+    placeAbovePlus(pop, comp);
     pop.innerHTML = '<div class="cp-mi cp-back">' + esc(tw("cp.pin_folder")) + '</div><div class="cp-sep"></div><div class="tm-folder-body"></div>';
     document.body.appendChild(pop);
     P({ brain: brain, current: function () { return S.folder; }, pin: pinTeamFolder,
@@ -3256,9 +4228,69 @@
     return fetch("/sessions/" + q(sid) + "/assets?brain=" + q(brain()), { credentials: "same-origin" })
       .then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (d) {
         if (sessionId() !== sid) return;
-        S.info = { files: (d && d.files) || [], links: (d && d.links) || [], err: d && d.ok === false ? (d.error || "") : "" };
-        if (S.side && S.tab === "info") drawSide(true);
+        S.info = { files: (d && d.files) || [], links: (d && d.links) || [], counts: (d && d.counts) || null,
+          err: d && d.ok === false ? (d.error || "") : "" };
+        // The archive open: its page is read again (a file sent or removed shows there too), the search box is kept.
+        if (S.side && S.tab === "info") { if (S.assets) loadAssets(); else drawSide(true); }
       }).catch(function () { S.info = { files: [], links: [], err: tw("teams.err_network") }; if (S.side && S.tab === "info") drawSide(true); });
+  }
+
+  // 2026-11-12: a file already in the brain joins the team without being uploaded again. S.infoFind keeps what was
+  // typed and found, so a redraw of the panel (a new message, the list reloading) puts both back.
+  var infoFindTimer = null;
+  // /files/search rows with a folder's path ending in "/" (team-picker.js owns the rule; the fallback keeps files).
+  function searchRows(items) {
+    var P = TP();
+    return P && P.searchRows ? P.searchRows(items) : (items || []).filter(function (it) { return it.type !== "dir"; })
+      .map(function (it) { return { path: it.path, name: it.name }; });
+  }
+  function infoFindRows() {
+    var F = S.infoFind;
+    if (!F || !String(F.q || "").trim()) return "";
+    if (F.state === "searching") return '<p class="tm-sub" role="status">' + esc(tw("teams.pick.doc_searching")) + "</p>";
+    if (!(F.items || []).length) return '<p class="tm-sub">' + esc(tw("teams.pick.doc_none")) + "</p>";
+    var have = {};
+    ((S.info && S.info.files) || []).forEach(function (f) { have[f.path] = true; });
+    return '<ul class="tm-info-list tm-info-found">' + F.items.map(function (it, i) {
+      var on = !!have[it.path] || !!(F.added || {})[it.path];
+      return "<li><span>" + ic(it.dir ? "folder" : "file-text") + '<span title="' + esc(it.path) + '">' + esc(it.name) + "</span></span>" +
+        '<button type="button" class="ws-btn" data-info-pick="' + i + '"' + (on ? " disabled" : "") + ">" +
+        esc(tw(on ? "teams.pick.doc_added" : "teams.pick.doc_add")) + "</button></li>";
+    }).join("") + "</ul>";
+  }
+  function drawInfoFind() {
+    var box = S.el && S.el.querySelector(".tm-info-fresults");
+    if (box) box.innerHTML = infoFindRows();
+  }
+  function infoFind(text) {
+    var F = S.infoFind = S.infoFind || { q: "", items: [], state: "idle", seq: 0, added: {} };
+    F.q = text;
+    clearTimeout(infoFindTimer);
+    var words = String(text || "").trim(), seq = ++F.seq;
+    if (!words) { F.items = []; F.state = "idle"; drawInfoFind(); return; }
+    F.state = "searching";
+    drawInfoFind();
+    infoFindTimer = setTimeout(function () {
+      // include_dirs (2026-11-12): a whole folder of the brain can join the team as one document.
+      call("GET", "/files/search?mode=name&include_dirs=true&limit=20&q=" + q(words)).then(function (r) {
+        return r.code === 200 ? (r.j.items || []) : [];
+      }, function () { return []; }).then(function (items) {
+        if (S.infoFind !== F || F.seq !== seq) return;
+        F.items = searchRows(items);
+        F.state = "done";
+        drawInfoFind();
+      });
+    }, 280);
+  }
+  function infoPick(i) {
+    var F = S.infoFind, it = F && (F.items || [])[i];
+    if (!it || !S.team) return;
+    F.added[it.path] = true;
+    drawInfoFind();
+    call("POST", teamUrl("/files"), { attachments: [{ brain_path: it.path, name: it.name }] }).then(function (r) {
+      if (r.code !== 200) { delete F.added[it.path]; setNote((r.j && r.j.error) || tw("teams.attach_err")); drawInfoFind(); }
+      loadInfo();
+    }, function () { delete F.added[it.path]; setNote(tw("teams.err_network")); drawInfoFind(); });
   }
 
   function assetPost(path, form) {
@@ -3296,15 +4328,297 @@
     });
   }
 
+  // 2026-11-13: one line saying what a team document holds, read by every member turn. Javis writes it (tool
+  // javis_project team=...), the owner writes or fixes it with the pencil. Only a document attached to the team (with an
+  // id) has a row to describe.
+  function descLine(x) {
+    return x.description ? '<span class="tm-info-desc">' + esc(x.description) + "</span>" : "";
+  }
+  function descBtn(x, kind) {
+    if (!(x.manual && x.id)) return "";
+    return '<button type="button" class="tm-chip-x' + (x.description ? " on" : "") + '" data-info-desc="' + kind + '" data-ref="' +
+      esc(kind === "link" ? x.url : x.path) + '" data-desc="' + esc(x.description || "") + '" aria-label="' +
+      esc(tw("teams.info_desc")) + '" title="' + esc(tw("teams.info_desc")) + '">' + ic("pencil") + "</button>";
+  }
+  // 2026-11-19 (owner: "popup làm lại khi sửa để mở rộng ra dễ sửa"): the same roomy edit box as the project drawer
+  // (text-edit-dialog.js) instead of prompt(); prompt() stays only as the fallback when that script is missing.
+  function describeDoc(kind, ref, old) {
+    var send = function (text) {
+      var f = new FormData();
+      f.append("kind", kind); f.append("ref", ref); f.append("description", text);
+      return assetPost("/describe", f);
+    };
+    var E = window.JavisTextEdit;
+    if (E && E.open) {
+      return E.open({ title: tw("teams.info_desc"), value: old || "", max: 200, placeholder: tw("proj.desc_ph"),
+        hint: String(ref || "").split("/").pop(), allowEmpty: true,
+        save: function (text) { return Promise.resolve(send(text)).then(function () { return ""; }); } });
+    }
+    var text = window.prompt(tw("teams.info_desc_q"), old || "");
+    if (text == null || text.trim() === (old || "")) return;
+    return send(text.trim());
+  }
+
+  // ───────────── 19/11/2026: short lists on Info, the rest in the archive ─────────────
+  // Owner: "phần file với link trong nhóm cần phân trang ... zalo nó làm xem tất cả này xong ấn vào thì nó vào kho lưu
+  // trữ". Info shows the newest few of each kind and a "See all" button; the archive (Kho lưu trữ) opens in the same
+  // panel with three tabs, a search box, the rows grouped by day and a pager. It reads one page at a time from the
+  // server (GET /sessions/{id}/assets?kind=...), so it reaches every file, not only the 200 newest the panel receives.
+  var PREVIEW = { image: 6, file: 3, link: 3 };
+  var ASSET_PER_PAGE = { image: 24, file: 20, link: 20 };
+  var ASSET_KINDS = ["image", "file", "link"];
+  var ASSET_TAB_KEY = { image: "teams.storage_tab_images", file: "teams.storage_tab_files", link: "teams.storage_tab_links" };
+  var ASSET_EMPTY_KEY = { image: "teams.info_no_images", file: "teams.info_no_files", link: "teams.info_no_links" };
+  // The coloured tile of a file, by what kind of file it is (the tile shows the extension, as in Zalo).
+  var FILE_TYPES = { pdf: "pdf", doc: "doc", docx: "doc", txt: "doc", md: "doc", rtf: "doc", odt: "doc", pages: "doc",
+    xls: "sheet", xlsx: "sheet", csv: "sheet", ods: "sheet", numbers: "sheet", ppt: "slide", pptx: "slide", key: "slide",
+    zip: "zip", rar: "zip", "7z": "zip", tar: "zip", gz: "zip", mp3: "media", wav: "media", m4a: "media", ogg: "media",
+    flac: "media", mp4: "media", mov: "media", webm: "media", mkv: "media", html: "code", htm: "code", js: "code", ts: "code",
+    py: "code", json: "code", css: "code", sh: "code", yml: "code", yaml: "code", xml: "code" };
+
+  function fileExt(name) {
+    var m = /\.([a-z0-9]{1,5})$/i.exec(String(name || ""));
+    return m ? m[1].toLowerCase() : "";
+  }
+  function uiLang() {
+    return (typeof document !== "undefined" && document.documentElement && document.documentElement.lang) || "vi";
+  }
+  // "95,7 KB", "1,8 MB": the decimal mark of the screen's language.
+  function sizeText(n) {
+    n = Number(n) || 0;
+    if (n <= 0) return "";
+    var units = ["B", "KB", "MB", "GB"], i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    var num;
+    try { num = n.toLocaleString(uiLang(), { maximumFractionDigits: i ? 1 : 0 }); } catch (e) { num = String(Math.round(n * 10) / 10); }
+    return num + " " + units[i];
+  }
+  // The heading of a day in the archive: Today, Yesterday, "Ngày 5 tháng 10", the year only when it is not this one.
+  function dayLabel(sec) {
+    if (!sec) return tw("teams.storage_undated");
+    var d = new Date(Number(sec) * 1000), n = new Date(), y = new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1);
+    if (d.toDateString() === n.toDateString()) return tw("teams.storage_today");
+    if (d.toDateString() === y.toDateString()) return tw("teams.storage_yesterday");
+    // The month: its number in Vietnamese ("tháng 10"), its short name elsewhere ("Oct 5").
+    var m = String(d.getMonth() + 1);
+    if (!/^vi/i.test(uiLang())) { try { m = d.toLocaleDateString(uiLang(), { month: "short" }); } catch (e) { /* keep the number */ } }
+    return tw(d.getFullYear() === n.getFullYear() ? "teams.storage_day" : "teams.storage_day_year", { d: d.getDate(), m: m, y: d.getFullYear() });
+  }
+  // The heading of a month (pictures): "Tháng 11", "Tháng 10, 2025"; "November", "October 2025".
+  function monthLabel(sec) {
+    if (!sec) return tw("teams.storage_undated");
+    var d = new Date(Number(sec) * 1000), m = String(d.getMonth() + 1);
+    if (!/^vi/i.test(uiLang())) { try { m = d.toLocaleDateString(uiLang(), { month: "long" }); } catch (e) { /* keep the number */ } }
+    return tw(d.getFullYear() === new Date().getFullYear() ? "teams.storage_month" : "teams.storage_month_year", { m: m, y: d.getFullYear() });
+  }
+  // Rows of one page, cut into days (files, links) or months (pictures: a day rarely holds a full row of them), newest
+  // first as the server sends them.
+  function byDay(items, months) {
+    var out = [], cur = null;
+    (items || []).forEach(function (x) {
+      var d = x.ts ? new Date(Number(x.ts) * 1000) : null;
+      var key = !d ? "" : months ? d.getFullYear() + "-" + d.getMonth() : d.toDateString();
+      if (!cur || cur.key !== key) { cur = { key: key, label: months ? monthLabel(x.ts) : dayLabel(x.ts), items: [] }; out.push(cur); }
+      cur.items.push(x);
+    });
+    return out;
+  }
+  // A link with no name: what follows "https://" and "www.", so two pages of one site are told apart.
+  function prettyUrl(url) {
+    return String(url || "").replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+  }
+  function newestFirst(list) {
+    return (list || []).slice().sort(function (a, b) { return (Number(b.ts) || 0) - (Number(a.ts) || 0); });
+  }
+  function hostOf(url) {
+    var m = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(String(url || ""));
+    return m ? m[1].replace(/^www\./i, "") : "";
+  }
+
+  // One file row, the same on Info and in the archive: a tile with the extension, the name, a line with the size (and
+  // the day on Info), the description, then the pencil and the X of a document attached to the team.
+  function fileRowHtml(f, withDay) {
+    var where = f.brain_path || f.path;
+    var ext = fileExt(f.name || f.label || where);
+    var tile = f.dir ? '<span class="tm-as-type" data-ft="dir">' + ic("folder") + "</span>"
+      : '<span class="tm-as-type" data-ft="' + (FILE_TYPES[ext] || "other") + '"' + (ext.length > 3 ? ' data-long="1"' : "") + ">" +
+        esc((ext || "?").toUpperCase()) + "</span>";
+    var meta = [];
+    if (f.size) meta.push(esc(sizeText(f.size)));
+    if (f.exists === false) meta.push('<span class="tm-as-gone">' + ic("circle-alert") + esc(tw("teams.storage_gone")) + "</span>");
+    if (withDay && f.ts) meta.push(esc(shortWhen(f.ts)));
+    // 2026-11-12: a folder document opens on the Files page; there is no raw file to serve for it. It is a <button>: the
+    // page's one click handler only looks at buttons.
+    var name = f.dir ? '<button type="button" class="tm-info-dir tm-as-name" data-info-open-dir="' + esc(where) + '" title="' + esc(where) +
+      '"><span>' + esc(f.label || f.name) + "</span></button>"
+      : '<a class="tm-as-name" href="' + esc(rawUrl(where)) + '" target="_blank" rel="noopener" title="' + esc(where) + '"><span>' +
+        esc(f.label || f.name) + "</span></a>";
+    return '<li class="tm-as-row">' + tile + '<span class="tm-as-main">' + name +
+      (meta.length ? '<span class="tm-as-meta">' + meta.join('<span class="tm-as-dot">·</span>') + "</span>" : "") + descLine(f) + "</span>" + descBtn(f, "file") +
+      (f.manual && f.id ? '<button type="button" class="tm-chip-x" data-info-del-file="' + esc(f.id) + '" aria-label="' +
+        esc(tw("teams.info_remove")) + '" title="' + esc(tw("teams.info_remove")) + '">' + ic("x") + "</button>" : "") + "</li>";
+  }
+
+  // A link row: its name (or the address without "https://"), then the site when it has a name, and the day on Info.
+  function linkRowHtml(l, withDay) {
+    var host = hostOf(l.url);
+    var meta = [];
+    if (host && l.label) meta.push(esc(host));
+    if (withDay && l.ts) meta.push(esc(shortWhen(l.ts)));
+    return '<li class="tm-as-row"><span class="tm-as-type" data-ft="link">' + ic("globe") + '</span><span class="tm-as-main">' +
+      '<a class="tm-as-name" href="' + esc(l.url) + '" target="_blank" rel="noopener" title="' + esc(l.url) + '"><span>' +
+      esc(l.label || prettyUrl(l.url)) + "</span></a>" +
+      (meta.length ? '<span class="tm-as-meta">' + meta.join('<span class="tm-as-dot">·</span>') + "</span>" : "") +
+      descLine(l) + "</span>" + descBtn(l, "link") +
+      (l.manual && l.id ? '<button type="button" class="tm-chip-x" data-info-del-link="' + esc(l.id) + '" aria-label="' +
+        esc(tw("teams.info_remove")) + '" title="' + esc(tw("teams.info_remove")) + '">' + ic("x") + "</button>" : "") + "</li>";
+  }
+
+  function imageTileHtml(f) {
+    var src = rawUrl(f.brain_path || f.path);
+    return '<a class="jv-img-link" href="' + esc(src) + '" data-img-ten="' + esc(f.name) + '" target="_blank" rel="noopener" title="' +
+      esc(f.name) + '"><img src="' + esc(src) + '" alt="" loading="lazy" onerror="jvImgGone(this)"></a>';
+  }
+
+  // "See all" under a short list on Info: only when the list holds more than it shows.
+  function seeAllHtml(kind, total) {
+    if (total <= PREVIEW[kind]) return "";
+    return '<button type="button" class="ws-btn tm-info-all" data-as-open="' + kind + '">' + esc(tw("teams.storage_see_all")) + "</button>";
+  }
+
+  // The archive: a back row, the three tabs with their totals, the search box and the pager, then one page by day.
+  function assetsHtml(A, counts) {
+    counts = counts || {};
+    var tabs = ASSET_KINDS.map(function (k) {
+      var n = k === "image" ? counts.images : k === "file" ? counts.files : counts.links;
+      return '<button type="button" class="tm-tab" role="tab" data-as-kind="' + k + '" aria-selected="' + (A.kind === k ? "true" : "false") +
+        '"><span>' + esc(tw(ASSET_TAB_KEY[k])) + "</span>" + (n ? '<span class="tm-tab-n">' + n + "</span>" : "") + "</button>";
+    }).join("");
+    var ph = tw(A.kind === "image" ? "teams.storage_search_images" : A.kind === "link" ? "teams.storage_search_links" : "teams.storage_search_files");
+    return '<div class="tm-as"><div class="tm-as-head">' +
+      '<button type="button" class="tm-as-back" data-as-back="1" aria-label="' + esc(tw("teams.storage_back")) + '" title="' +
+      esc(tw("teams.storage_back")) + '">' + ic("chevron-left") + "<span>" + esc(tw("teams.storage_title")) + "</span></button>" +
+      '<div class="tm-as-tabs" role="tablist">' + tabs + "</div>" +
+      '<div class="tm-as-tools"><label class="tm-jb-search tm-as-search">' + ic("search") + '<input type="search" class="tm-as-q" value="' +
+      esc(A.q || "") + '" placeholder="' + esc(ph) + '" aria-label="' + esc(ph) + '" enterkeyhint="search"></label>' +
+      '<span class="tm-as-pg">' + assetsPagerHtml(A) + "</span></div></div>" +
+      // data-lb-scope: a picture opens the viewer with every picture of this page, across the days.
+      '<div class="tm-as-body" data-lb-scope="1">' + assetsBodyHtml(A) + "</div></div>";
+  }
+
+  function assetsPagerHtml(A) {
+    return A.total ? pagerHtml("assets", A.page || 0, A.total, ASSET_PER_PAGE[A.kind]) : "";
+  }
+
+  function assetsBodyHtml(A) {
+    if (A.state === "error") return '<p class="tm-sub">' + esc(A.err || tw("teams.err_network")) + "</p>";
+    if (!A.items) return '<p class="tm-sub pg-loading">' + esc(tw("common.loading")) + "</p>";
+    if (!A.items.length) return '<p class="tm-sub tm-as-empty">' + esc(tw(String(A.q || "").trim() ? "teams.storage_no_match" : ASSET_EMPTY_KEY[A.kind])) + "</p>";
+    return byDay(A.items, A.kind === "image").map(function (g) {
+      var rows = A.kind === "image" ? '<div class="tm-as-imgs">' + g.items.map(imageTileHtml).join("") + "</div>"
+        : '<ul class="tm-info-list tm-as-list">' + g.items.map(function (x) { return A.kind === "link" ? linkRowHtml(x) : fileRowHtml(x); }).join("") + "</ul>";
+      return '<section class="tm-as-day"><h5>' + esc(g.label) + "</h5>" + rows + "</section>";
+    }).join("");
+  }
+
+  // Open the archive on a tab (from "See all"), or move to another tab: page one, search kept per open.
+  function openAssets(kind) {
+    if (ASSET_KINDS.indexOf(kind) < 0) kind = "file";
+    var body = S.el && S.el.querySelector(".tm-side-body");
+    var keep = S.assets ? S.assets.infoTop : (body ? body.scrollTop : 0);
+    S.assets = { kind: kind, q: S.assets ? S.assets.q : "", page: 0, items: null, total: 0, state: "loading", seq: 0, infoTop: keep };
+    drawSide(true);
+    var nb = S.el && S.el.querySelector(".tm-side-body");
+    if (nb) nb.scrollTop = 0;
+    loadAssets();
+  }
+
+  function closeAssets() {
+    var top = S.assets ? S.assets.infoTop : 0;
+    S.assets = null;
+    clearTimeout(assetsTimer);
+    drawSide(true);
+    var nb = S.el && S.el.querySelector(".tm-side-body");
+    if (nb) nb.scrollTop = top || 0;
+    var back = S.el && S.el.querySelector(".tm-info-all");
+    if (back && typeof back.focus === "function") { try { back.focus({ preventScroll: true }); } catch (e) { /* old browser */ } }
+  }
+
+  var assetsTimer = null;
+  function loadAssets() {
+    var A = S.assets, sid = sessionId();
+    if (!A || !sid) return Promise.resolve();
+    var seq = A.seq = (A.seq || 0) + 1;
+    var per = ASSET_PER_PAGE[A.kind];
+    var url = "/sessions/" + q(sid) + "/assets?brain=" + q(brain()) + "&kind=" + q(A.kind) + "&q=" + q(String(A.q || "").trim()) +
+      "&offset=" + ((A.page || 0) * per) + "&limit=" + per;
+    return fetch(url, { credentials: "same-origin" }).then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (d) {
+        if (S.assets !== A || A.seq !== seq || sessionId() !== sid) return;
+        if (!d || d.ok === false || !Array.isArray(d.items)) { A.state = "error"; A.err = (d && d.error) || ""; drawAssets(); return; }
+        // Rows removed while on the last page: go back to the page that now is the last one.
+        if (!d.items.length && A.page > 0 && d.total > 0) { A.page = Math.ceil(d.total / per) - 1; return loadAssets(); }
+        A.items = d.items; A.total = d.total || 0; A.state = "done"; A.err = "";
+        drawAssets();
+      }).catch(function () {
+        if (S.assets !== A || A.seq !== seq) return;
+        A.state = "error"; A.err = tw("teams.err_network"); drawAssets();
+      });
+  }
+
+  // Redraw the rows, the pager and the totals in place: the search box is left alone, so typing keeps its focus and, on a
+  // phone, its keyboard.
+  function drawAssets() {
+    var A = S.assets, side = S.el && S.el.querySelector(".tm-side");
+    var box = side && side.querySelector(".tm-as");
+    if (!A || !box || !(S.side && S.tab === "info")) { if (S.side && S.tab === "info") drawSide(true); return; }
+    box.querySelector(".tm-as-body").innerHTML = assetsBodyHtml(A);
+    box.querySelector(".tm-as-pg").innerHTML = assetsPagerHtml(A);
+    var c = (S.info && S.info.counts) || {};
+    Array.prototype.forEach.call(box.querySelectorAll("[data-as-kind]"), function (b) {
+      var k = b.getAttribute("data-as-kind"), n = k === "image" ? c.images : k === "file" ? c.files : c.links;
+      if (k === A.kind && !String(A.q || "").trim()) n = A.total;      // the page just read is the newest number
+      var span = b.querySelector(".tm-tab-n");
+      if (n && !span) b.insertAdjacentHTML("beforeend", '<span class="tm-tab-n">' + n + "</span>");
+      else if (span && n) span.textContent = n;
+      else if (span) span.parentNode.removeChild(span);
+    });
+  }
+
+  function assetsSearch(text) {
+    var A = S.assets;
+    if (!A) return;
+    A.q = text; A.page = 0;
+    clearTimeout(assetsTimer);
+    assetsTimer = setTimeout(loadAssets, 280);
+  }
+
+  function assetsPage(dir) {
+    var A = S.assets;
+    if (!A) return;
+    var pages = Math.max(1, Math.ceil((A.total || 0) / ASSET_PER_PAGE[A.kind]));
+    var next = Math.min(Math.max(0, (A.page || 0) + dir), pages - 1);
+    if (next === A.page) return;
+    A.page = next;
+    loadAssets().then(function () {
+      var nb = S.el && S.el.querySelector(".tm-side-body");
+      if (nb) nb.scrollTop = 0;
+    });
+  }
+
   // The info panel (0.191.0): who is in the team, the working folder, pictures, files and links shared in it.
   function infoTabHtml(t) {
     if (!t) return "";
     var I = S.info;
     var members = (t.members || []).filter(function (m) { return m.status !== "left"; });
-    var h = '<div class="tm-info-head">' + teamAvatarHtml(t, 64) + '<div class="tm-info-name"><strong>' + esc(t.name) + "</strong>" +
-      (t.description ? '<span class="tm-sub">' + esc(t.description) + "</span>" : "") + "</div></div>";
+    // 2026-11-07 (owner): the description sits in the (i) beside the name instead of a line under it, to keep the head short.
+    var h = '<div class="tm-info-head">' + teamAvatarHtml(t, 64) + '<div class="tm-info-name"><span class="tm-info-title"><strong>' +
+      esc(t.name) + "</strong>" + (t.description ? infoBtn() : "") + "</span>" +
+      (t.description ? infoBody(esc(t.description).replace(/\n/g, "<br>")) : "") + "</div></div>";
     h += '<section class="tm-info-sec"><h4>' + esc(tw("teams.info_members", { n: members.length + 1 })) + '</h4><ul class="tm-info-members">' +
-      '<li>' + avaHtml(tw("teams.you")) + "<span>" + esc(tw("teams.you")) + "</span></li>" +
+      // The empty slot where an assistant has its private chat button keeps both badges in one column.
+      '<li>' + avaHtml(tw("teams.you")) + "<span>" + esc(tw("teams.you")) + '</span><span class="tm-info-badge tm-info-lead">' +
+      esc(tw("teams.lead_badge")) + '</span><span class="tm-bar-x tm-info-chat tm-info-gap" aria-hidden="true"></span></li>' +
       members.map(function (m) {
         return "<li>" + agentAva(m, 28) + "<span>" + esc(m.name || m.slug) + "</span>" +
           (m.agent_key && m.agent_key === t.leader_key ? '<span class="tm-info-badge">' + esc(tw("teams.leader_badge")) + "</span>" : "") +
@@ -3315,39 +4629,194 @@
       ? '<div class="tm-info-row">' + ic("folder") + '<span class="tm-info-grow" title="' + esc(S.folder.path) + '">' + esc(S.folder.name) +
         '</span><button type="button" class="ws-btn" data-folder-open="1">' + esc(tw("teams.change")) + "</button></div>"
       : '<button type="button" class="ws-btn" data-folder-open="1">' + ic("folder") + " " + esc(tw("cp.pin_folder")) + "</button>") + "</section>";
-    if (!I) return h + '<p class="tm-sub">' + esc(tw("common.loading")) + "</p>";
-    var imgs = I.files.filter(function (f) { return f.image; });
-    var docs = I.files.filter(function (f) { return !f.image; });
-    if (imgs.length) {
-      h += '<section class="tm-info-sec"><h4>' + esc(tw("teams.info_images", { n: imgs.length })) + '</h4><div class="tm-info-imgs">' +
-        imgs.slice(0, 12).map(function (f) {
-          return '<a class="jv-img-link" href="' + esc(rawUrl(f.brain_path || f.path)) + '" data-img-ten="' + esc(f.name) +
-            '" target="_blank" rel="noopener" title="' + esc(f.name) + '"><img src="' +
-            esc(rawUrl(f.brain_path || f.path)) + '" alt="" loading="lazy" onerror="jvImgGone(this)"></a>';
-        }).join("") + "</div></section>";
+    h += '<section class="tm-info-sec"><h4>' + esc(tw("gh.menu")) + "</h4>" + (S.repos.length
+      ? S.repos.map(function (r) {
+        return '<div class="tm-info-row">' + ghLogo() + '<span class="tm-info-grow" title="' + esc(r.worktree || r.full_name) + '">' +
+          esc(r.full_name) + (r.branch ? ' <span class="tm-sub">' + esc(r.branch) + "</span>" : "") + "</span></div>";
+      }).join("") + '<button type="button" class="ws-btn" data-gh-open="1">' + esc(tw("teams.change")) + "</button>"
+      : '<button type="button" class="ws-btn" data-gh-open="1">' + ghLogo() + " " + esc(tw("teams.gh_attach")) + "</button>") + "</section>";
+    if (!I) return h + '<p class="tm-sub pg-loading">' + esc(tw("common.loading")) + "</p>";
+    var imgs = newestFirst(I.files.filter(function (f) { return f.image; }));
+    var docs = newestFirst(I.files.filter(function (f) { return !f.image; }));
+    var links = newestFirst(I.links);
+    // The true totals (the server sends only the newest 200 of each list); an older server without them: the lengths.
+    var c = I.counts || { images: imgs.length, files: docs.length, links: links.length };
+    if (c.images) {
+      h += '<section class="tm-info-sec"><h4>' + esc(tw("teams.info_images", { n: c.images })) + '</h4><div class="tm-info-imgs">' +
+        imgs.slice(0, PREVIEW.image).map(imageTileHtml).join("") + "</div>" + seeAllHtml("image", c.images) + "</section>";
     }
-    h += '<section class="tm-info-sec"><div class="tm-info-sechead"><h4>' + esc(tw("teams.info_files", { n: docs.length })) + "</h4>" +
+    // 2026-11-07: who can read files and where links come from sit in the (i) by each heading; the empty line stays short.
+    h += '<section class="tm-info-sec"><div class="tm-info-sechead"><h4>' + esc(tw("teams.info_files", { n: c.files })) + infoBtn() + "</h4>" +
       '<button type="button" class="ws-btn" data-info-add-file="1">' + ic("plus") + " " + esc(tw("teams.info_add_file")) + "</button></div>" +
-      (docs.length ? '<ul class="tm-info-list">' + docs.map(function (f) {
-        return '<li><a href="' + esc(rawUrl(f.brain_path || f.path)) + '" target="_blank" rel="noopener">' + ic("file-text") + "<span>" +
-          esc(f.label || f.name) + "</span></a>" + (f.manual && f.id ? '<button type="button" class="tm-chip-x" data-info-del-file="' + esc(f.id) +
-          '" aria-label="' + esc(tw("teams.info_remove")) + '" title="' + esc(tw("teams.info_remove")) + '">' + ic("x") + "</button>" : "") + "</li>";
-      }).join("") + "</ul>" : '<p class="tm-sub">' + esc(tw("teams.info_no_files")) + "</p>") + "</section>";
-    h += '<section class="tm-info-sec"><h4>' + esc(tw("teams.info_links", { n: I.links.length })) + "</h4>" +
+      infoBody(esc(tw("teams.info_files_help"))) +
+      '<div class="tm-info-addlink"><input type="search" class="tm-info-fsearch" value="' + esc((S.infoFind && S.infoFind.q) || "") +
+      '" placeholder="' + esc(tw("teams.pick.doc_search_ph")) + '" aria-label="' + esc(tw("teams.pick.doc_search_ph")) + '"></div>' +
+      '<div class="tm-info-fresults">' + infoFindRows() + "</div>" +
+      (docs.length ? '<ul class="tm-info-list tm-as-list">' + docs.slice(0, PREVIEW.file).map(function (f) { return fileRowHtml(f, true); }).join("") +
+        "</ul>" + seeAllHtml("file", c.files) : '<p class="tm-sub">' + esc(tw("teams.info_no_files")) + "</p>") + "</section>";
+    h += '<section class="tm-info-sec"><h4>' + esc(tw("teams.info_links", { n: c.links })) + infoBtn() + "</h4>" +
+      infoBody(esc(tw("teams.info_links_help"))) +
       '<div class="tm-info-addlink"><input type="url" class="tm-info-link" placeholder="' + esc(tw("teams.info_link_ph")) + '">' +
       '<button type="button" class="ws-btn" data-info-add-link="1">' + esc(tw("teams.info_add")) + "</button></div>" +
-      (I.links.length ? '<ul class="tm-info-list">' + I.links.map(function (l) {
-        return '<li><a href="' + esc(l.url) + '" target="_blank" rel="noopener">' + ic("link") + "<span>" + esc(l.label || l.url) + "</span></a>" +
-          (l.manual && l.id ? '<button type="button" class="tm-chip-x" data-info-del-link="' + esc(l.id) + '" aria-label="' +
-            esc(tw("teams.info_remove")) + '" title="' + esc(tw("teams.info_remove")) + '">' + ic("x") + "</button>" : "") + "</li>";
-      }).join("") + "</ul>" : '<p class="tm-sub">' + esc(tw("teams.info_no_links")) + "</p>") + "</section>";
+      (links.length ? '<ul class="tm-info-list tm-as-list">' + links.slice(0, PREVIEW.link).map(function (l) { return linkRowHtml(l, true); }).join("") +
+        "</ul>" + seeAllHtml("link", c.links) : '<p class="tm-sub">' + esc(tw("teams.info_no_links")) + "</p>") + "</section>";
     if (I.err) h += '<p class="tm-sub">' + esc(I.err) + "</p>";
     return h;
+  }
+
+  // ───────────── reply box of an approval card (17/11/2026) ─────────────
+
+  // Open the reply box of card `id` (""/falsy closes it), optionally quoting line `quote` and in `mode`.
+  function apOpen(id, quote, mode) {
+    if (id !== AP_REPLY.id) AP_REPLY.draft = "";
+    else apKeepDraft();
+    AP_REPLY.id = id || "";
+    AP_REPLY.quote = quote === undefined ? -1 : quote;
+    if (mode) AP_REPLY.mode = mode;
+    else if (!id) AP_REPLY.mode = "ask";
+    drawMsgs(false);
+    apRestore(!!id);
+  }
+
+  function apBox() {
+    return AP_REPLY.id && S.el ? S.el.querySelector('.tm-ap-rp[data-ap-rp="' + AP_REPLY.id + '"]') : null;
+  }
+  function apKeepDraft() {
+    var box = apBox(), ta = box && box.querySelector(".tm-ap-ta");
+    if (ta) AP_REPLY.draft = ta.value;
+  }
+  // After a redraw: the words typed so far come back, and the cursor too when the owner was in the box.
+  function apRestore(focus) {
+    var box = apBox(), ta = box && box.querySelector(".tm-ap-ta");
+    if (!ta) return;
+    if (!ta.value && AP_REPLY.draft) ta.value = AP_REPLY.draft;
+    if (focus && !(typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches && !ta.value)) {
+      try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {}
+    }
+  }
+
+  // Approve, Change or Reject: the server decides (POST .../approvals/{id}/decide). One key per decision of this card in
+  // this tab: pressing again after a lost connection replays the same answer (no second action, no error), another tab
+  // has its own key and is told the request is already decided.
+  function apDecide(btn, apId, rev, dec, note) {
+    S.apKeys = S.apKeys || {};
+    var kk = apId + "|" + dec;
+    var dkey = S.apKeys[kk] || (S.apKeys[kk] = "ap-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10));
+    btn.disabled = true;
+    return call("POST", teamUrl("/approvals/" + q(apId) + "/decide"), { decision: dec, note: (note || "").trim(),
+      decision_key: dkey, expected_rev: rev ? Number(rev) : null }).then(function (r) {
+      btn.disabled = false;
+      if (r.code !== 200) { fail(r); return; }
+      if (AP_REPLY.id === apId) { AP_REPLY.id = ""; AP_REPLY.draft = ""; AP_REPLY.quote = -1; AP_REPLY.mode = "ask"; }
+      loadMsgs(false); loadQueue();
+    }).catch(function () { btn.disabled = false; setNote(tw("teams.err_network")); });
+  }
+
+  // The card a reply box belongs to, from the loaded messages.
+  function apOf(apId) {
+    for (var i = (S.msgs || []).length - 1; i >= 0; i--) {
+      var a = ((S.msgs[i].meta || {}).approval) || null;
+      if (a && a.approval_id === apId) return a;
+    }
+    return null;
+  }
+
+  // Send of the reply box. Ask: a chat message that quotes the card (or the line picked) and calls the member who asked,
+  // the card keeps waiting. Change / Reject: the decision with the words as its note.
+  function apSend(btn, d) {
+    var box = btn.closest(".tm-ap-rp"), ta = box && box.querySelector(".tm-ap-ta");
+    var words = ta ? ta.value.trim() : "";
+    if (!words) { if (ta) ta.focus(); setNote(tw("teams.ap.need_words")); return; }
+    if (d.apSend !== "ask") return apDecide(btn, d.ap, d.apRev, d.apSend, words);
+    var ap = apOf(d.ap);
+    if (!ap || !S.team) return;
+    var row = apRows(ap)[AP_REPLY.quote];
+    var quote = row ? tw("teams.ap.title") + " · " + tw(row[0]) + ": " + String(row[1]).replace(/\s+/g, " ").slice(0, 280)
+      : tw("teams.ap.title") + ": " + (ap.title || "");
+    var Q = quoteApi();
+    var who = String(ap.requested_by || "");
+    var mem = who && who.indexOf("mandate:") !== 0 ? memberOf(S.team.members, who) : null;
+    var body = { text: Q ? Q.ghep(quote, words) : quote + "\n\n" + words, mentions: mem && (!mem.status || mem.status === "active") ? [who] : [],
+      as_job: false, client_msg_id: AP_REPLY.cid || (AP_REPLY.cid = newClientId()),
+      // 18/11/2026: the card was answered, so the server clears its notice in the bell.
+      approval_id: d.ap };
+    var forTeam = S.activeId;
+    btn.disabled = true;
+    return call("POST", teamUrl("/messages"), body).then(function (r) {
+      btn.disabled = false;
+      if (S.activeId !== forTeam) return;
+      if (r.code !== 200) { fail(r); return; }
+      AP_REPLY.id = ""; AP_REPLY.draft = ""; AP_REPLY.quote = -1; AP_REPLY.mode = "ask"; AP_REPLY.cid = "";
+      loadMsgs(false).then(function () { drawMsgs(true); });
+      loadQueue();
+    }).catch(function () { btn.disabled = false; setNote(tw("teams.err_network")); });   // retry sends the same client id
+  }
+
+  // ───────────── reply box of a "Waiting for you" job (19/11/2026), browser part ─────────────
+
+  function jrBox() {
+    return JOB_REPLY.id && S.el ? S.el.querySelector('.tm-jr-rp[data-jr-rp="' + JOB_REPLY.id + '"]') : null;
+  }
+  function jrKeepDraft() {
+    var ta = jrBox() && jrBox().querySelector(".tm-jr-ta");
+    if (ta) JOB_REPLY.draft = ta.value;
+  }
+  function jrRestore(focus) {
+    var ta = jrBox() && jrBox().querySelector(".tm-jr-ta");
+    if (!ta) return;
+    if (!ta.value && JOB_REPLY.draft) ta.value = JOB_REPLY.draft;
+    if (focus && !(typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches && !ta.value)) {
+      try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {}
+    }
+  }
+
+  // Open the reply box of job `id`; the same id again, or "", closes it. From the pill above the composer the Jobs tab
+  // opens with the box ready.
+  function jrOpen(id, btn) {
+    var fromStrip = !!(btn && btn.closest && btn.closest(".tm-jobs"));
+    var next = id && (fromStrip || id !== JOB_REPLY.id) ? id : "";
+    if (next !== JOB_REPLY.id) { JOB_REPLY.draft = ""; JOB_REPLY.cid = ""; JOB_REPLY.mode = "answer"; }
+    else jrKeepDraft();
+    JOB_REPLY.id = next;
+    if (next && !(S.side && S.tab === "jobs")) openSide("jobs", btn);
+    else drawSide(true);
+    jrRestore(!!next);
+  }
+
+  function blockedJob(id) {
+    return ((S.queue && S.queue.blocked) || []).filter(function (x) { return x.id === id; })[0] || null;
+  }
+
+  function jrSend(btn, d) {
+    var ta = jrBox() && jrBox().querySelector(".tm-jr-ta");
+    var words = ta ? ta.value.trim() : "";
+    if (!words) { if (ta) ta.focus(); setNote(tw("teams.ap.need_words")); return; }
+    var job = blockedJob(d.jrTask);
+    if (!job || !S.team) return;
+    var p = jobReplyPayload(job, d.jrSend, words, S.team.members, JOB_REPLY.cid || (JOB_REPLY.cid = newClientId()));
+    var forTeam = S.activeId;
+    btn.disabled = true;
+    return call("POST", teamUrl(p.path), p.body).then(function (r) {
+      btn.disabled = false;
+      if (S.activeId !== forTeam) return;
+      if (r.code !== 200) { fail(r); return; }
+      JOB_REPLY.id = ""; JOB_REPLY.draft = ""; JOB_REPLY.cid = ""; JOB_REPLY.mode = "answer";
+      setNote(tw(p.mode === "ask" ? "teams.jr.asked" : "teams.jr.answered"));
+      drawSide(true);
+      loadMsgs(false).then(function () { drawMsgs(true); });
+      loadQueue();
+    }).catch(function () { btn.disabled = false; setNote(tw("teams.err_network")); });   // retry sends the same client id
   }
 
   function send() {
     var input = S.el.querySelector(".tm-input");
     if (!input || !S.team) return;
+    // Recording: stop, wait for the final words, then send them (owner 2026-11-05: Enter sends, no stop press first).
+    if (S.dict && S.dictState !== "idle") {
+      S.dictSend = true;
+      if (S.dict.active()) S.dict.stop();
+      return;
+    }
     var typed = input.value.trim();
     if (S.atts.some(function (a) { return a.busy; })) { setNote(tw("teams.attach_wait")); return; }
     // A file that failed to upload is not dropped silently: remove it or send it again first (main chat wording).
@@ -3355,13 +4824,19 @@
     var atts = S.atts.filter(function (a) { return a.path && !a.err; });
     if (!typed && !atts.length) return;
     stopMic();
+    dropNextSug();
     var scan = mentionScan(typed, S.team.members, S.picked);
     if (scan.ambiguous.length) { drawHint(); return; }
     var mentions = scan.keys;
     // A reply carries the quoted message as a markdown quote on top (the same convention as the main chat, so every
     // engine reads it and history shows it), and calls the assistant being replied to when nobody is @-mentioned.
     var Q = quoteApi();
-    var text = S.replyTo && Q ? Q.ghep(S.replyTo.quote, typed) : typed;
+    // 0.449.0: a /skill call goes first as the main chat's skill block; the quote and the owner's words follow it.
+    var X = window.JavisSlash;
+    var call = X && X.buildSkillInvocation ? skillCall(typed, (S.skills || []).map(function (k) { return k.slug; })) : null;
+    var words = call ? call.rest : typed;
+    var text = S.replyTo && Q ? Q.ghep(S.replyTo.quote, words) : words;
+    if (call) text = X.buildSkillInvocation(call.cmd, text, call.mid);
     if (S.replyTo && S.replyTo.key && !mentions.length) mentions = [S.replyTo.key];
     // The message shows at once as a pending bubble keyed by its client id; the server's copy replaces it when it
     // arrives. A retry after a dropped connection sends the SAME client id, so the server returns the message it may
@@ -3482,10 +4957,63 @@
     return m[1];
   }
 
+  // 0.449.0: "/" lists the brain's skills, in the same suggestion box as "@". Only skills: the main chat's session and
+  // system commands (/new, /model...) act on a private chat, not on a team.
+  function loadSkills() {
+    var b = brain();
+    if (S.skills && S.skillsBrain === b) return Promise.resolve(S.skills);
+    return fetch("/skills?brain=" + q(b), { credentials: "same-origin" })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .catch(function () { return {}; })
+      .then(function (d) { S.skills = (d && d.skills) || []; S.skillsBrain = b; return S.skills; });
+  }
+  function skillSuggest(input, box, tok) {
+    if (!S.skills || S.skillsBrain !== brain()) {
+      hideSug();
+      loadSkills().then(function () { if (S && S.el && S.el.isConnected && S.skills) suggest(); });
+      return;
+    }
+    var X = window.JavisSlash;
+    var items = S.skills.filter(function (k) { return k && k.slug; }).map(function (k) {
+      return { kind: "skill", cmd: k.slug, name: k.name || k.slug, group: k.group || "", desc: k.description || "" };
+    });
+    var list = (X && X.filterItems ? X.filterItems(items, tok.query) : items).slice(0, 8);
+    S.sugKeys = list.map(function (k) { return "/" + k.cmd; });
+    if (S.sugIdx == null || S.sugIdx >= list.length) S.sugIdx = 0;
+    box.hidden = !list.length;
+    input.setAttribute("aria-expanded", list.length ? "true" : "false");
+    box.innerHTML = list.map(function (k, i) {
+      var on = i === S.sugIdx;
+      return '<button type="button" class="tm-sug-item tm-sug-skill' + (on ? " is-active" : "") + '" role="option" id="tm-sug-' + i +
+        '" aria-selected="' + (on ? "true" : "false") + '" data-skill="' + esc(k.cmd) + '">' +
+        '<span class="tm-sug-all" aria-hidden="true">' + ic("sparkles") + "</span>" +
+        '<span class="tm-sug-text"><span class="tm-sug-name">/' + esc(k.cmd) + (k.name !== k.cmd ? ' <span class="tm-sug-slug">' + esc(k.name) + "</span>" : "") +
+        "</span>" + (k.desc ? '<span class="tm-sug-role">' + esc(k.desc) + "</span>" : "") + "</span></button>";
+    }).join("");
+    if (list.length) input.setAttribute("aria-activedescendant", "tm-sug-" + S.sugIdx);
+    else input.removeAttribute("aria-activedescendant");
+  }
+  function pickSkill(slug) {
+    var input = S.el.querySelector(".tm-input");
+    if (!input || !slug) return;
+    var pos = input.selectionStart || input.value.length;
+    var before = input.value.slice(0, pos).replace(/\/([\p{L}\p{M}0-9_-]*)$/u, "/" + slug + " ");
+    input.value = before + input.value.slice(pos);
+    try { input.setSelectionRange(before.length, before.length); } catch (e) {}
+    input.focus();
+    grow(input);
+    S.pending = null;
+    hideSug();
+    drawHint();
+  }
+
   function suggest() {
     var input = S.el.querySelector(".tm-input");
     var box = S.el.querySelector(".tm-sug");
     if (!input || !box || !S.team) return;
+    var X = window.JavisSlash;
+    var tok = X && X.tokenAtCaret ? X.tokenAtCaret(input.value, input.selectionStart || 0) : null;
+    if (tok) return skillSuggest(input, box, tok);
     var query = suggestQuery(input);
     if (query === null) { hideSug(); return; }
     var list = mentionMatches(S.team.members, query, mentionsFromText(input.value, S.team.members, S.picked));
@@ -3551,6 +5079,7 @@
   }
 
   function pickMention(key) {
+    if (String(key || "").charAt(0) === "/") return pickSkill(String(key).slice(1));
     var input = S.el.querySelector(".tm-input");
     if (input && key === "*all") {
       // @all is read from the text itself (mentionScan), so it needs no picked entry.
@@ -3688,11 +5217,9 @@
 
   // 0.200.0: add a team file. A preview first (who comes in, how many skills), then one confirm.
   function importTeam() {
-    var inp = document.createElement("input");
-    inp.type = "file";
-    inp.accept = ".zip,application/zip";
-    inp.onchange = function () {
-      var f = inp.files && inp.files[0];
+    // The same in-page picker as attaching (pickFiles), so iOS keeps it while the file is chosen.
+    pickFiles(function (files) {
+      var f = files[0];
       if (!f) return;
       var send = function (preview) {
         var fd = new FormData();
@@ -3712,8 +5239,7 @@
           loadTeams(false);
         });
       });
-    };
-    inp.click();
+    }, ".zip,application/zip");
   }
 
   function muteTeam(id, on, btn) {
@@ -3743,6 +5269,10 @@
     // `reqId`: một mã cho mỗi lần mở hộp Tạo nhóm. Bấm Tạo hai lần hay mạng chậm gửi lại thì server trả lại nhóm đã tạo.
     S.pickSt = { mode: mode, query: "", tag: "", selected: [], leader: "", leaderTouched: false, leaderDropped: false, name: "",
       desc: "", descOpen: false, exclude: exclude, saving: false, error: "", rosterState: (S.roster || []).length ? "ok" : "loading",
+      // 2026-11-12: documents picked in the create box (team-picker.js: docs, links and the brain file search).
+      docs: [], links: [], docQuery: "", docResults: [], docState: "idle", docsOpen: false, linkDraft: "", linkBad: false,
+      // 2026-11-15: GitHub repos picked in the create box, attached to the team's chat once it exists.
+      repos: [], repoOpen: false,
       reqId: newClientId() };
     S.pickOpener = opener || null;
     document.removeEventListener("keydown", pickEsc, true);
@@ -3787,6 +5317,7 @@
       host.innerHTML = P.html(st, roster);
       var first = host.querySelector(st.mode === "create" ? ".tmp-name-input" : ".tmp-search-input");
       if (first && !(typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches)) first.focus();
+      pickMountRepos();       // the repo picker is live DOM: a whole redraw drops it, so it is put back
       return;
     }
     var put = function (sel, h) { var box = host.querySelector(sel); if (box) box.innerHTML = h; };
@@ -3822,21 +5353,154 @@
     drawPicker("all");
   }
 
+  // ───────────── documents in the create box (2026-11-12, owner: "thêm file và thêm link tài liệu khi tạo team") ─────────────
+  // Nothing is attached while the box is open: picks live in S.pickSt and go out with POST /teams. Only the parts that
+  // changed are redrawn, so the search box and the link box keep their cursor.
+  function drawPickDocs(whole) {
+    var P = TP(), st = S.pickSt, host = S.pickHost;
+    if (!P || !st || !host) return;
+    var put = function (sel, h) { var box = host.querySelector(sel); if (box) box.innerHTML = h; };
+    if (whole) { put(".tmp-docs-box", P.docsHtml(st)); pickMountRepos(); }
+    else {
+      put(".tmp-docs-chips", P.docChipsHtml(st));
+      put(".tmp-doc-results", P.docResultsHtml(st));
+      put(".tmp-docs-sum", P.docsSummaryHtml(st));
+    }
+    put(".tmp-foot-box", P.footerHtml(st));
+  }
+
+  // 2026-11-15: GitHub repos in the create box. The same picker as the team's Info tab (team-github.js), but nothing
+  // is attached while the box is open: ticks only change S.pickSt.repos, and submitPicker attaches them to the new
+  // team's chat. Put back after every whole redraw of the documents block (drawPickDocs(true), drawPicker("all")).
+  function pickToggleRepos() {
+    var st = S.pickSt;
+    if (!st) return;
+    st.repoOpen = !st.repoOpen;
+    var host = S.pickHost, box = host && host.querySelector(".tmp-repo-box"), btn = host && host.querySelector(".tmp-repo-open");
+    if (btn) btn.setAttribute("aria-expanded", st.repoOpen ? "true" : "false");
+    if (box) { box.hidden = !st.repoOpen; if (!st.repoOpen) box.innerHTML = ""; }
+    pickMountRepos();
+  }
+  function pickMountRepos() {
+    var st = S.pickSt, host = S.pickHost, G = window.JavisTeamGithub;
+    var box = host && host.querySelector(".tmp-repo-box");
+    if (!st || !st.repoOpen || !box || !G || st.mode !== "create") return;
+    box.hidden = false;
+    G.panel(box, {
+      brain: brain,
+      current: function () { return (S.pickSt && S.pickSt.repos) || []; },
+      save: function (names) {
+        if (!S.pickSt) return { ok: false };
+        S.pickSt = TP().setRepos(S.pickSt, names);
+        return { ok: true, repos: S.pickSt.repos.map(function (n) { return { full_name: n }; }) };
+      },
+      changed: function () { drawPickDocs(); },
+      close: function () { if (S.pickSt) { S.pickSt.repoOpen = false; drawPickDocs(true); } },
+      connections: function () { closePicker(); try { window.Alpine.store("nav").go("mcp"); } catch (e) { location.hash = "#p=mcp"; } } });
+  }
+  // After POST /teams: attach the picked repos to the new team's chat (cloning can take a while, so the team opens
+  // first and the chip appears when the repos are in). A failure is said on the team, where the Info tab can retry.
+  function attachNewTeamRepos(team, names, quiet) {
+    var sid = team && team.session_id;
+    if (!sid || !(names || []).length) return;
+    var b = new FormData();
+    b.append("brain", brain()); b.append("repos", names.join(","));
+    if (!quiet) setNote(tw("gh.cloning"));      // `quiet`: a note about documents is already on screen
+    fetch("/github/session/" + q(sid) + "/repos", { method: "POST", body: b, credentials: "same-origin" })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (d) {
+        if (!d || d.ok === false) { setNote((d && d.error) || tw("gh.err_net")); return; }
+        if (S.note === tw("gh.cloning")) setNote("");
+        if (sessionId() === sid) setRepos(d);
+      }, function () { setNote(tw("gh.err_net")); });
+  }
+
+  var pickDocTimer = null;
+  function pickDocSearch(text) {
+    var st = S.pickSt;
+    if (!st) return;
+    st.docQuery = text;
+    clearTimeout(pickDocTimer);
+    var words = String(text || "").trim();
+    var seq = st.docSeq = (st.docSeq || 0) + 1;
+    if (!words) { st.docResults = []; st.docState = "idle"; drawPickDocs(); return; }
+    st.docState = "searching";
+    drawPickDocs();
+    pickDocTimer = setTimeout(function () {
+      call("GET", "/files/search?mode=name&include_dirs=true&limit=20&q=" + q(words)).then(function (r) {
+        return r.code === 200 ? (r.j.items || []) : [];
+      }, function () { return []; }).then(function (items) {
+        if (!S.pickSt || S.pickSt.docSeq !== seq) return;      // an older search, or the box is gone
+        S.pickSt.docResults = searchRows(items);
+        S.pickSt.docState = "done";
+        drawPickDocs();
+      });
+    }, 280);
+  }
+
+  function pickAddDoc(i) {
+    var P = TP(), st = S.pickSt;
+    var r = st && (st.docResults || [])[i];
+    if (!P || !r) return;
+    S.pickSt = P.addDoc(st, { name: r.name, brain_path: r.path, dir: !!r.dir });
+    drawPickDocs();
+  }
+
+  function pickUploadDocs(files) {
+    var P = TP();
+    if (!P || !S.pickSt || !files.length) return;
+    files.slice(0, P.DOCS_MAX).forEach(function (f) {
+      if (!S.pickSt || (S.pickSt.docs || []).length >= P.DOCS_MAX) return;
+      var doc = { name: f.name, path: "", uid: newClientId(), busy: true, err: "" };
+      S.pickSt = P.addDoc(S.pickSt, doc);
+      upload(f).then(function (r) { return r.code === 200 && r.j.staged ? r.j.staged : ""; }, function () { return ""; })
+        .then(function (staged) {
+          // The box may be closed, or this file taken off, while it uploaded.
+          if (!S.pickSt || (S.pickSt.docs || []).indexOf(doc) < 0) return;
+          doc.busy = false; doc.path = staged; doc.err = staged ? "" : "1";
+          drawPickDocs();
+        });
+    });
+    S.pickSt.docsOpen = true;
+    drawPickDocs();
+  }
+
+  function pickAddLink() {
+    var P = TP(), host = S.pickHost;
+    if (!P || !S.pickSt) return;
+    var inp = host && host.querySelector(".tmp-link-input");
+    var got = P.addLink(S.pickSt, inp ? inp.value : S.pickSt.linkDraft);
+    S.pickSt = got.st;
+    if (!got.ok) S.pickSt.linkDraft = inp ? inp.value : S.pickSt.linkDraft;
+    drawPickDocs(true);
+    var back = host && host.querySelector(".tmp-link-input");
+    if (back) { try { back.focus({ preventScroll: true }); } catch (e) {} }
+  }
+
   function submitPicker() {
     var P = TP(), st = S.pickSt;
     if (!P || !st || !P.canSubmit(st)) return;
+    if (st.mode === "create" && (st.docs || []).some(function (d) { return d.err; })) return pickFail(tw("teams.pick.doc_fix"));
     st.saving = true; st.error = "";
     drawPicker("pick");
     if (st.mode === "create") {
       var name = String(st.name || "").trim() || P.autoName(st, S.roster || []);
+      var docs = P.docPayload(st);
       call("POST", "/teams", { name: name, description: st.desc || "", members: st.selected.slice(), leader_slug: st.leader || "",
-        client_req_id: st.reqId })
+        client_req_id: st.reqId, attachments: docs.attachments, links: docs.links })
         .then(function (r) {
           if (r.code !== 200) return pickFail((r.j && r.j.error) || tw("teams.err", { e: r.code }));
           // Tạo xong: vào thẳng khung chat của nhóm mới, con trỏ đặt sẵn ở khung soạn.
           closePicker();
+          // The team exists either way; a document the server could not take is said once, with where to add it.
+          var missed = (r.j.documents && r.j.documents.failed) || 0;
+          var repos = (st.repos || []).slice();
           S.focusComposer = true;
-          loadTeams(false).then(function () { openTeam(r.j.team.team_id); });
+          loadTeams(false).then(function () {
+            openTeam(r.j.team.team_id);
+            if (missed) setNote(tw("teams.pick.docs_partial", { n: missed }));
+            attachNewTeamRepos(r.j.team, repos, missed > 0);
+          });
         }, function () { pickFail(tw("teams.pick.err_network")); });
       return;
     }
@@ -3869,6 +5533,14 @@
     }
     // A press anywhere outside the "+" menu closes it; outside the long-press sheet closes the sheet.
     var inside = function (sel) { return !!(e.target.closest && e.target.closest(sel)); };
+    if (S.stripOpen && !inside(".tm-jobs")) setStrip(false);
+    if (t && t.dataset && t.dataset.strip) { setStrip(!S.stripOpen); return; }
+    // A job's title or "Open the Jobs tab" in the pill's details: the details close AFTER this press is handled. Drawn
+    // again right away, the pressed button left the page and the press was dropped below (`S.el.contains(t)`).
+    if (S.stripOpen && t && t.dataset && (t.dataset.openJobs || t.dataset.viewTask || t.dataset.jrOpen) && inside(".tm-jobs")) {
+      S.stripOpen = false;
+      setTimeout(drawJobs, 0);
+    }
     if (S.plusOpen && !inside(".tm-plus-menu") && !inside(".tm-plus")) setPlus(false);
     if (S.picker !== null && !inside(".tm-sheet") && Date.now() - (S.sheetAt || 0) > 600) {
       S.picker = null;
@@ -3900,8 +5572,26 @@
     if (t.classList && t.classList.contains("cs-proj-x") && t.closest(".tm-tagbar")) { setTagFilter(""); drawList(); return; }
     if (d.deleteTeam) { if (S.rowMenu) closeRowMenu(); return deleteTeam(d.deleteTeam); }
     if (d.renameHead) { S.renamingHead = true; drawHead(); return; }
-    if (d.finOpen) { S.openFin = S.openFin === d.finOpen ? null : d.finOpen; drawSide(); return; }
-    if (t.classList.contains("tm-arch-toggle")) { S.archOpen = !S.archOpen; drawSide(); return; }
+    // Jobs tab (16/11/2026): a press on a control of the tab leaves the Archive search box first, so the redraw is not
+    // held back as "the owner is typing" (Safari keeps the focus in the box when a button is pressed).
+    var typed = typeof document !== "undefined" ? document.activeElement : null;
+    if (typed && typed !== t && typed.classList && typed.classList.contains("tm-jb-q") && t.closest(".tm-side-body")) typed.blur();
+    if (d.finOpen) {
+      S.openFin = S.openFin === d.finOpen ? null : d.finOpen;
+      if (S.openFin) loadJobDetail(S.openFin);
+      drawSide(true); return;
+    }
+    if (d.jobFold) { S.jobFold[d.jobFold] = d.open !== "1"; drawSide(true); return; }
+    if (d.jobPage === "assets") return assetsPage(Number(d.dir));
+    if (d.jobPage) {
+      var inArch = d.jobPage === "arch";
+      var paged = inArch ? filterJobs((S.queue || {}).archived || [], S.archQuery) : (S.queue || {}).finished || [];
+      var next = clampPage(clampPage(inArch ? S.archPage : S.finPage, paged.length) + Number(d.dir), paged.length);
+      if (inArch) S.archPage = next; else S.finPage = next;
+      drawSide(true); return;
+    }
+    if (d.repMore) { S.fullReport[d.repMore] = !S.fullReport[d.repMore]; drawSide(true); return; }
+    if (t.classList.contains("tm-arch-toggle")) { S.archOpen = !S.archOpen; drawSide(true); return; }
     if (d.jobArchive) return markJobs([d.jobArchive], "archived");
     if (d.jobUnarchive) return markJobs([d.jobUnarchive], "");
     if (d.jobDelete) return markJobs([d.jobDelete], "deleted");
@@ -3934,6 +5624,9 @@
     if (d.plusAttach) { setPlus(false); return pickFiles(attachFiles); }
     if (d.plusFolder || d.folderOpen) { setPlus(false); return openFolderPanel(); }
     if (d.folderUnpin) return pinTeamFolder("");
+    if (d.ghRemove) return removeTeamRepos();
+    if (d.plusGithub || d.ghOpen) { setPlus(false); return openGithubPanel(); }
+    if (d.ghStatus) { var gs = sessionId(); if (gs && window.JavisTeamGithub) window.JavisTeamGithub.openStatus(gs); return; }
     if (d.attX !== undefined) { forgetAtts(S.atts.splice(+d.attX, 1)); drawComposer(); return; }
     if (d.outRetry) {
       var oe = S.outbox.filter(function (p) { return p.cid === d.outRetry; })[0];
@@ -3958,9 +5651,15 @@
       if (ra && ra.file && !ra.busy) { startUpload(ra); drawComposer(); }
       return;
     }
+    if (d.asOpen) return openAssets(d.asOpen);
+    if (d.asBack) return closeAssets();
+    if (d.asKind) { if (!S.assets || S.assets.kind !== d.asKind) openAssets(d.asKind); return; }
     if (d.infoAddFile) return pickFiles(addTeamFiles);
+    if (d.infoPick !== undefined) return infoPick(Number(d.infoPick));
+    if (d.infoOpenDir) { if (typeof window.JavisOpenFiles === "function") window.JavisOpenFiles(d.infoOpenDir); return; }
     if (d.infoDelFile) return assetPost("/files/" + q(d.infoDelFile) + "/delete");
     if (d.infoDelLink) return assetPost("/links/" + q(d.infoDelLink) + "/delete");
+    if (d.infoDesc) return describeDoc(d.infoDesc, d.ref || "", d.desc || "");
     if (d.infoAddLink) return addTeamLink();
     if (t.classList.contains("tm-mic")) return toggleMic();
     if (d.insertAt) {
@@ -4023,6 +5722,14 @@
     if (d.pickLeader) { S.pickSt = TP().setLeader(S.pickSt, d.pickLeader); drawPicker("pick"); return; }
     if (t.classList.contains("tmp-reload")) { loadRoster().then(function () { if (S.pickSt) drawPicker("all"); }); drawPicker("filter"); return; }
     if (t.classList.contains("tmp-desc-sum")) { var dd = t.parentNode; if (S.pickSt) S.pickSt.descOpen = !(dd && dd.open); return; }
+    if (t.classList.contains("tmp-docs-sum")) { var dz = t.parentNode; if (S.pickSt) S.pickSt.docsOpen = !(dz && dz.open); return; }
+    if (t.classList.contains("tmp-doc-upload")) return pickFiles(pickUploadDocs);
+    if (t.classList.contains("tmp-link-add")) return pickAddLink();
+    if (d.docAdd !== undefined) return pickAddDoc(Number(d.docAdd));
+    if (d.docDel !== undefined) { if (S.pickSt) { S.pickSt = TP().removeDoc(S.pickSt, d.docDel); drawPickDocs(); } return; }
+    if (d.linkDel !== undefined) { if (S.pickSt) { S.pickSt = TP().removeLink(S.pickSt, d.linkDel); drawPickDocs(); } return; }
+    if (t.classList.contains("tmp-repo-open")) return pickToggleRepos();
+    if (d.repoDel !== undefined) { if (S.pickSt) { S.pickSt = TP().removeRepo(S.pickSt, d.repoDel); drawPickDocs(); pickMountRepos(); } return; }
     if (t.classList.contains("tmp-cancel")) return closePicker();
     if (t.classList.contains("tmp-submit")) return submitPicker();
     if (t.classList.contains("tm-more-teams")) return loadTeams(true);
@@ -4043,8 +5750,12 @@
     if (d.openTeam) return openSide("team", t);
     if (t.classList.contains("tm-close")) return closeSide();
     if (d.tab) {
-      S.tab = d.tab; drawSide(true); drawHead();
+      // 19/11/2026: the Info tab pressed from the archive (or after it) opens on Info itself.
+      if (d.tab === "info") S.assets = null;
+      S.tab = d.tab; S.tabAuto = false; drawSide(true); drawHead();
       if (d.tab === "team") loadAgents().then(function () { if (S.side && S.tab === "team") drawSide(); });
+      // 18/11/2026: a team that opened on Jobs never read its files and links, so Info showed "Loading..." for good.
+      if (d.tab === "info") { loadInfo(); loadFolder(); }
       return;
     }
     if (d.expand) { S.openMember = S.openMember === d.expand ? null : d.expand; drawSide(true); return; }
@@ -4060,8 +5771,9 @@
       return;
     }
     if (t.classList.contains("tm-send")) return send();
-    if (t.classList.contains("tm-older")) return loadMsgs(true);
+    if (t.classList.contains("tm-older")) return loadOlder();
     if (d.mention) return pickMention(d.mention);
+    if (d.skill) return pickSkill(d.skill);
     if (d.unmention) return unMention(d.unmention);
     if (t.classList.contains("tm-search-btn")) {
       S.searchOpen = !S.searchOpen;
@@ -4072,6 +5784,7 @@
       return;
     }
     if (t.classList.contains("tm-search-go")) return runSearch();
+    if (d.quoteSrc) return jumpToQuoted(t);
     if (d.jump) {
       var here = S.el.querySelector('.tm-msgs [data-mid="' + Number(d.jump) + '"]');
       if (here && here.scrollIntoView) {
@@ -4083,7 +5796,9 @@
       return jumpTo(d.jump, d.ts);
     }
     if (t.classList.contains("tm-jump-back")) { S.jumped = null; loadMsgs(false); return; }
+    if (t.classList.contains("tm-at-jump")) return atJump();
     if (t.classList.contains("tm-filter-clear")) { S.filterTask = ""; drawFilterbar(); loadMsgs(false); return; }
+    if (t.dataset && t.dataset.fbQuality) { S.fbQuality = !S.fbQuality; drawFilterbar(); return; }
     if (d.reactClose) { S.focusBack = S.picker; S.picker = null; drawMsgs(false); return; }
     if ((d.task && t.classList.contains("tm-tag")) || d.viewTask) {
       S.filterTask = d.task || d.viewTask;
@@ -4132,25 +5847,20 @@
       if (typeof confirm === "function" && !confirm(tw("teams.cancel_confirm", { title: ct }))) return;
       return call("POST", teamUrl("/tasks/" + q(d.cancel) + "/cancel")).then(function (r) { act(r); });
     }
+    if (d.apReply) { apOpen(AP_REPLY.id === d.apReply ? "" : d.apReply, -1); return; }
+    if (d.apQuote !== undefined && d.ap) { apOpen(d.ap, Number(d.apQuote), "ask"); return; }
+    if (d.apClose) { apOpen("", -1); return; }
+    if (d.apUnquote) { apKeepDraft(); AP_REPLY.quote = -1; drawMsgs(false); apRestore(true); return; }
+    if (d.apMode) { apKeepDraft(); AP_REPLY.mode = d.apMode; drawMsgs(false); apRestore(true); return; }
+    if (d.apSug) {
+      var ta = t.closest(".tm-ap-rp") && t.closest(".tm-ap-rp").querySelector(".tm-ap-ta");
+      if (ta) { ta.value = (ta.value.trim() ? ta.value.trim() + " " : "") + tw(d.apSug); AP_REPLY.draft = ta.value; ta.focus(); }
+      return;
+    }
+    if (d.apSend) return apSend(t, d);
     if (d.apDecide) {
-      var dec = d.apDecide, note = "";
-      if (dec === "reject" || dec === "changes") {
-        note = typeof prompt === "function" ? prompt(tw(dec === "reject" ? "teams.ap.reject_prompt" : "teams.ap.changes_prompt")) : "";
-        if (!note || !note.trim()) return;
-      } else if (dec === "revoke" && typeof confirm === "function" && !confirm(tw("teams.ap.revoke_confirm"))) {
-        return;
-      }
-      // One key per decision of this card in this tab: pressing again after a lost connection replays the same answer
-      // (no second action, no error), another tab has its own key and is told the request is already decided.
-      S.apKeys = S.apKeys || {};
-      var kk = d.ap + "|" + dec;
-      var dkey = S.apKeys[kk] || (S.apKeys[kk] = "ap-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10));
-      t.disabled = true;
-      return call("POST", teamUrl("/approvals/" + q(d.ap) + "/decide"), { decision: dec, note: (note || "").trim(),
-        decision_key: dkey, expected_rev: d.apRev ? Number(d.apRev) : null }).then(function (r) {
-        if (r.code !== 200) { t.disabled = false; fail(r); }
-        loadMsgs(false); loadQueue();
-      }).catch(function () { t.disabled = false; setNote(tw("teams.err_network")); });
+      if (d.apDecide === "revoke" && typeof confirm === "function" && !confirm(tw("teams.ap.revoke_confirm"))) return;
+      return apDecide(t, d.ap, d.apRev, d.apDecide, "");
     }
     if (d.mandateEdit !== undefined) { S.mandateEdit = d.mandateEdit === "1"; drawSide(); return; }
     if (d.accEdit !== undefined) { S.accEdit = d.accEdit || null; drawSide(); return; }
@@ -4227,6 +5937,14 @@
         loadMsgs(false); loadQueue();
       }).catch(function () { t.disabled = false; setNote(tw("teams.err_network")); });
     }
+    if (d.jrOpen !== undefined) return jrOpen(d.jrOpen, t);
+    if (d.jrMode) { jrKeepDraft(); if (JOB_REPLY.mode !== d.jrMode) JOB_REPLY.cid = ""; JOB_REPLY.mode = d.jrMode; drawSide(true); jrRestore(true); return; }
+    if (d.jrSug) {
+      var jta = jrBox() && jrBox().querySelector(".tm-jr-ta");
+      if (jta) { jta.value = (jta.value.trim() ? jta.value.trim() + " " : "") + tw(d.jrSug); JOB_REPLY.draft = jta.value; jta.focus(); }
+      return;
+    }
+    if (d.jrSend) return jrSend(t, d);
     if (d.amend) {
       var at = S.taskTitles[d.amend] || d.amend;
       var text = typeof prompt === "function" ? prompt(tw("teams.amend_prompt", { title: at })) : "";
@@ -4261,7 +5979,8 @@
         return call("PATCH", teamUrl(), { avatar_image: "" }).then(function (r) { act(r, drawAll); });
       }
     }
-    if (t.classList.contains("tm-save")) return saveSettings();
+    if (d.teamArchive) return setTeamStatus("archived", t);
+    if (d.teamUnarchive) return setTeamStatus("active", t);
     if (t.classList.contains("tm-caps-save")) return saveCaps();
     if (t.classList.contains("tm-auth-save")) {
       var sec = S.el.querySelector(".tm-auth");
@@ -4309,14 +6028,34 @@
     return x ? x.value : "";
   }
 
-  function saveSettings() {
-    var status = (S.el.querySelector('input[name="tm-status"]:checked') || {}).value || S.team.status;
-    if (status === "archived" && S.team.status !== "archived" && typeof confirm === "function" &&
-        !confirm(tw("teams.archive_confirm"))) return;
-    call("PATCH", teamUrl(), { name: val("tm-set-name"), description: val("tm-set-desc"), status: status }).then(function (r) {
+  // One change of the Team tab saved on its own (17/11/2026: no Save button). `patch` is part of PATCH /teams/{id}.
+  // Refused or offline: the tab is drawn again from what is saved and the note says why, nothing changes silently.
+  function saveTeamPatch(patch, input) {
+    if (input) input.disabled = true;
+    return call("PATCH", teamUrl(), patch).then(function (r) {
+      if (input) input.disabled = false;
       if (r.code === 200) setNote(tw("teams.saved"));
       act(r, drawAll);
+    }).catch(function () {
+      if (input) input.disabled = false;
+      setNote(tw("teams.err_network"));
+      drawAll();
     });
+  }
+
+  function saveTeamField(input) {
+    var key = input.getAttribute("data-team-field");
+    var v = String(input.value || "").trim();
+    if (key === "name" && !v) { input.value = S.team.name || ""; return; }   // a team always has a name
+    if (v === String(S.team[key] || "").trim()) return;
+    var patch = {};
+    patch[key] = v;
+    saveTeamPatch(patch, input);
+  }
+
+  function setTeamStatus(status, input) {
+    if (status === "archived" && typeof confirm === "function" && !confirm(tw("teams.archive_confirm"))) return;
+    saveTeamPatch({ status: status }, input);
   }
 
   // Dựng thân POST /caps từ form (hàm thuần, test được dưới node). `read(k)` trả {checked: bool|null, value: chuỗi};
@@ -4417,6 +6156,8 @@
       return;
     }
     if (e.target.name === "tm-level") { setLevel(Number(e.target.value), e.target); return; }
+    if (e.target.getAttribute && e.target.getAttribute("data-team-field")) { saveTeamField(e.target); return; }
+    if (e.target.classList.contains("tm-pause-toggle")) { setTeamStatus(e.target.checked ? "paused" : "active", e.target); return; }
     if (e.target.classList.contains("tm-pin-toggle")) {
       // Ghim nhóm lên đầu danh sách: lưu được thì act() tải lại nhóm và danh sách; lỗi thì công tắc về trạng thái đã lưu,
       // bật lại để thử lại, và báo lỗi (review b93c46bd #1).
@@ -4458,14 +6199,91 @@
     }
   }
 
+  // 2026-11-07: the likely next message, grey in the empty box once an assistant answers; Tab or the ">" after it fills
+  // it in. 2026-11-13: it stays while the owner types along it, Right Arrow takes one word, and a draft that goes
+  // another way is finished after a short pause. The same module as the main chat (chat-suggest.js), one controller
+  // for the page.
+  var teamSuggest = null, sugTimer = null, sugFor = 0;
+  function nextSug() {
+    if (!teamSuggest && typeof window !== "undefined" && window.JavisSuggest) {
+      teamSuggest = window.JavisSuggest.attach({
+        input: function () { return S && S.el ? S.el.querySelector(".tm-input") : null; },
+        composing: function () { return !!(S && S.composing && S.composing()); },
+        maxHeight: function () { return INPUT_MAX_PX; },
+        quiet: function () { return !!(S && S.dictState && S.dictState !== "idle"); },
+      });
+    }
+    return teamSuggest;
+  }
+  function dropNextSug() { clearTimeout(sugTimer); sugFor = 0; if (teamSuggest) teamSuggest.clear(); }
+  // Asked a moment after the last assistant message, so a team answering in turns gets one suggestion at the end.
+  function queueNextSug(mid) {
+    clearTimeout(sugTimer);
+    sugTimer = setTimeout(function () {
+      var sg = nextSug();
+      if (!sg || !S || !S.team || (S.typing || []).length || S.filterTask) return;
+      var last = S.msgs[S.msgs.length - 1];
+      if (!last || Number(last.id) !== Number(mid) || last.author_kind !== "agent" || sugFor === Number(mid)) return;
+      sugFor = Number(mid);
+      var team = S.activeId;
+      var ctx = S.msgs.slice(-6).filter(function (m) { return m.author_kind === "owner" || m.author_kind === "agent"; })
+        .map(function (m) {
+          var name = m.author_kind === "agent" ? nameOf(S.team.members, m.author_ref) : "";
+          return { role: m.author_kind === "owner" ? "user" : "assistant",
+                   text: (name ? name + ": " : "") + String(m.content == null ? "" : m.content) };
+        });
+      sg.request(ctx).then(function () { if (!S || S.activeId !== team) dropNextSug(); });
+    }, 2500);
+  }
+
   function onKey(e) {
+    // Reply box of a "Waiting for you" job (19/11/2026): Ctrl/Cmd+Enter sends, Escape closes, like the approval card.
+    if (e.target.classList && e.target.classList.contains("tm-jr-ta")) {
+      if (e.key === "Escape") { e.preventDefault(); jrOpen(""); return; }
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        var jb = jrBox() && jrBox().querySelector("[data-jr-send]");
+        if (jb && !jb.disabled) jb.click();
+      }
+      return;
+    }
+    // Reply box of an approval card: Ctrl/Cmd+Enter sends, Escape closes (17/11/2026).
+    if (e.target.classList && e.target.classList.contains("tm-ap-ta")) {
+      if (e.key === "Escape") { e.preventDefault(); apOpen("", -1); return; }
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        var sb = e.target.closest(".tm-ap-rp") && e.target.closest(".tm-ap-rp").querySelector("[data-ap-send]");
+        if (sb && !sb.disabled) sb.click();
+        return;
+      }
+      return;
+    }
+    if (e.key === "Escape" && S.stripOpen) {
+      setStrip(false);
+      var pill = S.el.querySelector(".tm-jobs .bg-pill");
+      if (pill) pill.focus();
+      return;
+    }
     if (e.target.classList && e.target.classList.contains("tm-search-input") && e.key === "Enter") {
       e.preventDefault();
       runSearch();
       return;
     }
     if (e.key === "Escape" && S.pickSt) { closePicker(); return; }
+    // The archive search: Enter looks now instead of after the pause; Escape empties the box, then leaves the archive.
+    if (e.target.classList && e.target.classList.contains("tm-as-q") && S.assets) {
+      if (e.key === "Enter") { e.preventDefault(); clearTimeout(assetsTimer); S.assets.q = e.target.value; S.assets.page = 0; loadAssets(); return; }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (e.target.value) { e.target.value = ""; assetsSearch(""); } else closeAssets();
+        return;
+      }
+    }
     if (e.target.classList && e.target.classList.contains("tm-input") && sugKey(e)) return;
+    if (e.target.classList && e.target.classList.contains("tm-input") && teamSuggest && teamSuggest.onKeydown(e)) return;
+    // Enter in the link box adds the link; in the file search it does nothing (it must never press Create).
+    if (e.target.classList && e.target.classList.contains("tmp-link-input") && e.key === "Enter") { e.preventDefault(); pickAddLink(); return; }
+    if (e.target.classList && e.target.classList.contains("tmp-doc-search") && e.key === "Enter") { e.preventDefault(); return; }
     if (e.target.classList && e.target.classList.contains("tmp-name-input") && e.key === "Enter") {
       e.preventDefault();
       var srch = S.pickHost && S.pickHost.querySelector(".tmp-search-input");
@@ -4495,13 +6313,18 @@
     // Same Enter rules as the main chat (chat-acts.js): never while an IME is composing, and a touch screen keeps Enter
     // as a new line (the Send button sends).
     var A = actsApi();
-    if (e.target.classList && e.target.classList.contains("tm-input") && A && A.enterSends(e, S.composing && S.composing())) {
+    // While recording the focus usually sits on the mic just pressed: Enter there sends too, instead of only stopping.
+    var onMic = S.dictState !== "idle" && e.target.classList && e.target.classList.contains("tm-mic");
+    if (e.target.classList && (onMic || e.target.classList.contains("tm-input")) && A && A.enterSends(e, S.composing && S.composing())) {
       e.preventDefault();
       send();
     }
   }
 
   function onInput(e) {
+    if (e.target.classList.contains("tm-ap-ta")) { AP_REPLY.draft = e.target.value; return; }
+    if (e.target.classList.contains("tm-jr-ta")) { JOB_REPLY.draft = e.target.value; return; }
+    if (e.target.classList.contains("tm-jb-q")) { S.archQuery = e.target.value; S.archPage = 0; drawArchive(); return; }
     if (S.pickSt && e.target.classList.contains("tmp-search-input")) {
       S.pickSt.query = e.target.value;
       drawPicker("filter");
@@ -4509,15 +6332,20 @@
     }
     if (S.pickSt && e.target.classList.contains("tmp-name-input")) { S.pickSt.name = e.target.value; return; }
     if (S.pickSt && e.target.classList.contains("tmp-desc-input")) { S.pickSt.desc = e.target.value; return; }
+    if (S.pickSt && e.target.classList.contains("tmp-doc-search")) { pickDocSearch(e.target.value); return; }
+    if (S.pickSt && e.target.classList.contains("tmp-link-input")) { S.pickSt.linkDraft = e.target.value; return; }
+    if (e.target.classList.contains("tm-info-fsearch")) { infoFind(e.target.value); return; }
+    if (e.target.classList.contains("tm-as-q")) { assetsSearch(e.target.value); return; }
     if (e.target.classList.contains("tm-input")) {
       S.pending = S.pending && (S.pending.typed || S.pending.text) === e.target.value.trim() ? S.pending : null;
       grow(e.target);
       suggest();
       drawHint();
+      if (teamSuggest) teamSuggest.onInput();
     }
   }
 
-  var refreshTimer = null;
+  var refreshTimer = null, refreshOpen = "";
   function onTeamEvent(ev) {
     if (!S || !S.el || !S.el.isConnected) return;
     var d = (ev && ev.detail) || {};
@@ -4563,16 +6391,24 @@
       if (i >= 0 || !S.filterTask) drawMsgs(false);
       // A new message while the owner reads higher up: the jump button becomes "New messages" (at the end it follows).
       if (i < 0 && S.scroll && !S.scroll.stuck()) toLatest(false);
+      if (i < 0 && nm.author_kind === "agent") queueNextSug(nm.id);
     }
+    // 2026-11-05: "the owner read this team" only changes the unread badge on the team list. It used to refetch the open
+    // team and its queue too, the heaviest reads of the page, after every team switch and every agent message.
+    // Events merged into one refresh keep the open team's refetch if any of them asked for it.
+    if (d.type !== "team_read" && d.team_id === S.activeId) refreshOpen = d.team_id;
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(function () {
+      var full = !!refreshOpen && !!S && refreshOpen === S.activeId;
+      refreshOpen = "";
       loadTeams(false);
-      if (d.team_id === S.activeId) { loadQueue(); loadTeam(); }
+      if (full) { loadQueue(); loadTeam(); }
     }, 300);
   }
 
   // Rời trang (console.js gọi qua _pageLeave): đóng ngăn, bỏ hẹn giờ; trang dựng lại từ đầu lần ghé sau.
   function leave() {
+    keepTeam();
     clearTimeout(refreshTimer);
     if (colResize()) colResize().miniTip.hide();
     if (S && S.pickSt) closePicker();
@@ -4642,14 +6478,42 @@
       st: badge ? st : un ? "need" : "" });
   }
 
+  // 2026-11-19 (owner: "tạo team với nhập team ở trên 1 hàng thôi đừng xuống dòng 2 hàng nhìn rất lãng phí không gian,
+  // nếu kéo về thu nhỏ quá thì chỉ hiện icon thôi"): Create and Import stay on one row with their text on one line.
+  // When the list column (dragged narrower, a larger text size, a longer language) has no room for both labels, the
+  // bar gets .tm-chi-icon and the two buttons show only their icons (the title keeps the name on hover). Measured, not
+  // a fixed width, because the room the labels need depends on the font and the language.
+  function fitListBar() {
+    var bar = S && S.el && S.el.querySelector(".tm-list-bar");
+    if (!bar) return;
+    bar.classList.remove("tm-chi-icon");
+    if (bar.clientWidth && bar.scrollWidth > bar.clientWidth + 1) bar.classList.add("tm-chi-icon");
+  }
+  function watchListBar() {
+    var list = S && S.el && S.el.querySelector(".tm-list");
+    if (!list) return;
+    fitListBar();
+    if (typeof ResizeObserver === "function") {
+      S.barRO = new ResizeObserver(fitListBar);
+      S.barRO.observe(list);
+    }
+  }
+
   function render(el) {
     if (S && S.scroll) S.scroll.detach();
+    if (S && S.barRO) S.barRO.disconnect();
     S = fresh(el);
     shell();
+    watchListBar();
     var CS = typeof window !== "undefined" && window.JavisChatScroll;
     var msgsBox = el.querySelector(".tm-msgs");
     S.scroll = CS && msgsBox ? CS.attach(msgsBox, { buttonClass: "jv-new-msg tm-new-msg", msg: ".tm-msg",
       hold: ".tm-hacts:hover, .tm-rx:hover", key: "data-mid", followLoads: true }) : null;
+    // Near the top of the chat, the next older page loads by itself (18/11/2026).
+    if (msgsBox) msgsBox.addEventListener("scroll", onMsgsScroll, { passive: true });
+    S.atBtn = document.createElement("button");
+    S.atBtn.type = "button";
+    S.atBtn.className = "tm-at-jump";
     attachListResize();
     el.addEventListener("mouseover", function (e) {
       var row = e.target.closest && e.target.closest(".tm-team");
@@ -4775,6 +6639,10 @@
     // 0.197.0: back to this tab with a team open: what arrived while away is read now.
     if (typeof document !== "undefined" && document.addEventListener) document.addEventListener("visibilitychange", onVisible);
     // Auto bật/tắt ở trang Cộng sự hay tab khác (0.142.0): danh sách thành viên của nhóm đang mở đọc lại trạng thái.
+    // 0.454.0: the tag order changed (here or on another tab of this page): the list and its tag bar follow.
+    window.addEventListener("javis:order-changed", function () {
+      if (S && S.el && S.el.isConnected) drawList();
+    });
     window.addEventListener("javis:resonance-agents-changed", function () {
       if (!S || !S.el || !S.el.isConnected || !S.activeId) return;
       loadTeam();
@@ -4783,7 +6651,7 @@
   }
 
   var api = { render: render, leave: leave, open: open, teamListHtml: teamListHtml, messageHtml: messageHtml, queueHtml: queueHtml,
-    jobStripHtml: jobStripHtml, blockedAction: blockedAction, approvalCardHtml: approvalCardHtml, workModeHtml: workModeHtml,
+    jobStripHtml: jobStripHtml, filterbarHtml: filterbarHtml, stripState: stripState, defaultTab: defaultTab, ownerSaidAt: ownerSaidAt, sideTabsHtml: sideTabsHtml, blockedAction: blockedAction, approvalCardHtml: approvalCardHtml, apDueText: apDueText, apShortRef: apShortRef, workModeHtml: workModeHtml,
     mandateHtml: mandateHtml, opportunityCardHtml: opportunityCardHtml, readMandateForm: readMandateForm,
     parseCriteria: parseCriteria, acceptanceCardHtml: acceptanceCardHtml, acceptanceDecisionPayload: acceptanceDecisionPayload,
     qualityPolicyHtml: qualityPolicyHtml, qualityPolicyPayload: qualityPolicyPayload, qualityTemplatePayload: qualityTemplatePayload,
@@ -4792,15 +6660,17 @@
     jobsChip: jobsChip, jobsChipHtml: jobsChipHtml, timeShort: timeShort,
     mentionMatches: mentionMatches, mentionsFromText: mentionsFromText, mentionScan: mentionScan, removeMention: removeMention,
     callsHtml: callsHtml, foldName: foldName, emailBefore: emailBefore, composerHint: composerHint, newClientId: newClientId,
-    membersHtml: membersHtml, settingsFormHtml: settingsFormHtml, capsFormHtml: capsFormHtml, capsPayload: capsPayload, saveCapsFlow: saveCapsFlow, teamTabHtml: teamTabHtml, limitsHtml: limitsHtml,
+    membersHtml: membersHtml, memberModelText: memberModelText, atPending: atPending, atJumpHtml: atJumpHtml, settingsFormHtml: settingsFormHtml, dangerZoneHtml: dangerZoneHtml, capsFormHtml: capsFormHtml, capsPayload: capsPayload, saveCapsFlow: saveCapsFlow, teamTabHtml: teamTabHtml, limitsHtml: limitsHtml,
     levelOf: levelOf, grantFor: grantFor, teamAvatarHtml: teamAvatarHtml, savePin: savePin, pinTeamWith: pinTeamWith, noteHtml: noteHtml, levelsHtml: levelsHtml, turnsHtml: turnsHtml,
     bannersHtml: bannersHtml, reactCornerHtml: reactCornerHtml, reactBarHtml: reactBarHtml, sheetHtml: sheetHtml,
-    hoverActsHtml: hoverActsHtml, bodyHtml: bodyHtml, listSync: listSync, pendingHtml: pendingHtml, copyTextOf: copyTextOf, fileChipHtml: fileChipHtml, uploadError: uploadError, plainPreview: plainPreview, previewText: previewText,
+    hoverActsHtml: hoverActsHtml, bodyHtml: bodyHtml, skillSplit: skillSplit, skillCall: skillCall, listSync: listSync, pendingHtml: pendingHtml, copyTextOf: copyTextOf, fileChipHtml: fileChipHtml, uploadError: uploadError, pickFiles: pickFiles, plainPreview: plainPreview, previewText: previewText,
     nextReaction: nextReaction, REACTIONS: REACTIONS, authorityHtml: authorityHtml, readGrant: readGrant,
     searchResultsHtml: searchResultsHtml, replyStatusHtml: replyStatusHtml, headLine: headLine,
     typingHtml: typingHtml, pinsHtml: pinsHtml, markMentions: markMentions, replyRefHtml: replyRefHtml,
     allTags: allTags, filterTeams: filterTeams, tagBarHtml: tagBarHtml, tagMenuRows: tagMenuRows, tagPickRows: tagPickRows,
-    lastWorkedTeam: lastWorkedTeam, TAG_NONE: TAG_NONE, unreadHtml: unreadHtml };
+    lastWorkedTeam: lastWorkedTeam, TAG_NONE: TAG_NONE, unreadHtml: unreadHtml, jobReplyPayload: jobReplyPayload, canAnswer: canAnswer,
+    fileRowHtml: fileRowHtml, linkRowHtml: linkRowHtml, assetsHtml: assetsHtml, assetsBodyHtml: assetsBodyHtml, seeAllHtml: seeAllHtml,
+    byDay: byDay, dayLabel: dayLabel, monthLabel: monthLabel, prettyUrl: prettyUrl, sizeText: sizeText, PREVIEW: PREVIEW, ASSET_PER_PAGE: ASSET_PER_PAGE };
   if (typeof window !== "undefined") window.JavisTeams = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

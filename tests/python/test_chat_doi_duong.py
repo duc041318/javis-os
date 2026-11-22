@@ -97,7 +97,8 @@ def _codex_gia(kich_ban):
 
 
 def _mcfg():
-    return {"order": ["openai-oauth"], "accounts": {"openai-oauth": [
+    return {"order": ["openai-oauth"], "main": {"provider": "openai-oauth", "model": "gpt-5.6-luna"},
+            "accounts": {"openai-oauth": [
         {"id": "main", "label": "", "enabled": True}, {"id": "acc2", "label": "", "enabled": True}]}}
 
 
@@ -186,6 +187,14 @@ def main_test(mp, tmp):
     i_doi = next(i for i, g in enumerate(ws.sent) if g.get("type") == "reroute") if doi else -1
     i_rep = next((i for i, g in enumerate(ws.sent) if g.get("type") == "response"), -1)
     check("dòng đổi đường tới trước câu trả lời", 0 <= i_doi < i_rep)
+    # Owner, 05/11/2026: each run of the turn tells the model chip where it runs (route frame).
+    rf = _cua(ws, "route")
+    check("mỗi lần chạy có một khung route, lần chạy lại mang cờ rerouted",
+          [bool(g.get("rerouted")) for g in rf] == [False, True], str(rf))
+    check("khung route: cùng thẻ ChatGPT (chỉ đổi tài khoản) nên không phải dự phòng",
+          all(g.get("provider") == "openai-oauth" and g.get("fallback") is False for g in rf), str(rf))
+    i_rf2 = [i for i, g in enumerate(ws.sent) if g.get("type") == "route"][-1] if rf else -1
+    check("khung route của lần chạy lại tới sau dòng đổi đường", i_doi < i_rf2 < i_rep)
 
     # ---- 2. viết dở rồi hết lượt: giữ câu dở, thẻ Chạy lại, không tự chạy ----
     ws, store, chay = _chay_mot_luot(mp, tmp, [{"type": "text", "content": "Doanh thu tuần này đạt "},
@@ -244,8 +253,9 @@ def main_test(mp, tmp):
           dt.index("_chat_next_route(") < dt.index("_persist_limit_notice(store, conv_sid"))
     check("lượt không đổi đường thì nhả các khung đã giữ", "await ws.flush()" in dt)
     tg = src[src.index("async def _tg_answer(text"):src.index("async def _tg_answer_engine(")]
-    check("Telegram: bot chuyên trách không đổi đường, đã gọi công cụ cũng không",
-          "not bot and not _hop_acted[0]" in tg)
+    # 2026-11-12: the loop also hops on a lost sign-in (tests/python/test_signin_loss_route.py), where a bot hops too.
+    check("Telegram: bot chuyên trách không đổi đường khi hết lượt, đã gọi công cụ thì không ai đổi đường",
+          "if not bot and _tg_quota_out(" in tg and "not _hop_acted[0] and len(_tried) < REROUTE_MAX_HOPS" in tg)
 
 
 def test_chat_doi_duong(monkeypatch, tmp_path):

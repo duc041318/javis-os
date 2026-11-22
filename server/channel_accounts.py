@@ -24,6 +24,7 @@ bot ghi cùng khoá về một cuộc). Không ghi gì xuống kho.
 from __future__ import annotations
 
 import json
+import kept
 import os
 import threading
 import time
@@ -47,16 +48,34 @@ def _now() -> float:
     return time.time()
 
 
+def _read_text():
+    """The store file as text, None when there is none. Any other read error goes to `_load`."""
+    try:
+        return STORE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+# 2026-11-13: every lookup (each incoming bot message, each bot list) read and parsed this file again, on the event
+# loop for most callers; GET /health/loop on the owner's VPS named this module among the five that froze the server.
+# The event loop now gets the text from memory (kept.py). Only this module writes the file, and `_save` drops the
+# kept text, so a change is seen by the very next lookup. The text is parsed again per call on purpose: callers
+# edit the dict they get.
+_TEXT = kept.Value(lambda: _read_text(), key=lambda: str(STORE_PATH), name="channel_accounts.json")
+
+
 def _load() -> dict:
     try:
-        d = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {"version": 1, "accounts": []}
+        text = _TEXT.get()
+        if text is None:
+            return {"version": 1, "accounts": []}
+        d = json.loads(text)
     except Exception:
         try:
             STORE_PATH.rename(STORE_PATH.with_suffix(".json.hong"))
         except Exception:
             pass
+        _TEXT.drop()
         return {"version": 1, "accounts": []}
     if not isinstance(d, dict) or not isinstance(d.get("accounts"), list):
         return {"version": 1, "accounts": []}
@@ -68,6 +87,7 @@ def _save(d: dict) -> None:
     tmp = STORE_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, STORE_PATH)
+    _TEXT.drop()
 
 
 def _clean_kenh(v: Any) -> str:
@@ -122,6 +142,25 @@ def list_accounts(channel: str = "", brain: str = "") -> List[dict]:
             if br and mine and mine != br and not brain_ident.same_brain(mine, br):
                 continue
             out.append(_public(a))
+    return out
+
+
+def keys_of_other_brains(brain: str) -> List[str]:
+    """Conversation account keys ("<channel>:<id>") of the bot accounts assigned to a brain OTHER than `brain` (#1243).
+
+    The Conversations list of a brain leaves these out. It is a deny list on purpose, the same rule as `list_accounts`:
+    an account with no brain, a Zalo personal connection (not in this store, it belongs to no brain) and the chats of an
+    account deleted since stay visible everywhere, so moving a Page to another brain never makes a chat disappear from
+    every screen. Empty `brain` = no filter."""
+    br = _clean_brain(brain)
+    if not br:
+        return []
+    out = []
+    with _lock:
+        for a in _load()["accounts"]:
+            mine = _clean_brain(a.get("brain"))
+            if mine and mine != br and not brain_ident.same_brain(mine, br):
+                out.append(f"{a.get('channel')}:{a.get('id')}")
     return out
 
 
@@ -278,6 +317,38 @@ def update_account(account_id: str, patch: dict) -> tuple[bool, str]:
             _save(d)
             return True, ""
     return False, LOI_KHONG_CO
+
+
+def ghi_ten_that(account_id: str, ten: str) -> bool:
+    """Ghi tên thật của tài khoản (tên Fanpage...) mà kênh vừa hỏi được lúc bot khởi động. Trả True nếu có đổi.
+
+    Lưu vào `meta.bot_name`. Nhãn chỉ bị thay khi nó còn là nhãn tự sinh (rỗng, trùng id, hay tên kênh),
+    không bao giờ đè nhãn người dùng tự đặt (tên viết tắt...). Chủ repo 19/11/2026: chip kênh trên thẻ bot
+    hiện Page ID dạng số thay vì tên Trang, vì Trang gắn bằng cách dán token chỉ lưu id.
+    """
+    ten = _clean_label(ten)
+    if not account_id or not ten:
+        return False
+    with _lock:
+        d = _load()
+        for a in d["accounts"]:
+            if a.get("id") != account_id:
+                continue
+            m = dict(a.get("meta") or {})
+            doi = False
+            if m.get("bot_name") != ten:
+                m["bot_name"] = ten
+                a["meta"] = m
+                doi = True
+            nhan = str(a.get("label") or "")
+            if nhan != ten and nhan in ("", str(a.get("external_id") or ""), channels.nhan(a.get("channel") or "")):
+                a["label"] = ten
+                doi = True
+            if doi:
+                a["updated_at"] = _now()
+                _save(d)
+            return doi
+    return False
 
 
 def delete_account(account_id: str) -> tuple[bool, str]:

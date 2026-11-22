@@ -31,6 +31,10 @@ Không cần Graph API Explorer, không cần chép Page ID hay token. Làm lầ
 
 Cùng một lần nối ở thẻ Facebook Messenger, Javis đăng được bài lên Trang: chữ, ảnh, album, video, sửa và xoá bài. Nhắn Javis "đăng bài này lên Fanpage" để đăng ngay, hoặc "8 giờ sáng mỗi ngày đăng một bài" để đặt lịch. Cần quyền `pages_manage_posts` (nút Đăng nhập Facebook tự xin; app phải thêm quyền này trước, xem [hướng dẫn từng bước](31-messenger-tung-buoc.md)). Trang nối trước bản 0.438.0 thì Đăng nhập Facebook lại một lần. Bảng kiểm tra có dòng **Đăng bài lên Trang** báo còn thiếu quyền hay không. Kho cài đặt đã gỡ thẻ Facebook Trang; máy đã cài thẻ đó vẫn dùng như cũ.
 
+## Số liệu bài viết (không bắt buộc)
+
+Muốn Javis đọc lượt tiếp cận, lượt lưu, lượt bấm của bài viết và của Trang thì tick **Đọc số liệu bài viết (lượt tiếp cận, lượt lưu)** trên form trước khi bấm Đăng nhập Facebook. Ô này xin thêm quyền `read_insights`; app Meta phải thêm quyền đó trước, nếu chưa thì Facebook từ chối cả lần đăng nhập, nên ô để trống sẵn. Trang đã nối thì bấm **Đổi token**, tick ô này và đăng nhập lại. Bảng kiểm tra có dòng **Đọc số liệu bài viết** báo token Trang đã có quyền chưa.
+
 ## Bình luận Fanpage (từ 0.434.0)
 
 Giống cách Pancake hiển thị: **mỗi bình luận gốc dưới bài viết là một hội thoại riêng** trong Hộp thư, các trả lời bên dưới bình luận đó gom chung vào hội thoại ấy. Tiêu đề hội thoại ghi vài chữ đầu của bài viết. Bạn gõ trả lời trong Hộp thư thì câu đó hiện **công khai ngay dưới bình luận gốc** trên Facebook. Ảnh gửi kèm được, file khác thì không (bình luận chỉ nhận ảnh).
@@ -50,10 +54,10 @@ Phần dễ sai nhất khi tự làm là token: dán token người dùng thay v
 1. Trên Meta, tạo app có trường hợp sử dụng Messenger và kết nối Trang (bước 1.1 đến 1.3 bên dưới, chưa cần bấm Generate).
 2. Mở [Graph API Explorer](https://developers.facebook.com/tools/explorer), chọn đúng app, thêm quyền `pages_show_list`, `pages_messaging`, `pages_manage_metadata`, `pages_read_engagement`, bấm **Generate Access Token** và tick đúng Trang. Chép chuỗi `EAA...`.
 3. Mở Javis bằng tên miền HTTPS, vào **Kết nối**, thẻ **Facebook Messenger**, bấm **Kết nối**, rồi bấm **Dán token thay vì đăng nhập**. Dán App ID, App secret, Page ID và token vừa chép, bấm **Kết nối và kiểm tra**.
-4. Javis đổi sang token Trang không hết hạn, khai webhook của app với `messages` và `messaging_postbacks`, gắn Trang vào app, lưu kênh rồi hiện bảng kiểm tra từng dòng xanh hoặc đỏ kèm cách sửa.
+4. Javis đổi sang token Trang không hết hạn, khai webhook của app với `messages`, `messaging_postbacks` và `message_echoes` (để bot thấy file nhân viên gửi từ hộp thư Trang), gắn Trang vào app, lưu kênh rồi hiện bảng kiểm tra từng dòng xanh hoặc đỏ kèm cách sửa.
 5. Vào **Chatbot**, **Bot** để tạo bot cho kênh vừa nối (mục 3).
 
-Mỗi Trang đã nối có nút **Kiểm tra**, **Sửa tự động** (khai lại webhook và gắn lại Trang) và **Đổi token**. Bộ não nào cũng gọi được tool `messenger_check` và `messenger_repair` khi bot im lặng. Xác minh doanh nghiệp và nộp duyệt `pages_messaging` (mục 4) vẫn làm trên trang Meta.
+Mỗi Trang đã nối có nút **Kiểm tra**, **Sửa tự động** (khai lại webhook và gắn lại Trang) và **Đổi token**. Bộ não nào cũng gọi được tool `messenger_check` và `messenger_repair` khi bot im lặng. Muốn Javis nhắn khách từ khung chat ("trả lời chị Lan là còn size M"), bộ não dùng `inbox_find` để tìm cuộc chat và `inbox_reply` để gửi, đi đúng Page hoặc Instagram của cuộc đó. Messenger chỉ nhận tin trong 24 giờ kể từ tin cuối của khách. Xác minh doanh nghiệp và nộp duyệt `pages_messaging` (mục 4) vẫn làm trên trang Meta.
 
 Cách làm tay bên dưới vẫn dùng được.
 
@@ -70,7 +74,7 @@ Cách làm tay bên dưới vẫn dùng được.
 > Đã nối Fanpage ở thẻ Facebook Messenger trang Kết nối thì **bỏ qua mục này**: Trang đó đã có sẵn trong danh sách kênh, sang thẳng mục 3. Thẻ đó cũng hiện Địa chỉ webhook và Mã xác minh nếu bạn cần dán tay.
 
 1. Mở Javis **bằng tên miền HTTPS** (không phải localhost hay IP), vào trang **Chatbot**, tab **Bot**, bấm **Thêm kênh**, chọn **Messenger**.
-2. Form hiện **Địa chỉ webhook** và **Mã xác minh**. Quay lại app Meta, mục **Configure webhooks** của Messenger: dán hai thứ này vào Callback URL và Verify token, bấm **Verify and save**. Tick hai trường **messages** và **messaging_postbacks**.
+2. Form hiện **Địa chỉ webhook** và **Mã xác minh**. Quay lại app Meta, mục **Configure webhooks** của Messenger: dán hai thứ này vào Callback URL và Verify token, bấm **Verify and save**. Tick ba trường **messages**, **messaging_postbacks** và **message_echoes**.
 3. Về Javis, dán vào ô token ba thứ cách nhau dấu cách: `Page ID`, `Page access token`, `App secret`. Bấm **Kiểm tra** (Javis hỏi Meta tên Page), rồi **Lưu**.
 
 ## 3. Gắn bot

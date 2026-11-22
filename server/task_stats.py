@@ -31,7 +31,7 @@ import work_log
 
 MINUTES = {"kanban": 20, "reminder": 10, "notify": 2, "loop": 5, "watch": 3}
 KINDS = tuple(MINUTES)
-OWNER_KINDS = ("needs_input", "capability")
+OWNER_KINDS = ("needs_input", "capability", "acceptance_failed")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _LOOP_HEAD = re.compile(r"^## \[(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})\] (.+?) · loop", re.M)
 MAX_DAYS = 400
@@ -113,25 +113,26 @@ def loop_events(brain_root: str, since: float, until: float, tz) -> list:
     folder = Path(brain_root) / "Javis" / "loop-log"
     if not folder.is_dir():
         return out
-    d = d0
-    while d <= d1:
-        p = folder / f"{d.isoformat()}.md"
-        if p.exists():
-            try:
-                text = p.read_text(encoding="utf-8")
-            except Exception:
-                text = ""
-            heads = list(_LOOP_HEAD.finditer(text))
-            for i, m in enumerate(heads):
-                body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
-                body = body.split("\n", 1)[1] if "\n" in body else ""
-                dt = datetime(*map(int, m.group(1).split("-")), int(m.group(2)), int(m.group(3)), tzinfo=tz)
-                ts = dt.timestamp()
-                if since <= ts < until:
-                    failed = body.strip().startswith("Lỗi:") or "auto-pause" in body
-                    out.append({"ts": ts, "kind": "loop", "status": "fail" if failed else "ok", "seconds": 0,
-                                "agent": "", "agent_name": "", "title": m.group(4).strip(), "ref": m.group(4).strip()})
-        d += timedelta(days=1)
+    # 0.444.4: walk the log files that exist, not every calendar day. saved_total asks from 1970, which was about
+    # 20,700 exists() calls per Tasks page refresh.
+    lo, hi = d0.isoformat(), d1.isoformat()
+    for p in sorted(folder.glob("????-??-??.md")):
+        if not (lo <= p.stem <= hi):
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            text = ""
+        heads = list(_LOOP_HEAD.finditer(text))
+        for i, m in enumerate(heads):
+            body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+            body = body.split("\n", 1)[1] if "\n" in body else ""
+            dt = datetime(*map(int, m.group(1).split("-")), int(m.group(2)), int(m.group(3)), tzinfo=tz)
+            ts = dt.timestamp()
+            if since <= ts < until:
+                failed = body.strip().startswith("Lỗi:") or "auto-pause" in body
+                out.append({"ts": ts, "kind": "loop", "status": "fail" if failed else "ok", "seconds": 0,
+                            "agent": "", "agent_name": "", "title": m.group(4).strip(), "ref": m.group(4).strip()})
     return out
 
 
@@ -376,7 +377,7 @@ class TaskStats:
                            "done": done, "sched": sched, "cur": st["cur"], "frozen": st["frozen"]})
         projects = []
         for p in store.get("projects", []):
-            ts_ = [x for x in store.get("tasks", []) if x.get("project") == p.get("id") and not x.get("repeat")
+            ts_ = [x for x in store.get("tasks", []) if p.get("id") in my_tasks_mod.task_tags(x) and not x.get("repeat")
                    and x.get("kind") != "appt" and x.get("status") != "cancelled"]
             if ts_:
                 projects.append({"id": p["id"], "name": p.get("name") or "", "color": p.get("color") or "",
@@ -431,8 +432,9 @@ class TaskStats:
     def _make_router(self) -> APIRouter:
         router = APIRouter()
 
+        # 0.444.4: plain `def` (worker thread): compute() and saved_total() read logs and SQLite synchronously.
         @router.get("/tasks/stats")
-        async def tasks_stats(brain: str = Query("brain"), from_: str = Query("", alias="from"), to: str = Query("")):
+        def tasks_stats(brain: str = Query("brain"), from_: str = Query("", alias="from"), to: str = Query("")):
             tz = self._tz()
             today = datetime.now(tz).date()
             d_to = to if _DATE.match(to or "") else today.isoformat()

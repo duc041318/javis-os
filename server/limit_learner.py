@@ -290,6 +290,10 @@ _SUB_PATTERNS: tuple[tuple[str, str, str, re.Pattern], ...] = (
      re.compile(r"(weekly|per\s+week)\s+limit\s+reached|reached\s+your\s+weekly\s+limit", re.I)),
     ("claude_5h", "claude-code", "5 giờ",
      re.compile(r"\b5[\s-]?hour\s+limit\s+reached", re.I)),
+    # "You've hit your 5-hour limit · resets 5:20pm (UTC)" names the window but not the
+    # provider, so the engine comes from the caller's engine_hint (PR #961, @hwangrin).
+    ("sub_5h_hit", "", "5 giờ",
+     re.compile(r"you'?ve\s+(?:hit|reached)\s+your\s+5[\s-]?hour\s+limit\b", re.I)),
     ("claude_usage", "claude-code", "",
      re.compile(r"claude\s+(ai\s+)?(usage|api)?\s*limit\s+reached", re.I)),
     ("claude_reached", "claude-code", "",
@@ -313,6 +317,14 @@ _SUB_PATTERNS: tuple[tuple[str, str, str, re.Pattern], ...] = (
     # (field report 30/10/2026). No engine named in the text, so the caller's hint decides.
     ("sub_extra", "", "",
      re.compile(r"you'?re\s+out\s+of\s+extra\s+usage", re.I)),
+    # "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc_cli_limit_message ·
+    # your 5-hour limit resets 7am (UTC)": the plan window is spent and so is the extra-usage cap the owner set.
+    # Unmatched, a customer chatbot sent it to a customer as its reply (field report 08/11/2026). The link's
+    # `cc_cli_limit_message` tag marks any later wording of the same notice. "monthly spend" stays required: an ads
+    # report saying "you've reached your spending limit" is about an ad account, not about Javis's plan. No engine
+    # named, so the hint decides.
+    ("sub_spend", "", "",
+     re.compile(r"(?:hit|reached)\s+your\s+monthly\s+spend\s+limit|cc_cli_limit_message", re.I)),
     # Gemini CLI. Câu chữ lấy từ chính bundle @google/gemini-cli và từ lỗi backend Google trả
     # về ("Quota exceeded for quota metric...", RESOURCE_EXHAUSTED). Gói đăng nhập Google có
     # hạn mức theo NGÀY, nên nói được "hết lượt hôm nay" là đúng chuyện đang xảy ra.
@@ -332,6 +344,7 @@ _SUB_PATTERNS: tuple[tuple[str, str, str, re.Pattern], ...] = (
 # có NGAY một mốc thời gian đằng sau (số, midnight, noon, tomorrow).
 _RESET_TEXT_RE = re.compile(
     r"(resets?\s+(?:at|in|on)\s+[^.\n|]{1,60}"
+    r"|try\s+again\s+at\s+\d{1,2}(?::\d{2})?(?:\s*[ap]\.?m\b\.?)?(?:\s*\([^()\n]{1,40}\))?"
     r"|resets?\s+(?=\d|midnight|noon|tomorrow)[^.\n|]{1,60}"
     r"|try\s+again\s+in\s+[^.\n|]{1,40})", re.I)
 _RESET_IN_RE = re.compile(
@@ -346,10 +359,13 @@ _RESET_IN_RE = re.compile(
 # A bare hour with neither am/pm nor minutes ("resets 5 hours") is not a clock time.
 _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8,
            "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+# "try again at 8:42 AM" is the ChatGPT plan's form (Codex CLI and ChatGPT Live, owner's screenshot 06/11/2026).
+# A reset days away carries the year too: "try again at Nov 13th, 2026 3:32 PM". Without the optional year the
+# whole sentence matched nothing and the reset read as "unknown".
 _RESET_CLOCK_RE = re.compile(
-    r"\bresets?\s+(?:at\s+|on\s+)?"
+    r"\b(?:resets?\s+(?:at\s+|on\s+)?|try\s+again\s+(?:at|on)\s+)"
     r"(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})"
-    r"(?:st|nd|rd|th)?,?\s+(?:at\s+)?)?"
+    r"(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?,?\s+(?:at\s+)?)?"
     r"(?:(?P<word>midnight|noon)\b"
     r"|(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap])\.?m\b\.?"
     r"|(?P<h24>\d{1,2}):(?P<m24>\d{2})\b)"
@@ -381,7 +397,8 @@ def _reset_clock_epoch(text: str, now: float) -> float:
 
     The time is read in the tz in parentheses; without one (or with a name this machine cannot
     resolve), in this machine's local time, which is the clock the CLI itself printed in. A time
-    already past today means tomorrow; a past date means next year."""
+    already past today means tomorrow; a past date means next year, unless the text names the year itself
+    (then a date already past reads as "unknown")."""
     m = _RESET_CLOCK_RE.search(text or "")
     if not m:
         return 0.0
@@ -400,13 +417,19 @@ def _reset_clock_epoch(text: str, now: float) -> float:
         return 0.0
     tz = _zone(m.group("tz") or "")
     # Naive local datetimes when no tz: `.timestamp()` then applies the local DST rules.
-    base = datetime.fromtimestamp(now, tz) if tz else datetime.fromtimestamp(now)
+    base = datetime.fromtimestamp(now, tz) if tz else datetime.fromtimestamp(now)  # server clock on purpose
     cand = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
     try:
         if m.group("mon"):
-            cand = cand.replace(month=_MONTHS[m.group("mon")[:3].lower()], day=int(m.group("day")))
-            if cand <= base:
-                cand = cand.replace(year=cand.year + 1)
+            month, day = _MONTHS[m.group("mon")[:3].lower()], int(m.group("day"))
+            if m.group("year"):
+                cand = cand.replace(year=int(m.group("year")), month=month, day=day)
+                if cand <= base:
+                    return 0.0      # the stated date is already past: never roll a stated year forward
+            else:
+                cand = cand.replace(month=month, day=day)
+                if cand <= base:
+                    cand = cand.replace(year=cand.year + 1)
         elif cand <= base:
             cand = cand + timedelta(days=1)
     except ValueError:
@@ -424,6 +447,12 @@ def _reset_seconds(text: str) -> float:
     return float(hours * 3600 + minutes * 60)
 
 
+def _plain_quotes(text) -> str:
+    """`text` with the typographic apostrophe as a plain one, so "You’ve hit your limit" matches like "You've".
+    One character for one, so a span found here is a span in the original text too."""
+    return str(text or "").replace("’", "'")
+
+
 def subscription_span(text: str) -> tuple[int, int] | None:
     """Vị trí (đầu, cuối) của ĐÚNG câu báo hết lượt trong `text`. None = không có.
 
@@ -432,7 +461,7 @@ def subscription_span(text: str) -> tuple[int, int] | None:
     ở đâu. Dùng CHUNG bộ mẫu với `parse_subscription_limit` (không đẻ bộ nhận dạng thứ hai),
     nên thêm mẫu mới là cả hai hàm cùng biết.
     """
-    raw = str(text or "")
+    raw = _plain_quotes(text)
     if not raw.strip():
         return None
     for _name, _engine, _scope, pattern in _SUB_PATTERNS:
@@ -495,7 +524,7 @@ def parse_subscription_limit(text: str, engine_hint: str = "",
     engine_hint dùng khi câu chữ không tự nói nó là engine nào (vd Codex chỉ in "usage limit
     reached"). Không có hint thì để mẫu tự quyết.
     """
-    raw = str(text or "")
+    raw = _plain_quotes(text)
     if not raw.strip():
         return None
     ts = time.time() if now is None else float(now)

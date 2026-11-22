@@ -112,18 +112,21 @@ navCase({ javis_last_page: "not-a-page" }, "home");
 // A live socket has already delivered chat events while the page is in memory. Returning
 // from another app must leave the existing transcript DOM intact.
 {
-  let reloads = 0, dongBo = 0, pings = 0;
+  let reloads = 0, dongBo = 0, pings = 0, drops = 0, overdue = false;
   const ctx = {
     _hiddenAt: Date.now() - 30000,
     ws: { readyState: 1 },
     WebSocket: { OPEN: 1 },
     savedSessionId: "main-chat",
+    turns: {},
     connect() {},
     openStoredSession() { reloads++; },
     // 0.64.66: socket "còn sống" vẫn hỏi server tin cuối (rẻ); chỉ tải lại khi lệch.
     _dongBoNeuLech() { dongBo++; },
     // 0.388.0: a live-looking socket is asked right away whether it is really alive.
     _pingNow() { pings++; },
+    _unackedOverdue: () => overdue,
+    _dropDeadSocket() { drops++; },
   };
   vm.createContext(ctx);
   vm.runInContext(fn(appJs, "_resumeSauNgu", ""), ctx);
@@ -136,6 +139,28 @@ navCase({ javis_last_page: "not-a-page" }, "home");
   ctx._resumeSauNgu(false);
   assert.equal(reloads, 1, "missed events must still be recovered after disconnect");
   assert.equal(pings, 1, "a closed socket is reconnected, not pinged");
+  // Owner, 06/11/2026: a message sent before the swipe and never confirmed means the socket died under it. Back in
+  // the app, even after a short sleep, drop it at once so `hello` resends the message.
+  ctx.ws.readyState = 1;
+  ctx._hiddenAt = Date.now() - 3000;
+  overdue = true;
+  ctx._resumeSauNgu(false);
+  assert.equal(drops, 1, "an unconfirmed message must make the page drop the socket on return");
+  assert.equal(reloads, 1, "dropping the socket leaves the resync to hello");
+  // Customer report, 17/11/2026: locked the phone while Javis answered; back in the app the page still thought the
+  // turn was running, so the last-message check stood aside and the answer never came. Reconnect at once instead.
+  overdue = false;
+  ctx.turns["main-chat"] = { running: true };
+  ctx._hiddenAt = Date.now() - 60000;
+  const dongBoTruoc = dongBo;
+  ctx._resumeSauNgu(false);
+  assert.equal(drops, 2, "a turn this page still thinks is running must reconnect the socket on return");
+  assert.equal(dongBo, dongBoTruoc, "the check is left to hello, which knows the turns really running");
+  assert.equal(reloads, 1, "the transcript is not rebuilt before hello");
+  // A short app switch still leaves everything alone.
+  ctx._hiddenAt = Date.now() - 3000;
+  ctx._resumeSauNgu(false);
+  assert.equal(drops, 2, "a few seconds away must not reconnect");
 }
 
 console.log("OK - khoi phuc trang dang lam va phien tro ly");

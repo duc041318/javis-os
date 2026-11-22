@@ -40,7 +40,10 @@ Object.defineProperty(globalThis, "navigator", {
 });
 global.window = { SpeechRecognition: DeafSR };
 global.MediaRecorder = MuteRecorder;
-global.fetch = (url) => String(url).indexOf("/voice/ear") !== -1
+// /stt/fix (the rewrite at the end, 2026-11-06) gives the words back as they were: this file is about stop and X.
+global.fetch = (url, init) => String(url).indexOf("/stt/fix") !== -1
+  ? Promise.resolve({ json: () => Promise.resolve({ ok: true, text: JSON.parse(init.body).text }) })
+  : String(url).indexOf("/voice/ear") !== -1
   ? Promise.resolve({ json: () => Promise.resolve({ kind: ear }) })
   : (sttHangs ? new Promise(() => {}) : Promise.resolve({ json: () => Promise.resolve({ ok: true, text: "chữ Groq" }) }));
 function fresh() {
@@ -57,7 +60,9 @@ function fresh() {
   d.start(); await tick(); await tick();
   runs[0].say("xin chào");
   d.stop(); await tick();
-  check("Web Speech: right after stop the run still waits for the browser", states[states.length - 1] === "listening");
+  // 2026-11-13: the bar no longer keeps looking like a recording while the browser closes the run.
+  check("Web Speech: right after stop the bar shows transcribing, while the run still waits for the browser",
+    states[states.length - 1] === "transcribing" && runs[0].stopped === true && !runs[0].aborted);
   await wait(1700);
   check("Web Speech: with no onend the run ends by itself, idle, the words kept",
     states[states.length - 1] === "idle" && texts[texts.length - 1] === "xin chào" && runs[0].aborted === true);

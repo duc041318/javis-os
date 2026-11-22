@@ -54,6 +54,18 @@ self.addEventListener("fetch", (event) => {
   })());
 });
 
+// Which chat a tab shows (push.js answers). null = no answer within 600 ms.
+function askSession(client) {
+  return new Promise((resolve) => {
+    let done = false;
+    const ch = new MessageChannel();
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    ch.port1.onmessage = (ev) => finish(String((ev.data && ev.data.session_id) || ""));
+    setTimeout(() => finish(null), 600);
+    try { client.postMessage({ type: "javis-which-session" }, [ch.port2]); } catch (e) { finish(null); }
+  });
+}
+
 self.addEventListener("push", (event) => {
   let d = {};
   try { d = event.data ? event.data.json() : {}; } catch (e) { d = { body: (event.data && event.data.text()) || "" }; }
@@ -68,7 +80,22 @@ self.addEventListener("push", (event) => {
     data: { url: d.url || "/" },
     renotify: true,
   };
-  event.waitUntil(self.registration.showNotification(title, opts));
+  event.waitUntil((async () => {
+    // quiet_if_visible: the server sends it for something the owner may be watching already (a long chat turn that
+    // just ended). A device where Javis is open and in front of them needs no notification: the answer is on screen.
+    if (d.quiet_if_visible) {
+      const list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      const front = list.filter((c) => c.visibilityState === "visible" && c.focused);
+      if (front.length) {
+        // session_id (2026-11-17): only a tab showing THAT chat counts as watching; another chat open on screen still
+        // gets the notice. A tab that does not answer (an older page) keeps the old rule: in front = watching.
+        if (!d.session_id) return;
+        const shown = await Promise.all(front.map(askSession));
+        if (shown.some((sid) => sid === null || sid === d.session_id)) return;
+      }
+    }
+    await self.registration.showNotification(title, opts);
+  })());
 });
 
 self.addEventListener("notificationclick", (event) => {

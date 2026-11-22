@@ -47,15 +47,18 @@ check("and which variable points at the binary", 'item["cli_env"] = "JAVIS_CLAUD
 # ---- 2. The card ----
 js = (ROOT / "dashboard" / "console.js").read_text(encoding="utf-8")
 start = js.index("async function refreshClaudeCard(")
-card = js[start:js.index("async function startClaudeLogin(", start)]
+card = js[start:js.index("// ---- Long-lived Claude token", start)]
+# 2026-11-22: the buttons and the message line of every signed-out or connected state come from the one connect gate.
+box = js[js.index("function claudeTokenBox("):js.index("function bindClaudeToken(")]
 missing = card[card.index("if (d.cli_missing) {"):card.index("// KHÔNG hỏi được")]
 check("missing CLI has its own state", "st_no_cli" in missing)
 check("and that state offers no Sign in button", "cliLogin" not in missing and "cliRecheck" in missing)
 check("a check that disagrees with the drawn card redraws the tab once",
       "el._cliRedrawn" in card and "renderModelsCloudTab(el)" in card)
 check("messages are a full-width line, not a span inside the button row",
-      '<span id="cliMsg"' not in card and card.count('<div id="cliMsg" class="prov-msg">') == 2)
-check("buttons sit in their own row", card.count('<div class="prov-action">') >= 4)
+      '<span id="cliMsg"' not in card and '<span id="cliTokMsg"' not in box
+      and box.count('<div id="cliTokMsg" class="prov-msg">') == 3)
+check("buttons sit in their own row", (card + box).count('<div class="prov-action">') >= 4)
 check("the status line no longer prints the raw CLI error", '"○ " + esc(d.error)' not in card)
 check("the update row hides when there is no CLI",
       'box.style.display = d.cli_missing ? "none" : ""' in card)
@@ -66,8 +69,9 @@ check("install box no longer claims 'sign-in is done' on the Claude card",
       "cli_missing2" not in warn and 'on && p.kind === "oauth"' in warn)
 check("the PATH and Windows detail is folded away", "<details" in warn and "models.cliw_help" in warn)
 check("the Grok card shows one install hint, not two", 'cliWarn("grok")' not in js)
-check("the shield is not green on a card whose CLI is missing",
-      '${p.cli_found === false ? "" : "on"}' in js)
+# Owner 05/11/2026 (approved design): the shield became the provider's logo with a state dot; the dot stays grey.
+check("the state dot is not green on a card whose CLI is missing",
+      '${logoTile(p, p.cli_found !== false)}' in js)
 
 # ---- 3. CSS ----
 css = (ROOT / "dashboard" / "console.css").read_text(encoding="utf-8")

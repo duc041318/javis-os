@@ -26,8 +26,8 @@ from typing import Optional
 import httpx
 
 import localefmt
-from messenger_bot import (FEED_FIELD, GRAPH, SUBSCRIBED_FIELDS, _explain_error, appsecret_proof, subscribe_page,
-                           whoami)
+from messenger_bot import (ECHO_FIELD, FEED_FIELD, REFERRAL_FIELD, GRAPH, IG_OBJECT, IG_WEBHOOK_FIELDS, SUBSCRIBED_FIELDS, _explain_error,
+                           appsecret_proof, subscribe_page, whoami)
 
 WEBHOOK_PATH = "/messenger/webhook"
 # What the bot needs at run time. `pages_show_list` is only needed while deriving the Page token,
@@ -38,6 +38,10 @@ WEBHOOK_FIELDS = tuple(SUBSCRIBED_FIELDS.split(","))
 COMMENT_SCOPES = ("pages_read_user_content", "pages_manage_engagement")
 # Posting through the Facebook Pages tools on this same connection (0.438.0). Optional, a warning when missing.
 POST_SCOPES = ("pages_manage_posts",)
+# Instagram through the same Page (0.447.0): the linked account, its direct messages and its comments.
+IG_SCOPES = ("instagram_basic", "instagram_manage_messages", "instagram_manage_comments")
+# Post and Page insights (reach, saves, clicks; issue 1439), asked only when the owner ticks it on the login.
+INSIGHTS_SCOPES = ("read_insights",)
 
 
 def _app_token(app_id: str, app_secret: str) -> str:
@@ -152,14 +156,20 @@ async def set_app_webhook(client, app_id: str, app_secret: str, callback_url: st
     """Register (or overwrite) the app's `page` webhook with the fields the bot needs. Meta calls
     `callback_url` with the verify token while this request is open, so Javis must be reachable
     at that address for it to succeed."""
-    params = {"object": "page", "callback_url": callback_url, "fields": SUBSCRIBED_FIELDS + "," + FEED_FIELD,
+    params = {"object": "page", "callback_url": callback_url,
+              "fields": SUBSCRIBED_FIELDS + "," + ECHO_FIELD + "," + REFERRAL_FIELD + "," + FEED_FIELD,
               "include_values": "true", "verify_token": verify_token,
               "access_token": _app_token(app_id, app_secret)}
     d = await _post(client, f"{app_id}/subscriptions", params)
     if not d.get("error") and d.get("success"):
         return {"ok": True, "feed": True}
-    # `feed` (comments) is optional: never lose the message webhook over it.
-    d = await _post(client, f"{app_id}/subscriptions", {**params, "fields": SUBSCRIBED_FIELDS})
+    # `feed` (comments) and `messaging_referrals` (ad clicks) are optional: never lose the message webhook over them.
+    d = await _post(client, f"{app_id}/subscriptions",
+                    {**params, "fields": SUBSCRIBED_FIELDS + "," + ECHO_FIELD + "," + REFERRAL_FIELD})
+    if d.get("error") or not d.get("success"):
+        d = await _post(client, f"{app_id}/subscriptions", {**params, "fields": SUBSCRIBED_FIELDS + "," + ECHO_FIELD})
+    if d.get("error") or not d.get("success"):
+        d = await _post(client, f"{app_id}/subscriptions", {**params, "fields": SUBSCRIBED_FIELDS})
     if d.get("error") or not d.get("success"):
         return {"ok": False, "error": _err(d, "webhook setup failed")}
     return {"ok": True, "feed": False}
@@ -175,6 +185,60 @@ async def page_subscription(client, page_id: str, page_token: str, app_id: str) 
     return {"ok": True, "found": False, "fields": []}
 
 
+async def instagram_account(client, page_id: str, page_token: str) -> dict:
+    """The Instagram professional account linked to a Page (0.447.0). {"ok", "id", "username"}; "id" is empty when
+    the Page has none linked."""
+    d = await _get(client, str(page_id), {"fields": "instagram_business_account{id,username}",
+                                          "access_token": page_token})
+    if d.get("error"):
+        return {"ok": False, "id": "", "username": "", "error": _err(d, "instagram lookup failed")}
+    ig = d.get("instagram_business_account") or {}
+    return {"ok": True, "id": str(ig.get("id") or ""), "username": str(ig.get("username") or "")}
+
+
+async def instagram_webhook(client, app_id: str, app_secret: str) -> dict:
+    """The app's `instagram` subscription: {"ok", "found", "callback_url", "active", "fields"}."""
+    d = await _get(client, f"{app_id}/subscriptions", {"access_token": _app_token(app_id, app_secret)})
+    if d.get("error"):
+        return {"ok": False, "error": _err(d, "subscriptions read failed")}
+    for s in d.get("data") or []:
+        if s.get("object") == IG_OBJECT:
+            fields = [str(f.get("name") if isinstance(f, dict) else f) for f in (s.get("fields") or [])]
+            return {"ok": True, "found": True, "callback_url": str(s.get("callback_url") or ""),
+                    "active": bool(s.get("active")), "fields": fields}
+    return {"ok": True, "found": False, "callback_url": "", "active": False, "fields": []}
+
+
+async def set_instagram_webhook(client, app_id: str, app_secret: str, callback_url: str, verify_token: str) -> dict:
+    """Register the app's `instagram` webhook (messages and comments) on the same address as the Page one."""
+    d = await _post(client, f"{app_id}/subscriptions", {
+        "object": IG_OBJECT, "callback_url": callback_url, "fields": IG_WEBHOOK_FIELDS, "include_values": "true",
+        "verify_token": verify_token, "access_token": _app_token(app_id, app_secret)})
+    if d.get("error") or not d.get("success"):
+        return {"ok": False, "error": _err(d, "instagram webhook setup failed")}
+    return {"ok": True}
+
+
+def instagram_item(ig: dict, scopes, wh: dict) -> dict:
+    """Warning row for Instagram (0.447.0): linked account, permissions, webhook. Never red: the Page works without."""
+    lack = [x for x in IG_SCOPES if x not in (scopes or [])]
+    if not ig.get("id"):
+        return _item("instagram", None, ("Instagram của Trang", "The Page's Instagram"),
+                     ig.get("error", "") or localefmt.chu("chưa gắn", "none linked"),
+                     ("Gắn tài khoản Instagram chuyên nghiệp vào Trang (Cài đặt Trang, Tài khoản liên kết), rồi đăng "
+                      "nhập Facebook lại ở thẻ Kết nối Meta và tick Instagram.",
+                      "Link an Instagram professional account to the Page (Page settings, Linked accounts), then log in "
+                      "with Facebook again on the Meta card and tick Instagram."))
+    if not (wh or {}).get("found") or not (wh or {}).get("active"):
+        lack.append("webhook instagram")
+    return _item("instagram", True if not lack else None, ("Nhận tin và bình luận Instagram",
+                                                           "Receives Instagram messages and comments"),
+                 ("@" + ig["username"] if ig.get("username") else ig["id"]) + (" · " + ", ".join(lack) if lack else ""),
+                 ("Đăng nhập Facebook lại ở thẻ Kết nối Meta, tick Instagram, cấp đủ quyền rồi bấm Sửa tự động.",
+                  "Log in with Facebook again on the Meta card, tick Instagram, grant every permission, then click Repair."),
+                 auto=True)
+
+
 def _item(cid: str, ok, label: tuple, detail: str = "", fix: tuple = ("", ""), auto: bool = False) -> dict:
     """One row of the checklist. `ok` is True, False, or None for a warning that does not stop
     the bot. `auto` marks problems the Repair button can fix by itself."""
@@ -187,6 +251,17 @@ def _date(ts: int) -> str:
         return time.strftime("%Y-%m-%d", time.localtime(int(ts)))
     except Exception:
         return ""
+
+
+def echoes_item(app_fields) -> dict:
+    """A warning, never a stop: without `message_echoes` the bot still answers, it only never sees what a staff member
+    sends from the Page inbox (a quote, a PDF), so it cannot answer questions about it (2026-11-18)."""
+    has = ECHO_FIELD in (app_fields or [])
+    return _item("webhook_echoes", True if has else None,
+                 ("Bot thấy tin nhân viên gửi từ Trang", "The bot sees what staff send from the Page"), ECHO_FIELD,
+                 ("Bấm Sửa tự động để Javis bật message_echoes, bot mới đọc được file nhân viên gửi cho khách.",
+                  "Click Repair so Javis turns on message_echoes and the bot can read the files staff send customers."),
+                 auto=True)
 
 
 def comments_item(scopes, page_fields) -> dict:
@@ -208,6 +283,15 @@ def posts_item(scopes) -> dict:
                  ", ".join(lack),
                  ("Đăng nhập Facebook lại ở thẻ Messenger và đồng ý quyền đăng bài.",
                   "Log in with Facebook again on the Messenger card and accept the posting permission."))
+
+
+def insights_item(scopes) -> dict:
+    """Warning row for reading post and Page insights. Never red: optional, ticked on the login when wanted."""
+    lack = [x for x in INSIGHTS_SCOPES if x not in (scopes or [])]
+    return _item("insights", True if not lack else None, ("Đọc số liệu bài viết", "Reads post insights"),
+                 ", ".join(lack),
+                 ("Đăng nhập Facebook lại ở thẻ Kết nối Meta và tick Đọc số liệu bài viết.",
+                  "Log in with Facebook again on the Meta card and tick Read post insights."))
 
 
 async def run_checks(client, page_id: str, page_token: str, app_secret: str, app_id: str = "",
@@ -269,6 +353,8 @@ async def run_checks(client, page_id: str, page_token: str, app_secret: str, app
                                ", ".join(lack) if lack else ", ".join(WEBHOOK_FIELDS),
                                ("Meta chưa gửi tin sang Javis. Bấm Sửa tự động.", "Meta does not forward messages yet. Click Repair."),
                                auto=True))
+            if wh.get("found") and not lack:
+                items.append(echoes_item(wh.get("fields", [])))
         if is_page:
             ps = await page_subscription(client, page_id, page_token, app_id)
             lack = [f for f in WEBHOOK_FIELDS if f not in ps.get("fields", [])]
@@ -278,6 +364,7 @@ async def run_checks(client, page_id: str, page_token: str, app_secret: str, app
                                ("Bấm Sửa tự động.", "Click Repair."), auto=True))
             items.append(comments_item(info["scopes"], ps.get("fields", []) if ps.get("ok") else []))
     items.append(posts_item(info["scopes"]))
+    items.append(insights_item(info["scopes"]))
     if bot_running is not None:
         items.append(_item("bot", None if not bot_running else True, ("Có bot đang trực", "A bot is answering"), "",
                            ("Vào Chatbot, Bot, tạo hoặc bật bot cho kênh này.",

@@ -6,6 +6,12 @@ Gom việc của MỘT trợ lý (theo `agent_key` bền, trong đúng một bra
 - **Chat riêng** (Kanban thường): việc xếp hàng từ cuộc chat riêng với trợ lý (`chat_id` là phiên `agent:<slug>` đã ghim
   đúng mã), và việc giao bằng nút Giao việc ở chính tab này (khoá idempotency `agent:<mã>:<slug>:...:<nonce>`).
 - **Auto** (mục tiêu Cộng hưởng, `resonance.sqlite3`): mục tiêu của trợ lý, cùng mục tiêu cũ trợ lý đang là người review.
+  Owner 16/11/2026: also every run the assistant started by itself (looking around, reviewing a reaction or itself,
+  weighing a message to the owner), read from the very ledger rows the "tự làm N lần hôm nay" number counts
+  (`agent_budget.runs`), so the number and the tab cannot disagree. One card per run, with what it ended in.
+- **Workflow** (`workflow_runs.sqlite3`, owner 08/11/2026): runs where the assistant did at least one step. The tab used
+  to stay empty while a workflow ran the assistant's step. Steps carry `agent_slug`/`agent_key` since then; older runs
+  hold the display name only and are not listed (a name is not a safe way to tell assistants apart).
 
 Mỗi việc rơi vào đúng một trong bốn ngăn: `running` (Đang làm), `waiting` (Đang chờ), `needs_you` (Cần bạn), `done`
 (Đã xong). Không có phần trăm giả: tiến độ là số bước thật của việc nhóm.
@@ -30,7 +36,7 @@ import time
 from typing import Any, Optional
 
 BUCKETS = ("running", "waiting", "needs_you", "done")
-SOURCES = ("team", "chat", "auto")
+SOURCES = ("team", "chat", "auto", "workflow")
 ROLES = ("coordinator", "worker", "helper", "verifier", "verifier_legacy")
 RESULT_CHARS = 280
 PAGE = 30
@@ -50,6 +56,10 @@ _TEAM_BUCKET = {"team_running": "running", "team_queued": "waiting", "team_block
 _KANBAN_BUCKET = {"running": "running", "triage": "waiting", "todo": "waiting", "ready": "waiting",
                   "review": "needs_you", "blocked": "needs_you", "done": "done", "cancelled": "done"}
 _ORDER = {b: i for i, b in enumerate(("needs_you", "running", "waiting", "done"))}
+_RUN_BUCKET = {"running": "running", "waiting": "needs_you", "done": "done", "error": "done"}
+# A run still "running" this long after it started was cut off (the server stopped mid-run, so nothing closed it): the
+# tab says so under Needs you instead of showing it In progress for ever. No workflow step runs anywhere near this long.
+STALE_RUN = 6 * 3600
 
 
 def _excerpt(text: Any, n: int = RESULT_CHARS) -> str:
@@ -364,6 +374,201 @@ def _auto_jobs(agent_key: str, goals, principal, window: int = GOAL_LIMIT, flags
     return out
 
 
+# A run the assistant started by itself (owner, 16/11/2026: the Auto block said "tự làm 1 lần" while this tab was
+# empty). Title by purpose of the ledger row; the dashboard reads the code in words.
+_RUN_TITLE = {"scan": "scan", "proactive": "scan", "review": "review", "reaction_review": "reaction_review",
+              "judge_batch": "judge"}
+_RUN_EVENTS = ("scan", "scan_error", "said", "propose", "enqueue", "self_review", "self_review_error",
+               "reaction_review", "reaction_review_error")
+_RUN_ERRORS = ("scan_error", "self_review_error", "reaction_review_error")
+DID_CHARS = 600
+
+
+def _run_events(store, agent_key: str, since: float) -> list:
+    """Pulse events of the assistant from `since` on, oldest first. A store that never ran a pulse has no such table."""
+    import json
+    import sqlite3
+    from contextlib import closing
+    marks = ",".join("?" * len(_RUN_EVENTS))
+    try:
+        with closing(store._conn()) as c:
+            rows = c.execute(f"SELECT context_ref, kind, reason, payload_json, created_at FROM agent_pulse_events "
+                             f"WHERE agent_key=? AND created_at>=? AND kind IN ({marks}) ORDER BY id",
+                             (agent_key, since, *_RUN_EVENTS)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload_json"] or "{}")
+        except ValueError:
+            payload = {}
+        out.append({"context_ref": r["context_ref"], "kind": r["kind"], "reason": r["reason"] or "",
+                    "payload": payload if isinstance(payload, dict) else {}, "at": float(r["created_at"] or 0)})
+    return out
+
+
+def _run_outcome(ev: Optional[dict], side: dict) -> tuple:
+    """(outcome, result text, failure reason) of one run from the event that closed it. `side`: the other events the
+    same run wrote (kind -> payload). No closing event: nothing is guessed."""
+    if ev is None:
+        return None, "", ""
+    kind, p = ev["kind"], ev["payload"]
+    if kind in _RUN_ERRORS:
+        return None, "", _excerpt(ev["reason"], 200)
+    if kind == "self_review":
+        return {"code": "reviewed", "n": int(p.get("applied") or 0)}, "", ""
+    if kind != "scan":
+        return None, "", ""
+    res = p.get("result") if isinstance(p.get("result"), dict) else {}
+    did = (side.get("said") or {}).get("did") or []
+    did_text = _excerpt("; ".join(str(x) for x in did if x), DID_CHARS) if isinstance(did, list) else ""
+    action = res.get("action")
+    if did_text:
+        # Work the assistant really did is what the owner wants on record, whatever else the run decided.
+        return {"code": "did"}, did_text, ""
+    if action == "say":
+        sent = res.get("message_id") is not None
+        return {"code": "said" if sent else "held"}, "", ""
+    if action == "propose":
+        return {"code": "proposed"}, _excerpt((side.get("propose") or {}).get("title"), 200), ""
+    if action == "enqueue":
+        return {"code": "enqueued"}, _excerpt((side.get("enqueue") or {}).get("title"), 200), ""
+    return {"code": "none"}, "", ""
+
+
+def _run_jobs(agent_key: str, slug: str, brain_keys: Any, goals, sessions, window: int = GOAL_LIMIT,
+              flags: Optional[dict] = None) -> list:
+    """One card per run the assistant started by itself, read from the ledger rows the daily number counts
+    (`agent_budget.runs`): looking around, reviewing a reaction, reviewing itself, weighing a message to the owner.
+    Still going: In progress. Ended: Done, with what it ended in (work done, a message, a proposal, nothing to do);
+    broken: Done, marked failed. `window` 0: only the runs still going (the badge on the assistant's card)."""
+    out = []
+    if goals is None or not agent_key or not hasattr(goals, "_conn"):
+        return out
+    import agent_budget
+    rows = agent_budget.runs(goals, agent_key, max(0, window) + 1)
+    finished = [r for r in rows if r["status"] not in ("reserved", "running")]
+    if len(finished) > window:
+        cut = set(r["id"] for r in finished[window:])
+        rows = [r for r in rows if r["id"] not in cut]
+        if flags is not None and window > 0:
+            flags["done_more"] = True
+    if not rows:
+        return out
+    events = _run_events(goals, agent_key, min(float(r["created_at"] or 0) for r in rows))
+    closing_ev, side = {}, {}
+    for ev in events:
+        cid = ev["payload"].get("call_id")
+        if cid is not None:
+            closing_ev[int(cid)] = ev
+        else:
+            # Events of one run share its clock reading and context (the host stamps them with the run's `now`).
+            side.setdefault((ev["context_ref"], ev["at"]), {})[ev["kind"]] = ev["payload"]
+    chat = None
+    for r in rows:
+        st, ctx = str(r["status"] or ""), str(r["context_ref"] or "")
+        live = st in ("reserved", "running")
+        ev = closing_ev.get(int(r["id"]))
+        outcome, result, why = _run_outcome(ev, side.get((ctx, float(r["created_at"] or 0)), {}) if ev else {})
+        failed = st in ("error", "interrupted")
+        opn = None
+        if ctx.startswith("team:"):
+            opn = {"kind": "team", "team_id": ctx[5:], "task_id": ""}
+        elif ctx.startswith("dm:"):
+            if chat is None:
+                chat = report_session(agent_key, slug, brain_keys, sessions, goals) or ""
+            opn = {"kind": "chat", "session_id": chat} if chat else None
+        out.append({
+            "id": f"run:{r['id']}", "source": "auto", "source_id": ctx, "source_label": "", "title": "",
+            "title_code": _RUN_TITLE.get(str(r["purpose"] or ""), "scan"), "status": st,
+            "bucket": "running" if live else "done", "roles": [], "kind": "auto_run", "link_token": "",
+            "progress": None, "my_steps": [], "outcome": None if (live or failed) else outcome,
+            "result": "" if (live or failed) else result, "reason": why if failed else "", "next": None,
+            "queue_pos": None, "cancelled": False, "failed": failed,
+            "updated_at": float(r["settled_at"] or r["created_at"] or 0), "open": opn,
+            # A run is over in minutes and has no cancel route; no fake button.
+            "cancel": None, "priority": None,
+        })
+    return out
+
+
+def _step_mine(step: dict, slug: str, agent_key: str) -> bool:
+    if step.get("agent_slug") != slug:
+        return False
+    # A step stamped with another key was run by an earlier assistant that had this slug.
+    return not (agent_key and step.get("agent_key") and step.get("agent_key") != agent_key)
+
+
+def _step_state(step: dict) -> str:
+    if step.get("error"):
+        return "error"
+    if step.get("output") or step.get("verified") is not None:
+        return "done"
+    return "running"
+
+
+def _workflow_jobs(agent_key: str, slug: str, root: str, runs, window: int = GOAL_LIMIT,
+                   flags: Optional[dict] = None, steps_of=None, now: Optional[float] = None) -> list:
+    """One card per workflow run the assistant took part in. Bucket from the run: running, waiting (for review: Needs
+    you), done, error (Done, marked failed). `steps_of(workflow_slug)`: the workflow's step count, for "2/4 steps"."""
+    out = []
+    if runs is None or not slug:
+        return out
+    rows = runs.runs_of_agent(root, slug, finished_limit=max(0, window) + 1)
+    finished = [r for r in rows if r.get("status") in ("done", "error")]
+    if len(finished) > window:
+        cut = set(r["id"] for r in finished[window:])
+        rows = [r for r in rows if r["id"] not in cut]
+        if flags is not None:
+            flags["done_more"] = True
+    for r in rows:
+        steps = r.get("steps") or []
+        mine = [s for s in steps if _step_mine(s, slug, agent_key)]
+        if not mine:
+            continue
+        st = str(r.get("status") or "")
+        bucket = _RUN_BUCKET.get(st, "waiting")
+        stale = st == "running" and ((now if now is not None else time.time())
+                                     - float(r.get("started_at") or 0)) > STALE_RUN
+        if stale:
+            bucket = "needs_you"
+        total = None
+        if steps_of is not None:
+            try:
+                total = steps_of(r.get("slug") or "")
+            except Exception:  # noqa: BLE001
+                total = None
+        done_n = sum(1 for s in steps if _step_state(s) == "done")
+        cur = [s for s in steps if _step_state(s) == "running"]
+        nxt = None
+        if stale:
+            nxt = {"code": "wf_stale"}
+        elif st == "running" and cur:
+            c = cur[-1]
+            nxt = {"code": "wf_mine" if _step_mine(c, slug, agent_key) else "wf_other", "n": int(c.get("i", 0)) + 1,
+                   "agent": "" if _step_mine(c, slug, agent_key) else str(c.get("agent") or "")}
+        elif st == "waiting":
+            nxt = {"code": "wf_review"}
+        last = mine[-1]
+        out.append({
+            "id": f"workflow:{r['id']}", "source": "workflow", "source_id": r.get("slug") or "",
+            "source_label": r.get("name") or r.get("slug") or "", "title": r.get("name") or r.get("slug") or "",
+            "status": st, "bucket": bucket, "roles": ["worker"], "kind": "workflow", "link_token": "",
+            "progress": {"done": done_n, "total": total or len(steps)} if (total or steps) else None,
+            "my_steps": [{"kind": "work", "i": int(s.get("i", 0)) + 1, "status": _step_state(s)} for s in mine],
+            "result": _excerpt(last.get("output")) if st in ("done", "waiting") and last.get("output") else "",
+            "reason": _excerpt(r.get("error") or last.get("error"), 200) if st == "error" else "",
+            "next": nxt, "queue_pos": None, "cancelled": False, "failed": st == "error",
+            "updated_at": float(r.get("finished_at") or r.get("started_at") or 0),
+            "open": {"kind": "workflow", "slug": r.get("slug") or "", "session_id": r.get("session_id") or "",
+                     "run_id": r["id"]},
+            # A run has no cancel route of its own (it stops from its chat); no fake button.
+            "cancel": None, "priority": None,
+        })
+    return out
+
+
 def _cursor(cursor: Any) -> int:
     try:
         return max(0, int(str(cursor or "0")))
@@ -374,7 +579,8 @@ def _cursor(cursor: Any) -> int:
 def collect(agent_key: str, slug: str, root: str, *, brain_keys: Any = None, teams=None, tasks=None, sessions=None,
             goals=None, principal=None, now: Optional[float] = None, source: str = "all", bucket: str = "",
             cursor: Any = None, limit: int = PAGE, history: bool = True, kanban_rows: Optional[list] = None,
-            resolve: bool = True, done_since: float = 0, marks: Optional[dict] = None) -> dict:
+            resolve: bool = True, done_since: float = 0, marks: Optional[dict] = None, runs=None,
+            steps_of=None) -> dict:
     """Một trang việc của một trợ lý.
 
     Trả {"jobs": trang, "counts": {ngăn: số} theo nguồn đang lọc, "source_counts": {nguồn: số}, "total", "next": cursor
@@ -398,7 +604,13 @@ def collect(agent_key: str, slug: str, root: str, *, brain_keys: Any = None, tea
                      ("chat", lambda: _kanban_jobs(agent_key, slug, root, brain_keys, tasks, sessions, goals,
                                                    history or bool(fresh), kanban_rows)),
                      ("auto", lambda: _auto_jobs(agent_key, goals, principal, max(window, GOAL_LIMIT if history
-                                                                                  else fresh), flags))):
+                                                                                  else fresh), flags)),
+                     # Finished self-runs are a record for the tab, not "a job just finished" for the avatar dot.
+                     ("auto", lambda: _run_jobs(agent_key, slug, brain_keys, goals, sessions,
+                                                max(window, GOAL_LIMIT) if history else 0, flags)),
+                     ("workflow", lambda: _workflow_jobs(agent_key, slug, root, runs,
+                                                         max(window, GOAL_LIMIT if history else fresh), flags,
+                                                         steps_of, now))):
         try:
             jobs += fn()
         except Exception as ex:  # noqa: BLE001
@@ -439,10 +651,14 @@ def collect(agent_key: str, slug: str, root: str, *, brain_keys: Any = None, tea
 
 
 def active_counts(agents: dict, root: str, *, brain_keys: Any = None, teams=None, tasks=None, sessions=None, goals=None,
-                  principal=None, now: Optional[float] = None) -> dict:
+                  principal=None, now: Optional[float] = None, marks: Optional[dict] = None, runs=None) -> dict:
     """{slug: {"running", "needs_you", "waiting", "done", "failed"}} cho huy hiệu và chấm trạng thái trên thẻ trợ lý;
     "done" và "failed" chỉ đếm việc xong (hay hỏng) trong DONE_FRESH giây gần nhất. Nhẹ: đọc Kanban một lần cho cả brain, mỗi nguồn chỉ vài việc xong mới nhất.
-    Trợ lý không có việc nào thì không có mặt. `agents`: {slug: agent_key hay ""}."""
+    Trợ lý không có việc nào thì không có mặt. `agents`: {slug: agent_key hay ""}.
+
+    `marks` (job_marks): the same owner marks the Jobs tab applies. Without them a finished job the owner pressed Done on
+    (archived) or deleted still lit the green "just finished" dot, or the red one when it failed, while the tab no
+    longer listed it under Done (owner, 08/11/2026: the tab and the card did not agree)."""
     since = (now if now is not None else time.time()) - DONE_FRESH
     rows = tasks.list_tasks(root, include_archived=False, limit=KANBAN_LIMIT) if tasks is not None else []
     live = [t for t in rows if t.get("status") not in ("done", "cancelled", "archived")
@@ -452,7 +668,7 @@ def active_counts(agents: dict, root: str, *, brain_keys: Any = None, teams=None
     for slug, key in agents.items():
         got = collect(key or "", slug, root, brain_keys=brain_keys, teams=teams if key else None, tasks=tasks,
                       sessions=sessions, goals=goals if key else None, principal=principal, history=False,
-                      kanban_rows=live, limit=1, resolve=False, done_since=since)
+                      kanban_rows=live, limit=1, resolve=False, done_since=since, marks=marks, runs=runs)
         c, failed = got["counts"], int(got.get("failed_recent") or 0)
         if c["running"] or c["needs_you"] or c["waiting"] or c["done"]:
             out[slug] = {"running": c["running"], "needs_you": c["needs_you"], "waiting": c["waiting"],
@@ -480,7 +696,8 @@ def verify_targets(agents: dict, exclude_slug: str, root: str, *, names: Optiona
                       sessions=sessions, goals=goals if key else None, principal=principal, kanban_rows=rows,
                       limit=per_agent, resolve=False)
         for j in got["jobs"]:
-            if j["id"] in seen or j["id"] in mine or j.get("kind") == "verify":
+            # A self-run is not a job another assistant can be asked to verify (resolve_link does not know it).
+            if j["id"] in seen or j["id"] in mine or j.get("kind") in ("verify", "auto_run"):
                 continue
             seen.add(j["id"])
             out.append({"id": j["id"], "title": j["title"], "slug": slug, "name": (names or {}).get(slug) or slug,

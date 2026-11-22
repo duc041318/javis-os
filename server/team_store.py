@@ -34,8 +34,8 @@ DEFAULT_CAPS = {
     "help_depth": 2,           # độ sâu nhờ hỗ trợ
     "no_progress": 2,          # lượt không tiến triển liên tiếp của một bước
     "mentions": 3,             # @ mỗi tin
-    "daily_turns": 100,        # lượt mỗi nhóm mỗi ngày
-    "running_jobs": 1,         # việc chạy cùng lúc mỗi nhóm
+    "daily_turns": None,       # lượt mỗi nhóm mỗi ngày: không giới hạn từ 17/11/2026 (xem FIXED_CAPS)
+    "running_jobs": None,      # việc chạy cùng lúc mỗi nhóm: không giới hạn từ 17/11/2026 (xem FIXED_CAPS)
     "busy_wait_s": 1800,       # chờ khoá bận trước khi báo chặn
     # T3 phần J (0.156.0, thiết kế mục 9): lượt phán xử theo lô mỗi nhóm mỗi ngày (tách khỏi daily_turns), số người tự lên
     # tiếng mỗi tin (`K`, 0 = tắt), chế độ phán xử khi Cộng hưởng của agent tắt (1 = lọc code + lô, 0 = chỉ lọc code).
@@ -45,6 +45,9 @@ DEFAULT_CAPS = {
     # 0.260.0 (chủ 20/10/2026): các người được @ trong một tin trả lời CÙNG LÚC (1) hay lần lượt theo thứ tự @ (0, người sau
     # đọc được câu của người trước, như trước 0.260.0).
     "reply_parallel": 1,
+    # 0.452.0 (owner, 04/11/2026: a team must run its own loop): jobs a member answering the owner in the chat may open
+    # per day, coordinated by the leader like any job (0 = off: the leader only proposes, the owner presses Create job).
+    "auto_jobs": 5,
 }
 # Trần chủ nhóm đổi được (POST /teams/{id}/caps). GOAL T1 mục 9 (bảng giới hạn): `running_jobs` và `no_progress` vẫn nằm
 # trong DEFAULT_CAPS để hiện và để đọc dòng cũ, nhưng do MÁY CHỦ cố định:
@@ -52,13 +55,23 @@ DEFAULT_CAPS = {
 #   số > 1 trước đây nhận được mà không bao giờ có tác dụng. Chọn thay đổi nhỏ và an toàn: bỏ khỏi trần chỉnh được, hiện là
 #   giới hạn kỹ thuật, thay vì mở song song trong một nhóm (đụng khoá bận theo agent, thứ tự hàng đợi, ngữ cảnh chung).
 # - no_progress: bộ chạy dừng ở hai kết quả GIỐNG HỆT liên tiếp (so sha), con số không được đọc ở đâu.
-OWNER_CAPS = ("task_turns", "task_steps", "help_depth", "daily_turns", "mentions", "busy_wait_s", "judge_daily",
-              "volunteer_k", "judge_off_batch", "reply_parallel")
+OWNER_CAPS = ("task_turns", "task_steps", "help_depth", "mentions", "busy_wait_s", "judge_daily",
+              "volunteer_k", "judge_off_batch", "reply_parallel", "auto_jobs")
 # Trần có lựa chọn "Không giới hạn" (lưu `None`, không thay bằng số lớn). Bộ chạy đọc `None` là không chặn.
-UNLIMITED_CAPS = ("task_turns", "task_steps", "help_depth", "daily_turns", "judge_daily")
+UNLIMITED_CAPS = ("task_turns", "task_steps", "help_depth", "judge_daily")
 # Giá trị lớn nhất của các ô không phải trần lượt (T3 J): K tối đa 5 người, chế độ phán xử là 0 hay 1.
-CAP_MAX = {"volunteer_k": 5, "judge_off_batch": 1, "reply_parallel": 1}
-FIXED_CAPS = {"running_jobs": 1, "no_progress": 2}
+CAP_MAX = {"volunteer_k": 5, "judge_off_batch": 1, "reply_parallel": 1, "auto_jobs": 50}
+# 2026-11-12 (a customer: two assistants with two different jobs ran one after the other): a team now runs up to three
+# jobs at once, each with a different assistant in charge (team_runner._next_job). It stays a SERVER limit, not one more
+# number for the owner to set: who may run together is decided by who the jobs belong to. JAVIS_TEAM_JOBS=1 gives the
+# old one-job-at-a-time team back.
+# 17/11/2026 (owner: "anh không muốn giới hạn team làm việc luôn"): no cap (None) by default; JAVIS_TEAM_JOBS sets one.
+# 17/11/2026 (owner, a team stopped with "Team đã hết số lần trả lời cho phép": "anh không muốn giới hạn như này"):
+# no daily reply count either. A number saved before (by the owner, by "Cho thêm lượt", or in a Full-authority grant)
+# no longer applies; the caps of one job (task_turns, task_steps) stay.
+FIXED_CAPS = {"running_jobs": None, "no_progress": 2, "daily_turns": None}
+# Caps a save may still name but that no longer exist as a choice (ignored by set_caps).
+RETIRED_CAPS = ("daily_turns",)
 TEAM_STATUS = ("active", "paused", "archived")
 STEP_KINDS = ("plan", "work", "help", "synthesize", "reply")
 # A step that waits for every step before it (a sequential plan), see `TeamStore.add_step(held=...)`.
@@ -393,6 +406,15 @@ class TeamStore:
             r = c.execute("SELECT * FROM teams WHERE team_id=?", (str(team_id or ""),)).fetchone()
             return self._team(r) if r else None
 
+    def by_session(self, session_id: str) -> Optional[dict]:
+        """The team whose chat is conversation `session_id` (0.449.0: GitHub news and fix rounds of a team chat)."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+        with closing(self._conn()) as c:
+            r = c.execute("SELECT * FROM teams WHERE session_id=? LIMIT 1", (sid,)).fetchone()
+            return self._team(r) if r else None
+
     def list_teams(self, brain_id: str, limit: int = 50, before: Optional[float] = None,
                    include_archived: bool = False) -> list:
         """Nhóm của brain, mới cập nhật trước. Trang đầu (`before` trống) mở bằng các nhóm đã ghim (ghim sau đứng trước);
@@ -505,6 +527,9 @@ class TeamStore:
         nhận thêm `None` hay {"unlimited": true} là "Không giới hạn" (GOAL T1 mục 9). Trần máy chủ cố định bị từ chối."""
         if caps is not None and not isinstance(caps, dict):
             raise TeamError("trần phải là một bảng tên trần và giá trị")
+        # 17/11/2026: the daily reply cap is gone (FIXED_CAPS). An older page or a saved preset may still send it: it is
+        # dropped, not an error, so the rest of the save goes through.
+        caps = {k: v for k, v in caps.items() if k not in RETIRED_CAPS} if isinstance(caps, dict) else caps
         bad = set(caps or {}) - set(DEFAULT_CAPS)
         if bad:
             raise TeamError(f"trần không có: {sorted(bad)}")
@@ -742,6 +767,22 @@ class TeamStore:
         with closing(self._conn()) as c:
             return [self._step(r) for r in c.execute("SELECT * FROM team_steps WHERE task_id=? ORDER BY seq",
                                                      (task_id,)).fetchall()]
+
+    def step_agents(self, task_ids: list) -> dict:
+        """{task_id: [agent_key, ...]} in step order, each member once: who worked on each of these jobs. One query
+        per 400 jobs, for lists that show many jobs without their steps (the team's archive)."""
+        ids = [str(i) for i in task_ids if i]
+        out: dict = {}
+        with closing(self._conn()) as c:
+            for i in range(0, len(ids), 400):
+                part = ids[i:i + 400]
+                rows = c.execute("SELECT task_id, agent_key FROM team_steps WHERE task_id IN (%s) ORDER BY task_id, seq"
+                                 % ",".join("?" * len(part)), part).fetchall()
+                for r in rows:
+                    seen = out.setdefault(r["task_id"], [])
+                    if r["agent_key"] and r["agent_key"] not in seen:
+                        seen.append(r["agent_key"])
+        return out
 
     def step(self, step_id: str) -> Optional[dict]:
         with closing(self._conn()) as c:

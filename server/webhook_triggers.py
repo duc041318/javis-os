@@ -69,7 +69,9 @@ WORKER_MAX = webhook_worker.WORKER_MAX
 SWEEP_S = webhook_worker.SWEEP_S
 HISTORY_KEEP = 20
 MAX_HOOKS = 100
-TEXT_MAX = 2000
+# The instruction a hook runs ("task" target). 5000 since 2026-11-21 (issue #1690): 2000 cut longer instructions
+# without a word. The dashboard stops typing at the same number (`WH_TEXT_MAX` in webhooks.js).
+TEXT_MAX = 5000
 VALID_TARGETS = ("workflow", "task")
 VALID_LEVELS = ("suggest", "auto", "full")
 NOTIFY_MODES = ("all", "errors_only", "daily_digest", "none")
@@ -171,7 +173,7 @@ def event_prompt(hook: dict, payload: str, received_at: float, fields: Optional[
         body = body[:PAYLOAD_PROMPT_CHARS] + (f"\n... (đã cắt: dữ liệu dài {len(payload)} ký tự, đây là "
                                               f"{PAYLOAD_PROMPT_CHARS} ký tự đầu; bản đầy đủ ở trang Sự kiện)")
     body = body.replace("<<<", "< < <").replace(">>>", "> > >")
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(received_at))
+    when = localefmt.format_ts(received_at, "%Y-%m-%d %H:%M")   # the owner's clock, not the server's UTC
     head = f"SỰ KIỆN WEBHOOK \"{hook.get('name') or hook.get('id')}\" vừa tới lúc {when}."
     if ids and ids.get("event"):
         head += f" Mã sự kiện {ids['event']}" + (f", mã giao {ids['delivery']}" if ids.get("delivery") else "") + "."

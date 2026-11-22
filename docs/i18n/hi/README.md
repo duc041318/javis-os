@@ -1,13 +1,15 @@
 <!-- translated-from: README.md sha256:2e10ad3d2a86 -->
 <div align="center">
 
-<img src="../../../dashboard/logo.svg" width="88" alt="Javis OS का लोगो">
+<a href="https://javisos.com"><img src="../../assets/social-preview.png" width="100%" alt="Javis OS: Your AI Workforce. Never miss the best AI."></a>
 
 # Javis OS
 
-### आपका self-hosted AI agent, जिसका ब्रेन बदला जा सकता है, और एक Second Brain जो हर दिन ज़्यादा समझदार होता जाता है।
+### आपकी AI टीम। सबसे अच्छा AI कभी न चूकें।
 
-इसे अपने laptop या किसी छोटे VPS पर चलाइए। इससे आवाज़ में बात कीजिए। Claude, ChatGPT, Grok, Gemini या 12 providers में से किसी को भी जोड़िए, provider बदलने पर भी हर tool वैसा ही बना रहता है, और जब आप सो रहे हों तब इसे background में काम करने दीजिए।
+Javis OS **Claude, ChatGPT, Gemini, Grok** और आपके चुने हुए models को आपकी अपनी मशीन या server पर 24/7 काम करने वाली टीम में बदल देता है। हर साथी की अपनी भूमिका होती है, सब एक ही memory और tools साझा करते हैं, और background में काम करते रहते हैं। बेहतर model आए तो बदल दीजिए, टीम ने जो कुछ सीखा वह सब बना रहता है।
+
+**🌐 वेबसाइट: [javisos.com](https://javisos.com)** · Open source · Self-hosted · 14 AI providers
 
 [![GitHub stars](https://img.shields.io/github/stars/blogminhquy/javis-os?style=flat&logo=github&label=stars)](https://github.com/blogminhquy/javis-os/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](../../../LICENSE)
@@ -117,7 +119,7 @@ Javis में model एक ऐसा पुर्ज़ा है जिसे
 | **काम** | जवाब देता है, फिर इंतज़ार करता है | **Background loops, reminders और AI से चलने वाली task queue** जो आपको नतीजे वापस भेजती हैं |
 | **इंटरफ़ेस** | एक chat box | Dashboard + knowledge graph + **hands-free आवाज़** + Telegram, Slack, WhatsApp, Zalo + एक CLI |
 | **आपका काम** | Vendor के servers पर, vendor के format में ही रह जाता है | **आपकी मशीन पर plain files**: history, memory, skills, agents और workflows किसी भी नए model के साथ चलते हैं |
-| **Deployment** | किसी और का cloud | **Self-hosted**: one-click [Hostinger](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN), Docker, या कोई भी VPS |
+| **Deployment** | किसी और का cloud | **Self-hosted**: one-click [Hostinger](https://www.hostinger.com?REFERRALCODE=JAVISOS), Docker, या कोई भी VPS |
 
 > 💡 **फ़लसफ़ा: क्षमता Javis में रहती है, model में नहीं।** हर ब्रेन को एक ही साझा connection hub (MCP Hub) के ज़रिए एक जैसा toolbox मिलता है। Claude से Gemini पर जाने में आपका कुछ नहीं जाता, सिवाय shell access के, जो सिर्फ़ CLI engines के पास होता है।
 
@@ -247,7 +249,7 @@ flowchart LR
 <details open>
 <summary><b>विकल्प 1: Hostinger Docker Manager (domain + HTTPS, एक click में)</b></summary>
 
-> 🛒 **अभी VPS नहीं है?** [Hostinger VPS यहाँ से लीजिए](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN)। इसमें Docker Manager पहले से है, इसलिए Javis एक click में install होता है। तैयार होने पर नीचे के steps पर लौट आइए।
+> 🛒 **अभी VPS नहीं है?** [Hostinger VPS यहाँ से लीजिए](https://www.hostinger.com?REFERRALCODE=JAVISOS)। इसमें Docker Manager पहले से है, इसलिए Javis एक click में install होता है। तैयार होने पर नीचे के steps पर लौट आइए।
 
 Hostinger VPS → **Docker Manager → Compose → URL** → Hostinger वाली file paste कीजिए और **Deploy** दबाइए:
 
@@ -275,7 +277,7 @@ Certificate के लिए 1-3 मिनट इंतज़ार कीजि
 <details>
 <summary><b>विकल्प 2: किसी भी VPS पर Docker (clone की ज़रूरत नहीं)</b></summary>
 
-> 🛒 **VPS चाहिए?** यह विकल्प भी [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=UTRBLOGMIDSN) पर चलता है।
+> 🛒 **VPS चाहिए?** यह विकल्प भी [Hostinger VPS](https://www.hostinger.com?REFERRALCODE=JAVISOS) पर चलता है।
 
 ```bash
 # Docker required (don't have it?  curl -fsSL https://get.docker.com | sh)
@@ -507,5 +509,6 @@ Javis OS मुफ़्त और open source है, और इसका code 
 
 <div align="center">
 <br>
+<b><a href="https://javisos.com">javisos.com</a></b><br>
 <b><a href="https://minhquy.vn">Minh Quý</a></b> ने वियतनाम में ☕ के साथ बनाया
 </div>

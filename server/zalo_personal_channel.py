@@ -40,14 +40,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
 import config as cfgmod
 import localefmt
 import conversations
+import zalo_push
 
 CONNECTOR_ID = "zalo"
 KENH = "zalo_personal"
@@ -104,6 +107,7 @@ def bat(conn_id: str, on: bool) -> dict:
         # Bật là bắt đầu từ BÂY GIỜ: bỏ cursor cũ để không kéo lại bộ đệm cũ của một lần bật trước.
         _TT.pop(cid, None)
         start()
+    wake()
     return {"ok": True, "id": cid, "theo_doi": bool(on)}
 
 
@@ -140,6 +144,8 @@ def tai_khoan() -> List[dict]:
             "theo_doi": bool(cfg.get(c["id"])),
             "lan_cuoi": tt.get("lan_cuoi") or 0, "loi": tt.get("loi") or "",
             "so_tin": int(tt.get("so_tin") or 0),
+            # True: javis-zalo tells Javis when a message arrives, so "last read" is not a heartbeat any more.
+            "push": push_active(c["id"]),
         })
     return out
 
@@ -324,6 +330,58 @@ def _loai_tin(msg: dict) -> str:
     return "other"
 
 
+# A link card (Zalo `chat.recommended`, what the Zalo app sends when someone types a link) is read as a text message:
+# its title, the page's description and the link. Field report 20/11/2026: it was filed as "other", which the bot never
+# answers, so a link posted in a group went unseen even when it tagged the bot, and the inbox kept only the page's
+# description ("Try out Artifacts created by Claude users"), never the link itself.
+#
+# Where the parts are (javis-zalo `normalizeMessage`): `text` is the page's description (or the title, or the link,
+# whichever comes first), `attachment.url` is the link and `attachment.description` is Zalo's `content.title`. An
+# older MCP may hand over the raw `content` object instead, in `content` or in `text`. A card that carries no http(s)
+# link (a shared contact uses the same message type) stays what it was.
+LINK_CARD_TYPES = ("chat.recommended", "chat.link")
+_HTTP_LINK = re.compile(r"https?://[^\s<>\"']+", re.I)
+
+
+def _http_link(*values: Any) -> str:
+    for v in values:
+        m = _HTTP_LINK.search(str(v or ""))
+        if m:
+            return m.group(0).rstrip(".,;:!?)]}")
+    return ""
+
+
+def link_card(msg: dict) -> Optional[dict]:
+    """`{"url", "title", "description"}` of a link card message, or None when `msg` is not one."""
+    if not isinstance(msg, dict):
+        return None
+    att = msg.get("attachment") if isinstance(msg.get("attachment"), dict) else {}
+    kind = str(_lay(msg, "type", "msgType", "message_type", mac_dinh="") or "").lower()
+    if kind not in LINK_CARD_TYPES and str(att.get("type") or "").lower() not in LINK_CARD_TYPES:
+        return None
+    raw_text = msg.get("text")
+    content = next((c for c in (msg.get("content"), raw_text) if isinstance(c, dict)), {})
+    if "user" in str(content.get("action") or "").lower():
+        return None         # a shared contact ("recommened.user"), not a page
+    plain = raw_text if isinstance(raw_text, str) else ""
+    url = _http_link(att.get("url"), content.get("href"), msg.get("url"), plain, content.get("title"))
+    if not url:
+        return None
+    title = str(att.get("description") or content.get("title") or "").strip()
+    description = str(content.get("description") or content.get("desc") or plain or "").strip()
+    return {"url": url, "title": title, "description": description}
+
+
+def link_card_text(card: dict) -> str:
+    """The card as the text the inbox and the bot read: title, description, link, one per line, none repeated."""
+    lines: List[str] = []
+    for part in (card.get("title"), card.get("description"), card.get("url")):
+        part = str(part or "").strip()
+        if part and part.lower() not in "\n".join(lines).lower():
+            lines.append(part)
+    return "\n".join(lines)
+
+
 def _link_anh(msg: dict) -> str:
     """Link of the photo in an image message (0.74.1), or "".
 
@@ -443,10 +501,13 @@ def chuan_hoa_tin(conn: dict, msg: dict, ten: Dict[str, dict]) -> Optional[dict]
     sender_name = str(_lay(msg, "senderName", "sender_name", "fromName", "dName", mac_dinh="") or "").strip()
     if not sender_name and not nhom:
         sender_name = str(th.get("name") or "")
-    loai = _loai_tin(msg)
+    card = link_card(msg)
+    loai = "text" if card else _loai_tin(msg)
     from zalo_attachments import normalize as normalize_attachment
     text = _lay(msg, "text", "content", "msg", "message", mac_dinh="")
-    if isinstance(text, dict):
+    if card:
+        text = link_card_text(card)
+    elif isinstance(text, dict):
         text = _lay(text, "text", "title", "description", "href", mac_dinh="")
     text = strip_mention_markup(str(text or ""))
     if loai != "text" and not text.strip():
@@ -486,6 +547,7 @@ def chuan_hoa_tin(conn: dict, msg: dict, ten: Dict[str, dict]) -> Optional[dict]
         "metadata": dict({k: msg.get(k) for k in ("replyTo", "mentions", "mediaUrl", "url", "fileName", "cliMsgId")
                           if msg.get(k) not in (None, "")},
                          **({"reaction": reaction} if reaction is not None else {}),
+                         **({"link_card": card} if card else {}),
                          **({"chua_ro_loai": True} if _chua_ro_loai(msg, ten) else {}),
                          **({"member_join": vao_nhom} if vao_nhom is not None else {}),
                          **({"join_request": xin_vao} if xin_vao is not None else {}),
@@ -507,8 +569,10 @@ def chuan_hoa_tin(conn: dict, msg: dict, ten: Dict[str, dict]) -> Optional[dict]
 # định 3 ở đầu file. Nút "Nhập tin cũ" là lựa chọn riêng của chủ, không chạy tự động.
 #
 # Ba rào:
-#   1. Chỉ nhập vào cuộc chat CHƯA có tin nào trong kho. Khung tin xếp theo id, nên tin cũ nhập sau tin mới sẽ hiện SAU tin mới.
-#      Cuộc chat đã có tin thì bỏ qua, nói rõ trong kết quả.
+#   1. Cuộc chat đã có tin thì chỉ nhập các tin CŨ HƠN tin đầu tiên của nó, và đặt chúng lên trên bằng `seq` (conversations.ORDER_KEY):
+#      id của chúng mới hơn nên xếp theo id thì chúng hiện dưới cùng. Tin nằm giữa các tin đã có là việc của phần bắt bù ở dưới.
+#      Trước 08/11/2026 cuộc chat đã có tin bị bỏ qua hẳn. Chủ báo "nhập lịch sử mà vẫn không nhập được": tài khoản đã bật Ghi hội
+#      thoại thì cuộc chat nào đang nói chuyện cũng đã có tin, nên lần nhập không thêm được gì.
 #   2. Không giao cho bot, không cộng số chưa đọc, không đụng đồng hồ "chủ vừa nhắn tay": đây là tin đã qua, ghi để xem lại.
 #   3. Có trần (`NHAP_TOI_DA` tin, `NHAP_NGAY` ngày) để một nick nhiều nhóm không làm kho phình. Nhóm vẫn chỉ giữ
 #      `conversations.GIU_TIN_NHOM` tin gần nhất như mọi lúc.
@@ -519,9 +583,10 @@ _DANG_NHAP: set = set()     # conn_id đang nhập: bấm hai lần liền khôn
 
 
 async def nhap_lich_su(conn_id: str, ngay: int = NHAP_NGAY) -> dict:
-    """Nhập tin cũ javis-zalo đã giữ (tối đa `ngay` ngày, `NHAP_TOI_DA` tin) vào Hộp thư, chỉ cho cuộc chat chưa có tin nào.
+    """Nhập tin cũ javis-zalo đã giữ (tối đa `ngay` ngày, `NHAP_TOI_DA` tin) vào Hộp thư. Cuộc chat đã có tin chỉ nhận các tin cũ
+    hơn tin đầu tiên của nó, xếp lên trên.
 
-    Trả {"ok", "so_tin", "so_cuoc_chat", "bo_qua", "het_tran"} hoặc {"ok": False, "loi"}."""
+    Trả {"ok", "so_tin", "so_cuoc_chat", "het_tran"} hoặc {"ok": False, "loi"}."""
     cid = str(conn_id or "")
     conn = ket_noi_theo_id(cid)
     if not conn:
@@ -557,7 +622,7 @@ async def nhap_lich_su(conn_id: str, ngay: int = NHAP_NGAY) -> dict:
             if not (isinstance(d, dict) and d.get("hasMore") and truoc and trang):
                 break
         if not tin:
-            return {"ok": True, "so_tin": 0, "so_cuoc_chat": 0, "bo_qua": 0, "het_tran": False}
+            return {"ok": True, "so_tin": 0, "so_cuoc_chat": 0, "het_tran": False}
         ten = await _nap_ten(conn, {})
         theo_chat: Dict[str, List[dict]] = {}
         for m in tin:
@@ -565,23 +630,234 @@ async def nhap_lich_su(conn_id: str, ngay: int = NHAP_NGAY) -> dict:
             if ev and ev.get("external_message_id"):
                 ev["metadata"] = dict(ev.get("metadata") or {}, lich_su=True)
                 theo_chat.setdefault(ev["external_chat_id"], []).append(ev)
-        so_tin = so_chat = bo_qua = 0
+        so_tin = so_chat = 0
         for chat, evs in theo_chat.items():
-            if conversations.co_tin(KENH, cid, chat):
-                bo_qua += 1
-                continue
             evs.sort(key=lambda e: float(e.get("created_at") or 0))
+            dau = conversations.first_order(KENH, cid, chat)
+            if dau is not None:
+                # Only what is older than the chat's first message, placed above it in time order: the oldest gets the lowest seq.
+                evs = [e for e in evs if float(e.get("created_at") or 0) < dau["at"]]
             ghi = 0
-            for ev in evs:
-                r = conversations.ghi_su_kien(ev, dem_chua_doc=False)
+            for i, ev in enumerate(evs):
+                if dau is None:
+                    r = conversations.ghi_su_kien(ev, dem_chua_doc=False)
+                else:
+                    r = conversations.ghi_su_kien(ev, dem_chua_doc=False, late=True, seq=dau["key"] - (len(evs) - i))
                 if r.get("ok") and not r.get("trung"):
                     ghi += 1
             if ghi:
                 so_tin += ghi
                 so_chat += 1
-        return {"ok": True, "so_tin": so_tin, "so_cuoc_chat": so_chat, "bo_qua": bo_qua, "het_tran": het_tran}
+        return {"ok": True, "so_tin": so_tin, "so_cuoc_chat": so_chat, "het_tran": het_tran}
     finally:
         _DANG_NHAP.discard(cid)
+
+
+# ============================================================
+# Catching up from the history (private chats)
+# ============================================================
+# Field report 08/11/2026 (owner): a private chat stopped in the inbox at 09:28 while the phone went on until 09:53,
+# messages both ways. `zalo_get_history` had every one of them, so they reached javis-zalo but never its live buffer
+# (or never left it): the read loop above only sees that buffer. javis-zalo files each message in its history first,
+# and also fills the history from Zalo's replay after each reconnect, while the live feed only gets the replayed
+# messages of an outage it noticed.
+#
+# Driven by a signal, not a schedule (owner, 08/11/2026: "only work where there is a signal, never on dead chats").
+# javis-zalo (>= 1.5.0) appends every message it files to `<HOME>/.zalo-agent-cli/history.jsonl`, one JSON line each,
+# and nothing else touches that file. So after each read the loop only asks the OS for the file's size: unchanged (an
+# idle day) costs one stat call and nothing more, no MCP call, no query. When it grew, the new lines are read and their
+# private-chat messages wait in `history_pending`; once old enough, only their ids are looked up in the inbox and the
+# missing ones written. A chat nobody writes in is never looked at.
+#
+# Rules:
+#   1. Private chats only. Groups keep only `conversations.GIU_TIN_NHOM` messages, so a trimmed one would come back.
+#   2. A new line waits RECONCILE_MIN_AGE seconds, and only a read that emptied the buffer releases it: a message still
+#      on its way through the read loop must arrive there, since that is where the bot gets it.
+#   3. A recovered message is never handed to the bot (it is late; the owner sees it unread in the inbox). The owner's
+#      own recovered message still counts as typing by hand, so the bot keeps yielding in that chat.
+#   4. The account's own message is skipped when the inbox already holds the same sentence from the bot or the owner
+#      around that time (written before Zalo gave it an id); that row gets the id instead.
+#   5. Stickers and short emoji stay out, as in the live feed (javis-zalo `ThreadFilter.shouldKeep`).
+#   6. A message from before this server started reading the account is only written when the inbox already holds an
+#      older message of that chat (a hole in a chat it follows), so turning an account on never pulls hours of old
+#      chats in through this door ("Import old messages" does that). Nothing older than RECONCILE_WINDOW is written.
+RECONCILE_WINDOW = 2 * 3600  # a filed message older than this is never written (an old replay, not a hole of now)
+RECONCILE_MIN_AGE = 90       # seconds a new line waits so the live read gets its message first
+RECONCILE_OWN_MATCH_S = 600  # rule 4 looks this far around the message's time
+HISTORY_FILE = (".zalo-agent-cli", "history.jsonl")
+HISTORY_READ_MAX = 4 * 1024 * 1024   # bytes read per turn at most (a big replay is read over several turns)
+HISTORY_TAIL = 512 * 1024            # bytes looked at after a start or a rewrite of the file
+HISTORY_PENDING_MAX = 5000
+_EMOJI_ONLY = re.compile(r"^[\s\U0001F000-\U0001FAFF☀-➿️‍]*$")
+
+
+def history_path(conn: dict) -> str:
+    """javis-zalo's history file for this connection (its session HOME, else this user's home)."""
+    import os
+    home = str(((conn or {}).get("env") or {}).get("HOME") or "") or os.path.expanduser("~")
+    return os.path.join(home, *HISTORY_FILE)
+
+
+def _is_dm(msg: dict, names: dict) -> bool:
+    kind = str(_lay(msg, "threadType", "thread_type", mac_dinh="") or "").strip().lower()
+    if kind:
+        return kind in ("dm", "0", "user", "private")
+    return str(((names or {}).get(_thread_cua(msg)) or {}).get("type") or "").lower() == "dm"
+
+
+def _live_feed_keeps(ev: dict) -> bool:
+    """Rule 5: the same noise the live feed drops."""
+    if ev.get("message_type") in ("sticker", "reaction"):
+        return False
+    text = str(ev.get("text") or "")
+    return not (text and len(text) < 3 and _EMOJI_ONLY.match(text))
+
+
+def _own_already_stored(conn_id: str, ev: dict) -> bool:
+    """Rule 4. True when the inbox already holds this sentence of the account around the message's time."""
+    echo = _chuan(ev.get("text"))
+    if not echo:
+        return False
+    ts = float(ev.get("created_at") or time.time())
+    for row in conversations.own_messages_between(KENH, conn_id, ev["external_chat_id"],
+                                                  ts - RECONCILE_OWN_MATCH_S, ts + RECONCILE_OWN_MATCH_S):
+        if str(row.get("external_message_id") or ""):
+            continue        # a message Zalo already named: another one, even with the same words ("ok" twice)
+        sent = _chuan(row.get("text"))
+        if sent and (echo == sent or sent.startswith(echo[:80]) or echo.startswith(sent[:80])):
+            conversations.set_message_id(int(row["id"]), str(ev.get("external_message_id") or ""))
+            return True
+    return False
+
+
+def _parse_lines(raw: bytes, names: dict, oldest_ms: int) -> List[dict]:
+    """Private-chat messages of some history lines (complete lines only) not older than `oldest_ms`."""
+    out = []
+    for line in raw.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(m, dict) and m.get("msgId") not in (None, "") and _is_dm(m, names) \
+                and float(m.get("timestamp") or 0) >= oldest_ms:
+            out.append(m)
+    return out
+
+
+def watch_history(conn: dict, now: Optional[float] = None) -> int:
+    """The signal: read what javis-zalo appended to its history file since the last look and queue its private-chat
+    messages. Returns how many were queued. One stat call when nothing changed. Never raises."""
+    import os
+    now = time.time() if now is None else float(now)
+    tt = _TT.setdefault(str(conn["id"]), {})
+    path = history_path(conn)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return 0        # no file yet (nothing filed, or javis-zalo older than 1.5.0)
+    size, ident = st.st_size, (st.st_dev, st.st_ino)
+    off = tt.get("history_off")
+    if off is not None and ident == tt.get("history_id") and size == off:
+        return 0        # the usual case: nothing new
+    oldest_ms = int((now - RECONCILE_WINDOW) * 1000)
+    try:
+        with open(path, "rb") as f:
+            if off is None or ident != tt.get("history_id") or size < off:
+                # First look in this lifetime, or javis-zalo rewrote the file (compaction): only its tail matters, and
+                # everything already in the inbox is filtered out later by id.
+                start = max(0, size - HISTORY_TAIL)
+                f.seek(start)
+                raw = f.read(size - start)
+                if start:
+                    raw = raw.split(b"\n", 1)[1] if b"\n" in raw else b""
+            else:
+                f.seek(off)
+                raw = f.read(min(size - off, HISTORY_READ_MAX))
+                cut = raw.rfind(b"\n")
+                raw = raw[:cut + 1] if cut >= 0 else b""     # a line still being written waits for the next look
+                size = off + len(raw)
+    except OSError as e:
+        print(f"[zalo-personal {conn.get('label')}] history file: {e}", file=sys.stderr)
+        return 0
+    tt["history_off"], tt["history_id"] = size, ident
+    found = _parse_lines(raw, tt.get("ten") or {}, oldest_ms)
+    pending = tt.setdefault("history_pending", [])
+    pending.extend((now, m) for m in found)
+    if len(pending) > HISTORY_PENDING_MAX:
+        del pending[:len(pending) - HISTORY_PENDING_MAX]
+    return len(found)
+
+
+def catch_up(conn: dict, messages: List[dict], now: Optional[float] = None) -> int:
+    """Write the private-chat messages among `messages` (history shape) the inbox does not have. Returns how many."""
+    now = time.time() if now is None else float(now)
+    cid = str(conn["id"])
+    tt = _TT.setdefault(cid, {})
+    names = tt.get("ten") or {}
+    oldest = now - RECONCILE_WINDOW
+    by_chat: Dict[str, List[dict]] = {}
+    for m in messages:
+        if not isinstance(m, dict) or not _is_dm(m, names):
+            continue
+        ev = chuan_hoa_tin(conn, m, names)
+        if not ev or not ev.get("external_message_id") or ev["chat_type"] != "private":
+            continue
+        if float(ev.get("created_at") or 0) < oldest or not _live_feed_keeps(ev):
+            continue
+        by_chat.setdefault(ev["external_chat_id"], []).append(ev)
+    written = 0
+    first_read = float(tt.get("first_read") or now)
+    for chat, evs in by_chat.items():
+        known = conversations.known_message_ids(KENH, cid, chat, [e["external_message_id"] for e in evs])
+        evs.sort(key=lambda e: float(e.get("created_at") or 0))
+        first_stored = None
+        for ev in evs:
+            if known is not None and ev["external_message_id"] in known:
+                continue
+            at = float(ev.get("created_at") or 0)
+            if at < first_read:
+                if first_stored is None:
+                    first_stored = conversations.first_message_at(KENH, cid, chat) or float("inf")
+                if at < first_stored:
+                    continue        # rule 6
+            if ev["sender_type"] == "human" and _own_already_stored(cid, ev):
+                continue
+            ev["metadata"] = dict(ev.get("metadata") or {}, recovered=True)
+            r = conversations.ghi_su_kien(ev, late=True)
+            if not (r.get("ok") and not r.get("trung")):
+                continue
+            written += 1
+            if known is None:
+                known = set()
+            known.add(ev["external_message_id"])
+            if ev["sender_type"] == "human":
+                key = (cid, chat)
+                _TAY[key] = max(float(_TAY.get(key) or 0), at)
+    if written:
+        print(f"[zalo-personal {conn.get('label')}] recovered {written} private message(s) from the history",
+              file=sys.stderr)
+    tt["recovered"] = int(tt.get("recovered") or 0) + written
+    return written
+
+
+def _history_turn(conn: dict, tt: dict, now: Optional[float] = None) -> None:
+    """After each successful read: look at the history file (the signal), then release the queued messages that are
+    old enough, but only when that read emptied the buffer (rule 2). Never raises: it must not cost the read loop."""
+    now = time.time() if now is None else float(now)
+    try:
+        watch_history(conn, now)
+        pending = tt.get("history_pending")
+        if not pending or not tt.get("drained", True):
+            return
+        due = [m for seen, m in pending if now - seen >= RECONCILE_MIN_AGE]
+        if not due:
+            return
+        tt["history_pending"] = [(seen, m) for seen, m in pending if now - seen < RECONCILE_MIN_AGE]
+        catch_up(conn, due, now)
+    except Exception as e:      # noqa: BLE001
+        print(f"[zalo-personal {conn.get('label')}] history catch-up: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 # ============================================================
@@ -693,9 +969,13 @@ def _ghi_lo(conn: dict, tin: list, ten: dict) -> tuple:
             # Tin chủ gửi đi. Tiếng vọng của câu BOT vừa gửi thì bỏ (bot đã tự ghi câu đó vào
             # Hộp thư, ghi thêm lần nữa là hiện hai lần, lần hai mang nhãn "người thật"). Còn
             # lại là chủ tự tay nhắn: nhớ giờ để bot nhường cuộc chat đó.
-            if _la_tieng_vong(conn["id"], ev["external_chat_id"], ev["text"]) or (
-                    ev.get("message_type") == "image"
-                    and _la_vong_anh(conn["id"], ev["external_chat_id"])):
+            if _la_tieng_vong(conn["id"], ev["external_chat_id"], ev["text"]):
+                _is_link_echo(conn["id"], ev["external_chat_id"], ev, m, blind=False)    # its card record too
+                attach_echo_id(conn["id"], ev)
+                trung += 1
+                continue
+            if (ev.get("message_type") == "image" and _la_vong_anh(conn["id"], ev["external_chat_id"])) or (
+                    _is_link_echo(conn["id"], ev["external_chat_id"], ev, m)):
                 attach_echo_id(conn["id"], ev)
                 trung += 1
                 continue
@@ -753,6 +1033,7 @@ async def doc_mot_lan(conn: dict) -> dict:
     bat_dau = time.time()       # mọi tin tới trước mốc này đã nằm trong lượt đọc này
     moi = trung = 0
     since = 0
+    drained = True      # False when the page cap stopped this round with messages still waiting in the buffer
     if tt.get("since") and tt.get("ep") and tt["ep"] == _epoch(conn):
         since = int(tt["since"])
     for _ in range(MAX_TRANG):
@@ -784,6 +1065,10 @@ async def doc_mot_lan(conn: dict) -> dict:
         if not (d.get("hasMore") and tin and nc > since):
             break
         since = nc
+    else:
+        drained = False
+    tt["drained"] = drained
+    tt.setdefault("first_read", bat_dau)
     tt["lan_cuoi"] = time.time()
     tt["loi"] = ""
     tt["so_tin"] = int(tt.get("so_tin") or 0) + moi
@@ -830,12 +1115,16 @@ def mo_ta_loi(raw: str, cap: int = 300) -> str:
 async def _vong() -> None:
     print("[zalo-personal] vòng đọc bắt đầu", file=sys.stderr)
     while not _stop:
+        if _WAKE is not None:
+            _WAKE.clear()       # before the pass: whatever calls wake() from here on is seen by the next sleep
         try:
             cfg = _cau_hinh()
             # Có bot trực thì đọc dù công tắc Ghi hội thoại tắt: bot không đọc thì không trả lời được.
             bat_ids = {k for k, v in cfg.items() if v} | set(_BOTS)
+            conns = _ket_noi() if bat_ids else []
+            wait = _loop_wait([], set())        # the answer if this pass dies half way: nothing to read, sleep till woken
             if bat_ids:
-                for conn in _ket_noi():
+                for conn in conns:
                     if _stop or conn["id"] not in bat_ids:
                         continue
                     tt = _TT.setdefault(conn["id"], {})
@@ -845,6 +1134,14 @@ async def _vong() -> None:
                     # Vòng có thể thức dày hơn NHIP (một tài khoản khác đang nóng): tài khoản chưa tới
                     # hạn thì để yên, khỏi tăng số lần gọi MCP của mọi tài khoản theo một cuộc chat.
                     if luc < float(tt.get("doc_toi") or 0):
+                        continue
+                    # Live push (2026-11-10): an account whose javis-zalo pushes is read when a wake-up is waiting
+                    # and NOT otherwise. `take` comes before the read, so a wake-up that lands while the read runs
+                    # is still pending afterwards.
+                    woken = zalo_push.take(conn["id"])
+                    if not woken and push_active(conn["id"]):
+                        await _idle_turn(conn, tt, luc)
+                        tt["doc_toi"] = luc + min(NHIP, _nhip_cua(conn["id"])) * 0.9
                         continue
                     try:
                         await doc_mot_lan(conn)
@@ -856,18 +1153,152 @@ async def _vong() -> None:
                         print(f"[zalo-personal {conn.get('label')}] {tt['loi']}", file=sys.stderr)
                     else:
                         _nhan_loi_moi(conn)
+                        # On a worker thread (2026-11-09): up to HISTORY_READ_MAX bytes of the history file read, every
+                        # line JSON-parsed and missed messages written to SQLite. On the loop it froze every request
+                        # for 1.19 s on the owner's VPS (/health/loop: _parse_lines < watch_history < _history_turn).
+                        await asyncio.to_thread(_history_turn, conn, tt)
                     _soi_tranh_phien(conn)
                     # Hạn sớm hơn một nhịp chút ít: vòng ngủ đúng một nhịp thì lần thức sau chắc chắn đã tới hạn.
-                    tt["doc_toi"] = luc + _nhip_cua(conn["id"]) * 0.9
+                    # A wake-up that arrived during this read: read again on the next pass, no wait. The interval
+                    # never goes past NHIP, so an account that pushed and then lost its process is looked at again
+                    # within one tick (`push_active` is false then, and the read restarts javis-zalo).
+                    tt["doc_toi"] = 0 if zalo_push.pending(conn["id"]) else luc + min(NHIP, _nhip_cua(conn["id"])) * 0.9
+            wait = _loop_wait(conns, bat_ids)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f"[zalo-personal vòng] {type(e).__name__}: {e}", file=sys.stderr)
+            wait = NHIP         # a pass that broke is tried again on the old tick, never left asleep
         try:
-            await asyncio.sleep(_nhip_vong())
+            await _sleep_or_wake(wait)
         except asyncio.CancelledError:
             raise
     print("[zalo-personal] vòng đọc dừng", file=sys.stderr)
+
+
+# ============================================================
+# Live push: read when javis-zalo says a message arrived (2026-11-10, see zalo_push.py)
+# ============================================================
+_WAKE: Optional[asyncio.Event] = None       # set by a wake-up, waited on by the loop between two passes
+_LOOP: Optional[asyncio.AbstractEventLoop] = None       # the event loop the read loop runs on (set in `start`)
+
+
+def wake() -> None:
+    """Make the read loop run a pass now. Safe from any thread and before the loop exists.
+
+    With live push the loop does not tick while there is nothing to do, so everything that gives it something to do
+    calls this: a wake-up from javis-zalo, a javis-zalo process that exited, a turn put on hold, a bot that took or
+    left its post, an account switched on, a connection saved on the Connections page."""
+    ev, loop = _WAKE, _LOOP
+    if ev is None or loop is None:
+        return
+    try:
+        if asyncio.get_running_loop() is loop:
+            ev.set()
+            return
+    except RuntimeError:
+        pass
+    try:
+        loop.call_soon_threadsafe(ev.set)
+    except RuntimeError:        # that loop is closed: nothing is waiting
+        pass
+
+
+def _on_mcp_exit(key: Any) -> None:
+    """A stdio MCP process ended (mcp_client.STDIO_EXIT_LISTENERS). When it is one of our accounts, read it now: the
+    read starts javis-zalo again and picks up what Zalo replays, instead of waiting for anything."""
+    cid = str(key or "")
+    if cid and (cid in _TT or cid in _BOTS):
+        _TT.setdefault(cid, {})["doc_toi"] = 0
+        wake()
+
+
+def _loop_wait(conns: List[dict], on_ids: set, now: Optional[float] = None) -> Optional[float]:
+    """How long the loop may sleep after a pass; None = until `wake()`.
+
+    An account whose javis-zalo pushes needs no tick at all: a message, a dead process and a config change each wake
+    the loop. It gets a short tick only WHILE a turn of its own is on hold (released by time, not by an event) or a
+    history check is queued. An account that does not push (older javis-zalo, process not started yet) keeps the
+    timer it always had, and a failed account is retried when its rest ends."""
+    now = time.time() if now is None else float(now)
+    waits: List[float] = []
+    for conn in conns:
+        cid = conn["id"]
+        if cid not in on_ids:
+            continue
+        tt = _TT.get(cid) or {}
+        rest = float(tt.get("nghi_toi") or 0)
+        if rest > now:
+            waits.append(rest - now)
+        elif zalo_push.pending(cid):
+            return 0.0
+        elif not push_active(cid):
+            waits.append(float(_nhip_cua(cid)))
+        elif any(k[0] == cid for k in _GOM):
+            waits.append(float(NHIP_NHANH))
+        elif any(k[0] == cid for k in _CHO_CHU) or tt.get("history_pending"):
+            waits.append(float(NHIP))
+    return min(waits) if waits else None
+
+
+def push_active(conn_id: str) -> bool:
+    """This account's javis-zalo pushes: a wake-up came from the MCP session that is alive right now. False for an
+    older javis-zalo, a process that died (the next pass reads, which restarts it), or with live push switched off."""
+    try:
+        import mcp_client
+        cid = str(conn_id or "")
+        if not mcp_client.pool.session_pid(cid):
+            return False
+        return zalo_push.active(cid, int(mcp_client.pool.epoch({"key": cid}) or 0))
+    except Exception:       # noqa: BLE001 - unsure means "read on the timer", the behavior before live push
+        return False
+
+
+def on_push(conn_id: str, body: dict) -> dict:
+    """A wake-up from javis-zalo for one connection (POST /zalo/push, checked there). Marks the account as due and
+    wakes the loop. Returns {"ok", "known"}; an unknown or disabled connection is answered ok so javis-zalo stops
+    retrying, and nothing is recorded for it."""
+    cid = str(conn_id or "").strip()
+    conn = ket_noi_theo_id(cid) if cid else None
+    if conn is None:
+        return {"ok": True, "known": False}
+    zalo_push.note(cid, body, _epoch(conn))
+    _TT.setdefault(cid, {})["doc_toi"] = 0
+    wake()
+    return {"ok": True, "known": True}
+
+
+async def _sleep_or_wake(seconds: Optional[float]) -> None:
+    """Sleep `seconds`, or until `wake()`; None = until `wake()` only. The pass that just ended cleared the event at
+    its START, so a `wake()` that came while it ran is still set here and the wait returns at once: nothing that
+    happens during a pass is lost."""
+    global _WAKE
+    if _WAKE is None:
+        _WAKE = asyncio.Event()
+    if seconds is None:
+        await _WAKE.wait()
+        return
+    try:
+        await asyncio.wait_for(_WAKE.wait(), timeout=max(0.05, float(seconds)))
+    except asyncio.TimeoutError:
+        pass
+
+
+async def _idle_turn(conn: dict, tt: dict, now: float) -> None:
+    """One pass over a pushing account with no wake-up waiting: everything a read used to do on the side, without
+    calling javis-zalo. No wake-up since the last read means no message since then, which is what releasing a held
+    turn needs to know (a customer who stopped typing, an owner who did not answer by hand)."""
+    cid = conn["id"]
+    try:
+        xa_hang_cho(cid, now)
+        xa_cho_chu(cid, now)
+        if tt.get("history_pending"):
+            await asyncio.to_thread(_history_turn, conn, tt)
+        _soi_tranh_phien(conn)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:      # noqa: BLE001
+        print(f"[zalo-personal {conn.get('label')}] idle pass: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 # ============================================================
@@ -976,8 +1407,29 @@ def start() -> bool:
     except RuntimeError:
         return False
     _stop = False
+    global _WAKE, _LOOP
+    _WAKE = asyncio.Event()     # a fresh one per loop lifetime: an Event belongs to the event loop that first waits on it
+    _LOOP = loop
+    _listen_for_wake_sources()
     _task = loop.create_task(_vong())
     return True
+
+
+def _listen_for_wake_sources() -> None:
+    """Ask the two modules that change things behind the loop's back to call it: a stdio MCP process that ends, and a
+    connection saved on the Connections page. Registered once; each is a plain list of callables there."""
+    try:
+        import mcp_client
+        if _on_mcp_exit not in mcp_client.STDIO_EXIT_LISTENERS:
+            mcp_client.STDIO_EXIT_LISTENERS.append(_on_mcp_exit)
+    except Exception as e:      # noqa: BLE001
+        print(f"[zalo-personal] exit listener not set: {type(e).__name__}: {e}", file=sys.stderr)
+    try:
+        import mcp_store
+        if wake not in mcp_store.ON_SAVE:
+            mcp_store.ON_SAVE.append(wake)
+    except Exception as e:      # noqa: BLE001
+        print(f"[zalo-personal] connection listener not set: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def stop() -> None:
@@ -1016,6 +1468,7 @@ NHUONG_GIAY = 20        # giây bot chờ trước khi tự trả lời tin nhó
 _BOTS: Dict[str, Any] = {}          # conn_id -> Transport đang trực
 _DA_GUI: Dict[tuple, list] = {}     # (conn_id, thread) -> [(ts, chữ đã chuẩn hoá)]
 _DA_GUI_ANH: Dict[tuple, list] = {}  # (conn_id, thread) -> [ts mỗi ảnh bot vừa gửi] (xem ghi_da_gui_anh)
+_LINK_ECHOES: Dict[tuple, list] = {}  # (conn_id, thread) -> [(ts, link)] cards the bot sent (remember_link_echo)
 _TAY: Dict[tuple, float] = {}       # (conn_id, thread) -> giờ tin chủ tự nhắn gần nhất
 # Ảnh khách gửi trong CHAT RIÊNG (nhớ cho các lượt chữ ngay sau, xem `Transport.xu_ly`). Ca thật 15/10/2026: giáo viên gửi
 # ảnh bài làm rồi nhắn "check xem đúng chưa", bot hỏi danh tính; trả lời xong thì ảnh đã ở tin trước nên bot nói "chưa đọc
@@ -1073,6 +1526,66 @@ _SEQ: Dict[tuple, int] = {}         # (conn_id, thread) -> số tin khách chat 
 _BO_DO: Dict[tuple, dict] = {}      # (conn_id, thread) -> {"texts": [...], "n": số lần bỏ, "luc": giờ}: tin khách của câu trả lời đã bỏ
 _ID_MINH: Dict[str, dict] = {}      # conn_id -> {"uid", "ten"} của CHÍNH nick này, học từ tin của nó
 
+# The Zalo connection can restart without replaying an own message. Retain only
+# a previously verified self UID, not the bot name or any guessed mention target.
+_SELF_ID_PATH = cfgmod.STATE_DIR / "zalo-personal-self-ids.json"
+_SELF_ID_TTL = 30 * 86400
+
+
+def _self_ids() -> dict:
+    try:
+        if _SELF_ID_PATH.stat().st_size > 65536:
+            return {}
+        data = json.loads(_SELF_ID_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _cached_self_uid(conn_id: str) -> str:
+    entry = _self_ids().get(str(conn_id))
+    if not isinstance(entry, dict):
+        return ""
+    uid = str(entry.get("uid") or "")
+    stamp = entry.get("ts")
+    if (not re.fullmatch(r"[0-9]{4,30}", uid) or not isinstance(stamp, (int, float))
+            or not 0 <= time.time() - stamp <= _SELF_ID_TTL):
+        return ""
+    return uid
+
+
+def _save_self_uid(conn_id: str, uid: str) -> None:
+    """Persist a Zalo ID only after a real outgoing group echo confirms it."""
+    if uid and not re.fullmatch(r"[0-9]{4,30}", uid):
+        return
+    data = _self_ids()
+    if uid:
+        old = data.get(str(conn_id))
+        stamp = old.get("ts") if isinstance(old, dict) else None
+        if (isinstance(stamp, (int, float)) and old.get("uid") == uid
+                and 0 <= time.time() - stamp < 86400):
+            return
+        data[str(conn_id)] = {"uid": uid, "ts": time.time()}
+    else:
+        data.pop(str(conn_id), None)
+    tmp = ""
+    try:
+        _SELF_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".zalo-self-", dir=str(_SELF_ID_PATH.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(data, out)
+        os.replace(tmp, _SELF_ID_PATH)
+    except OSError:
+        pass  # A read-only state directory must not stop the Zalo message loop.
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
 
 def _hoc_danh_tinh(conn_id: str, msg: dict) -> None:
     """Nhớ id + tên Zalo của CHÍNH nick này từ một tin nó gửi. Cần để biết một tin trong nhóm có
@@ -1092,6 +1605,10 @@ def _hoc_danh_tinh(conn_id: str, msg: dict) -> None:
         thay = cu.setdefault("_da_thay", set())
         thay.add(uid)
         cu["uid"] = uid if len(thay) == 1 else ""
+        # Private-chat echoes can report the other person's ID as self. Cache
+        # only a numeric self ID observed in a group, with Zalo's isSelf flag.
+        if msg.get("isSelf") is True and str(msg.get("threadType") or "") in ("1", "group"):
+            _save_self_uid(conn_id, cu["uid"])
     if ten:
         cu["ten"] = ten
 
@@ -1117,6 +1634,14 @@ def nhan_dien_goi(conn_id: str, ev: dict, ten_khac=()) -> tuple:
     Không nhận ra thì cùng lắm chế độ Tự đánh giá vẫn bắt được câu hỏi thuộc tài liệu.
     """
     minh = _ID_MINH.get(str(conn_id)) or {}
+    # A restart clears _ID_MINH. Recover a recently verified self identity
+    # without trusting arbitrary @Name text or treating other people's tags as ours.
+    if not minh.get("uid") and not minh.get("_da_thay"):
+        cached = _cached_self_uid(conn_id)
+        if cached:
+            minh = _ID_MINH.setdefault(str(conn_id), {})
+            minh["uid"] = cached
+            minh["_da_thay"] = {cached}
     uid = str(minh.get("uid") or "").strip()
     ten = {_chuan_ten(x) for x in (list(ten_khac or ()) + [minh.get("ten")]) if x}
     ten.discard("")
@@ -1228,6 +1753,7 @@ def quoted_file(conn_id: str, thread: str, md: dict) -> list:
 
 def dang_ky_bot(conn_id: str, tb: Any) -> None:
     _BOTS[str(conn_id)] = tb
+    wake()
     start()
 
 
@@ -1240,6 +1766,7 @@ def huy_dang_ky_bot(conn_id: str, tb: Any = None) -> None:
         # thì `xa_hang_cho` tự bỏ hàng chờ khi không còn bot trực, và tin quá `TUOI_TOI_DA` cũng bị
         # bỏ, nên bật lại sau đó không giao tin cũ.
         _NONG.pop(cid, None)
+        wake()
 
 
 def co_bot(conn_id: str) -> bool:
@@ -1347,6 +1874,74 @@ def _la_vong_anh(conn_id: str, thread: str) -> bool:
         _DA_GUI_ANH.pop(khoa, None)
         return False
     _DA_GUI_ANH[khoa] = ds[1:]
+    return True
+
+
+# A link card's echo is matched by its link, not by its text: Zalo fills a link message's text from the page's
+# preview (title, description) as much as from what was typed, so the reply's own words may not come back. A
+# non-text own message with no readable link counts as the card only shortly after it was sent (LINK_ECHO_BLIND).
+LINK_ECHO_BLIND = 120
+
+
+def _link_key(url: Any) -> str:
+    return str(url or "").strip().rstrip("/").lower()
+
+
+def remember_link_echo(conn_id: str, thread: str, url: str) -> None:
+    """The bot is about to send a link card for `url` in this chat: remember it, so its echo is not taken for the
+    owner typing by hand (the bot would go quiet in that chat, and the inbox would show the message twice)."""
+    key = (str(conn_id), str(thread))
+    now = time.time()
+    ds = [x for x in _LINK_ECHOES.get(key, []) if now - x[0] < ECHO_TTL]
+    ds.append((now, _link_key(url)))
+    _LINK_ECHOES[key] = ds[-20:]
+    if len(_LINK_ECHOES) > 500:
+        for k in list(_LINK_ECHOES)[:250]:
+            _LINK_ECHOES.pop(k, None)
+
+
+def forget_link_echo(conn_id: str, thread: str, url: str) -> None:
+    """No card went out after all (older MCP, refused, sent as plain text): drop the record `remember_link_echo` made."""
+    key = (str(conn_id), str(thread))
+    want = _link_key(url)
+    ds = list(_LINK_ECHOES.get(key, []))
+    for i in range(len(ds) - 1, -1, -1):
+        if ds[i][1] == want:
+            del ds[i]
+            break
+    if ds:
+        _LINK_ECHOES[key] = ds
+    else:
+        _LINK_ECHOES.pop(key, None)
+
+
+def _is_link_echo(conn_id: str, thread: str, ev: dict, msg: Any = None, blind: bool = True) -> bool:
+    """True, and the record used up, when this own message is the echo of a link card the bot sent.
+
+    Matched by the link appearing in the message's text or in its attachment link. With `blind`, a non-text message
+    (or a link card, which is read as text) without a matching link also counts when a card went out in this chat
+    within LINK_ECHO_BLIND seconds."""
+    key = (str(conn_id), str(thread))
+    now = time.time()
+    ds = [x for x in _LINK_ECHOES.get(key, []) if now - x[0] < ECHO_TTL]
+    if not ds:
+        _LINK_ECHOES.pop(key, None)
+        return False
+    att = msg.get("attachment") if isinstance(msg, dict) and isinstance(msg.get("attachment"), dict) else {}
+    seen = " ".join(str(v or "") for v in (ev.get("text"), att.get("url"),
+                                            msg.get("url") if isinstance(msg, dict) else "")).lower()
+    hit = next((i for i, (_ts, url) in enumerate(ds) if url and url in seen), None)
+    if hit is None and blind and (str(ev.get("message_type") or "text") != "text"
+                                  or (ev.get("metadata") or {}).get("link_card")):
+        hit = next((i for i, (ts, _url) in enumerate(ds) if now - ts < LINK_ECHO_BLIND), None)
+    if hit is None:
+        _LINK_ECHOES[key] = ds
+        return False
+    del ds[hit]
+    if ds:
+        _LINK_ECHOES[key] = ds
+    else:
+        _LINK_ECHOES.pop(key, None)
     return True
 
 
@@ -1502,6 +2097,7 @@ def _xep_cho(conn_id: str, ev: dict, now: Optional[float] = None) -> None:
     if now - ts > TUOI_TOI_DA:
         return      # tin cũ của bộ đệm: `xu_ly` cũng bỏ, đừng để nó giữ tài khoản ở nhịp đọc dày
     o = _GOM.setdefault((str(conn_id), str(ev.get("external_chat_id") or "")), {"evs": [], "cuoi": 0.0})
+    wake()      # a turn is on hold from now: the loop ticks until it is released (see _loop_wait)
     if len(o["evs"]) >= MAX_GOM_TIN:
         o["evs"][-1] = ev       # giữ mấy tin đầu (câu hỏi thật) và tin CUỐI (mã tin, giờ tin của lượt)
     else:
@@ -1701,6 +2297,7 @@ def _giu_cho_chu(conn_id: str, ev: dict, now: Optional[float] = None) -> None:
     if now - ts > TUOI_TOI_DA:
         return      # tin cũ của bộ đệm lúc mới bật, như `_xep_cho`
     o = _CHO_CHU.setdefault((str(conn_id), str(ev.get("external_chat_id") or "")), {"evs": [], "dau": ts})
+    wake()      # held for the owner from now: the loop ticks until the yield time is over (see _loop_wait)
     if len(o["evs"]) >= MAX_GOM_TIN:
         o["evs"][-1] = ev
     else:
@@ -1813,7 +2410,8 @@ def _nhip_cua(conn_id: str, now: Optional[float] = None) -> int:
     if any(k[0] == cid for k in _GOM):
         return NHIP_NHANH
     now = time.time() if now is None else now
-    if CHO_KHACH_IM > 0 and now - float(_NONG.get(cid) or 0) < NONG_GIAY:
+    # The hot window exists to hear the customer's NEXT message quickly. A pushing account hears it at once.
+    if CHO_KHACH_IM > 0 and now - float(_NONG.get(cid) or 0) < NONG_GIAY and not push_active(cid):
         return NHIP_NHANH
     return NHIP
 

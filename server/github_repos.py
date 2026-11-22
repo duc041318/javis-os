@@ -16,8 +16,29 @@ What lives here:
      (the local clone and its worktrees are deleted, GitHub is never touched). Removal refuses while work could be lost.
 
 Git authentication never goes through argv or the remote URL: the token rides in `GIT_CONFIG_*` environment variables
-as an HTTP header, only for Javis's own git calls. The clone's `origin` stays the clean https URL, and a model running
-shell commands in the worktree has no credential to push with (section 4.1: the model never pushes, Javis does).
+as an HTTP header, only for Javis's own git calls (`auth=True`). The clone's `origin` stays the clean https URL, so a
+model running shell commands in the worktree finds no credential on disk to push with (section 4.1: the model never
+pushes, Javis does).
+
+Threat model of those authenticated calls (decided 12/11/2026). A chat's worktree shares the clone's `.git`, and the
+model has a shell there, so everything under `.git` is written by code Javis did not choose: the model, and whatever it
+runs (an `npm install` that sets `core.hooksPath`, husky style, is the everyday case). git hands its whole
+environment, token included, to every program it starts, and applies an unscoped header to every URL. So a call that
+carries the token treats the repo's hooks and its repo-level config (`.git/config`, `config.worktree`, whatever they
+include) as UNTRUSTED, and `auth_env` isolates the call from them:
+  - Hooks never run in it: `core.hooksPath` points at an empty folder of Javis's own (`NO_HOOKS_DIR`).
+  - The header is scoped to one URL (`http.<url>.extraheader`): the origin GitHub's API named, read from Javis's
+    registry and never from the clone's config. A redirected `origin` gets no token.
+  - Settings that start a program are switched off for the call (`ISOLATION`), repo-level filter drivers are replaced
+    by the machine's own or emptied, and only the origin's protocol is allowed (no `ext::`, no helper of the repo's).
+  - Repo-level settings that steer the connection and cannot be overridden (`url.*.insteadOf`, `http.proxy`,
+    `include.path`, a changed `remote.origin.url`...) make the call refuse, naming them, instead of running.
+Trusted: the machine's own git config (system and global), PATH and the environment of the Javis process.
+NOT a boundary: a program running as Javis's OS user that goes after the token on purpose. It can read STATE_DIR
+(settings plus `.secret_key`) or the environment of a running git. This isolation stops the token leaking THROUGH git;
+it does not sandbox the model. git itself has no supported way to hold a secret inside a repository it does not trust,
+so the lists below are the known routes, not a proof; the stronger design runs the token-bearing calls from a git dir
+of Javis's own that a worktree cannot write to.
 
 Stdlib plus httpx (through github_api), no FastAPI, no main import.
 """
@@ -35,7 +56,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import brain_ident
 import coding_store
+import git_setup
 import localefmt
 import winproc
 from config import STATE_DIR
@@ -55,7 +78,16 @@ REPO_CACHE_S = 60.0
 
 
 class RepoError(Exception):
-    """A failure worth showing as is (already localized)."""
+    """A failure worth showing as is (already localized).
+
+    `code` names a failure the dashboard answers itself instead of only printing the sentence ("work_at_risk": it asks
+    whether to detach anyway); `data` carries what it needs for that. Both go out next to `error` (routes/github.py).
+    """
+
+    def __init__(self, msg: str = "", code: str = "", data: Optional[Dict[str, Any]] = None):
+        super().__init__(msg)
+        self.code = code
+        self.data = dict(data or {})
 
 
 def _c(vi: str, en: str) -> str:
@@ -201,13 +233,16 @@ INSTALL_CACHE_S = 30.0
 
 def _installs(tok: str) -> int:
     now = _now()
-    if _INSTALL_CACHE["n"] >= 0 and now - _INSTALL_CACHE["at"] < INSTALL_CACHE_S:
+    if _INSTALL_CACHE["at"] and now - _INSTALL_CACHE["at"] < INSTALL_CACHE_S:
         return int(_INSTALL_CACHE["n"])
     try:
         d = GitHub(tok).get("/user/installations", params={"per_page": 1})
         n = int((d or {}).get("total_count") or 0) if isinstance(d, dict) else 0
     except GitHubError:
-        return -1      # unknown: say nothing rather than nag
+        # unknown: say nothing rather than nag. 0.444.4: remembered too, so a GitHub outage or a dead network does
+        # not cost a fresh request (and its timeout) on every Connections visit.
+        _INSTALL_CACHE.update(at=now, n=-1)
+        return -1
     _INSTALL_CACHE.update(at=now, n=n)
     return n
 
@@ -241,7 +276,8 @@ def status() -> Dict[str, Any]:
         # Never for an app sign-in: it has no scopes, and a stale flag stored by 0.430.0 to 0.432.1 is dropped here.
         "missing": [] if conn.get("source") == "app" else list(conn.get("missing") or []),
         "backup_token": bool(backup_token()),
-        "has_git": shutil.which("git") is not None,
+        # git_setup also finds a git installed after this server started (PATH of a running process never updates).
+        "has_git": git_setup.available(),
         # "Sign in with GitHub": where to pick repos, and how many accounts the app is on (-1 unknown).
         "install_url": _oauth_install_url(),
         "installs": _installs(tok) if (tok and conn.get("source") == "app") else -1,
@@ -264,18 +300,200 @@ def client() -> GitHub:
 # ============================================================
 # Git helpers (token in the environment, never in argv)
 # ============================================================
-def git_env(tok: Optional[str] = None) -> Dict[str, str]:
+def git_env() -> Dict[str, str]:
+    """Environment of a git call that carries NO credential."""
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["LC_ALL"] = "C"
     env.pop("GIT_ASKPASS", None)
+    return env
+
+
+# ---- isolation of the calls that carry the token (threat model in the module docstring) ----
+# An empty folder that `core.hooksPath` points at, so no hook of the repo runs while the token is in the environment.
+# A folder rather than the null device: it behaves the same on Linux, macOS and Windows.
+NO_HOOKS_DIR = STATE_DIR / "git-no-hooks"
+# Set on every authenticated call. Environment config is read last, so each line beats the repo's own value.
+ISOLATION = (
+    ("core.fsmonitor", "false"),      # a repo can name a program here; checkout and worktree add would start it
+    ("core.askPass", ""),             # the program git starts to ask for a password when GitHub answers 401
+    ("credential.helper", ""),        # an empty value drops every helper listed before it, same reason
+    ("gc.auto", "0"),                 # no background maintenance: it outlives the call holding the same environment,
+    ("maintenance.auto", "false"),    # and `gc.recentObjectsHook` is one more program of the repo's choosing
+    ("push.gpgSign", "false"),        # a signed push would start `gpg.program`
+    # A submodule the chat initialised is a second repo with a config of its own, which nothing here vets. git walks
+    # into it by default on fetch, and on checkout and push when told to. Javis never manages submodules itself.
+    ("fetch.recurseSubmodules", "false"),
+    ("submodule.recurse", "false"),
+    ("push.recurseSubmodules", "no"),
+)
+# Programs that convert file contents, run by checkout. A value set at repo level is replaced by the machine's own
+# value (Git LFS is installed there) or by the neutral one, so a repo cannot swap the driver for the call.
+_DRIVER_NEUTRAL = {"smudge": "", "clean": "", "process": "", "required": "false"}
+# http.* settings a repo may keep: none of them moves the connection or what it trusts. Every other http.* key
+# (proxy, sslVerify, sslCAInfo, curloptResolve, cookieFile...) refuses the call, and so does one git adds later.
+_HTTP_HARMLESS = frozenset({"postbuffer", "lowspeedlimit", "lowspeedtime", "version", "maxrequests", "minsessions",
+                            "useragent"})
+_REMOTE_STEERING = frozenset({"pushurl", "proxy", "proxyauthmethod", "vcs", "uploadpack", "receivepack"})
+_CORE_PROGRAMS = frozenset({"sshcommand", "gitproxy", "alternaterefscommand"})
+_MACHINE_SCOPES = frozenset({"system", "global", "command"})
+
+
+def _split_key(key: str) -> tuple:
+    """`section.subsection.variable` as git prints it: (section, subsection, variable), subsection may hold dots."""
+    section, _, rest = str(key or "").partition(".")
+    sub, _, var = rest.rpartition(".")
+    return section.lower(), sub, var.lower()
+
+
+def _config_entries(cwd: str) -> List[tuple]:
+    """Every git config entry in effect in `cwd`, in git's own order: (scope, key, value). No token in this call."""
+    try:
+        p = subprocess.run(["git", "config", "--list", "--show-scope", "-z"], cwd=cwd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=GIT_TIMEOUT, env=git_env(),
+                           creationflags=winproc.no_window())
+    except FileNotFoundError:
+        raise RepoError(_c("Máy này chưa cài git.", "git is not installed on this machine."))
+    except subprocess.TimeoutExpired:
+        p = None
+    if p is None or p.returncode != 0:
+        # Unreadable config: nothing proves the call is safe, so the token stays home.
+        why = ((p.stderr if p else "") or "").strip().splitlines()[-1:] or ["?"]
+        raise RepoError(_c(f"Không đọc được cấu hình git của repository nên Javis không dùng token ở đây: {why[0]}",
+                           f"Could not read this repository's git config, so Javis will not use the token here: {why[0]}"))
+    parts = (p.stdout or "").split("\0")
+    out = []
+    for i in range(0, len(parts) - 1, 2):
+        key, _, value = parts[i + 1].partition("\n")
+        out.append((parts[i], key, value))
+    return out
+
+
+def _protocol(url: str) -> str:
+    """The git transport a URL uses: its scheme, `ssh` for the scp form (git@host:path), `file` for a path."""
+    if "://" in url:
+        return url.split("://", 1)[0].lower()
+    return "ssh" if ":" in url.split("/", 1)[0] and not re.match(r"^[A-Za-z]:", url) else "file"
+
+
+def _vet_config(entries: List[tuple], origin: str) -> List[tuple]:
+    """Overrides that neutralise this repo's own config for one authenticated call. Raises RepoError, naming the
+    settings, when the repo-level config holds one that could move the token and that no override can beat."""
+    machine: Dict[str, str] = {}
+    repo = []
+    for scope, key, value in entries:
+        if scope in _MACHINE_SCOPES:
+            machine[key] = value
+        else:
+            repo.append((key, value))        # local, worktree, and any scope a later git invents
+    refused: List[str] = []
+    overrides: List[tuple] = []
+    for key, value in repo:
+        section, sub, var = _split_key(key)
+        steers = (
+            section in ("include", "includeif", "url")
+            or (section == "http" and var not in _HTTP_HARMLESS)
+            or (section == "remote" and sub == "origin" and var in _REMOTE_STEERING)
+            or (section == "core" and var in _CORE_PROGRAMS)
+            or (section == "lfs" and (var == "standalonetransferagent"
+                                      or sub.lower().startswith(("customtransfer.", "extension."))))
+        )
+        if steers:
+            refused.append(key)
+        elif (section == "filter" and var in _DRIVER_NEUTRAL) or key == "diff.external":
+            overrides.append((key, machine.get(key, _DRIVER_NEUTRAL.get(var, ""))))
+    # `origin` must still be the one remote GitHub's API named. A `git clone` is vetted without repo entries.
+    urls = [value for key, value in repo if key == "remote.origin.url"]
+    if repo and urls != [origin]:
+        refused.append("remote.origin.url")
+    if refused:
+        names = ", ".join(sorted(set(refused)))
+        raise RepoError(_c(f"Javis không dùng token GitHub trong repository này: cấu hình git của bản clone ({names}) có thể "
+                           "đưa token đi nơi khác. Gỡ các dòng đó (git config --unset-all <tên>), hoặc gỡ repository khỏi "
+                           "brain rồi thêm lại.",
+                           f"Javis will not use the GitHub token in this repository: the clone's git config ({names}) could "
+                           "send the token somewhere else. Remove those settings (git config --unset-all <name>), or "
+                           "remove the repository from the brain and add it again."))
+    return overrides
+
+
+def _allowed_protocols(entries: List[tuple], origin: str) -> str:
+    """The origin's own protocol, plus the one a machine-wide `insteadOf` moves it to (people who reach GitHub over
+    SSH set that in their global config). Nothing else: no `ext::`, no remote helper, no local path."""
+    allowed = [_protocol(origin)]
+    for scope, key, value in entries:
+        section, sub, var = _split_key(key)
+        if (scope in _MACHINE_SCOPES and section == "url" and var in ("insteadof", "pushinsteadof") and value
+                and origin.startswith(value) and _protocol(sub) in ("https", "http", "ssh", "git")):
+            allowed.append(_protocol(sub))
+    return ":".join(dict.fromkeys(allowed))
+
+
+def _no_hooks_dir() -> str:
+    """The empty folder hooks are looked up in during an authenticated call, emptied again if anything landed there."""
+    d = NO_HOOKS_DIR
+    if d.is_symlink() or (d.exists() and not d.is_dir()):
+        d.unlink()
+    d.mkdir(parents=True, exist_ok=True)
+    for child in list(d.iterdir()):
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink()
+    if any(d.iterdir()):
+        raise RepoError(_c(f"Không dọn trống được {d}, Javis không dùng token khi thư mục đó còn file.",
+                           f"Could not empty {d}; Javis will not use the token while files remain there."))
+    return d.as_posix()
+
+
+def _real(path: Any) -> str:
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def trusted_origin(cwd: str) -> str:
+    """The origin URL GitHub's API gave for the clone `cwd` belongs to, from Javis's registry; "" when `cwd` is not
+    inside one of Javis's clones. Never read from the clone's own config: that is the part a model can rewrite."""
+    try:
+        p = git(["rev-parse", "--git-common-dir"], cwd, check=False)
+    except (RepoError, OSError):
+        return ""
+    common = (p.stdout or "").strip()
+    if p.returncode != 0 or not common:
+        return ""
+    root = _real((Path(cwd) / common).parent)       # the common dir of a clone and of all its worktrees is <clone>/.git
+    for r in _load()["repos"]:
+        if r.get("path") and _real(r["path"]) == root:
+            return str(r.get("clone_url") or "")
+    return ""
+
+
+def auth_env(cwd: str, origin: str, tok: Optional[str] = None, in_repo: bool = True) -> Dict[str, str]:
+    """Environment of a git call that carries the token, for `origin` only, isolated from the repo in `cwd`.
+
+    `origin` is the URL the token may go to and must come from GitHub's API (the registry), never from the clone.
+    Raises RepoError when the repo's config could still move the token (see `_vet_config`).
+    `in_repo=False` is for `git clone`: it makes a repo and reads the config of none, not even of a repo that
+    happens to enclose `cwd` (a default install keeps STATE_DIR inside the Javis checkout), so only the machine's
+    config counts there."""
+    env = git_env()
     tok = token() if tok is None else tok
-    if tok:
+    if not tok:
+        return env
+    if not origin:
+        raise RepoError(_c(f"Javis chỉ dùng token GitHub trong repository do chính nó clone, {cwd} không phải repository như vậy.",
+                           f"Javis only uses the GitHub token inside a repository it cloned itself; {cwd} is not one."))
+    entries = [e for e in _config_entries(cwd) if in_repo or e[0] in _MACHINE_SCOPES]
+    pairs = [("core.hooksPath", _no_hooks_dir())] + list(ISOLATION) + _vet_config(entries, origin)
+    if origin.lower().startswith(("https://", "http://")):
         basic = base64.b64encode(f"x-access-token:{tok}".encode()).decode()
-        n = int(env.get("GIT_CONFIG_COUNT") or 0)
-        env["GIT_CONFIG_COUNT"] = str(n + 1)
-        env[f"GIT_CONFIG_KEY_{n}"] = "http.extraheader"
-        env[f"GIT_CONFIG_VALUE_{n}"] = f"AUTHORIZATION: basic {basic}"
+        pairs.append((f"http.{origin}.extraheader", f"AUTHORIZATION: basic {basic}"))
+    n = int(env.get("GIT_CONFIG_COUNT") or 0)
+    for i, (key, value) in enumerate(pairs, start=n):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    env["GIT_CONFIG_COUNT"] = str(n + len(pairs))
+    env["GIT_ALLOW_PROTOCOL"] = _allowed_protocols(entries, origin)     # beats every protocol.*.allow of the repo
+    env.pop("SSH_ASKPASS", None)
     return env
 
 
@@ -289,11 +507,18 @@ def _redact(text: str) -> str:
 
 
 def git(args: List[str], cwd: str, *, timeout: int = GIT_TIMEOUT, auth: bool = False,
-        check: bool = True) -> subprocess.CompletedProcess:
+        check: bool = True, origin: str = "") -> subprocess.CompletedProcess:
+    """Run git in `cwd`. `auth=True` puts the token in the call's environment, for the clone's registered origin
+    only and isolated from the repo's hooks and config (`auth_env`); it raises RepoError, even with `check=False`,
+    when that isolation cannot be had. `origin` names the URL when the registry cannot (a clone being made)."""
+    tok = token() if auth else ""
+    env = git_env()
+    if tok:
+        cloning = list(args[:1]) == ["clone"]       # no repo yet: the caller names the origin, the registry cannot
+        env = auth_env(cwd, origin or ("" if cloning else trusted_origin(cwd)), tok, in_repo=not cloning)
     try:
         p = subprocess.run(["git"] + list(args), cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout, env=git_env() if auth else git_env(""),
-                           creationflags=winproc.no_window())
+                           errors="replace", timeout=timeout, env=env, creationflags=winproc.no_window())
     except FileNotFoundError:
         raise RepoError(_c("Máy này chưa cài git.", "git is not installed on this machine."))
     except subprocess.TimeoutExpired:
@@ -306,8 +531,43 @@ def git(args: List[str], cwd: str, *, timeout: int = GIT_TIMEOUT, auth: bool = F
     return p
 
 
+# Keyword arguments for every git call of Javis that puts files of ANOTHER commit on disk (worktree add, checkout).
+# The clone is a partial one (`--filter=blob:none`): a fetch brings commits and trees, never file contents, so the
+# first checkout of a commit that arrived later makes git download the missing contents from origin by itself, in the
+# middle of the command. That hidden fetch needs the token like any other, and its size follows the repo, not
+# GIT_TIMEOUT. Without the token a private repo answered "could not fetch <sha> from promisor remote" and attaching the
+# repo to a chat failed as soon as the base branch had moved (owner, 12/11/2026). The checkout is where the repo's
+# post-checkout hook and filter drivers would run: `auth_env` keeps both out of a call that holds the token.
+CHECKOUT: Dict[str, Any] = {"auth": True, "timeout": 300}
+
+
 def git_out(args: List[str], cwd: str, **kw) -> str:
     return (git(args, cwd, **kw).stdout or "").strip()
+
+
+def identity() -> Dict[str, str]:
+    """Who Javis commits as: the connected GitHub account, with its noreply address."""
+    login = str(_read_conn().get("login") or "") or "javis"
+    uid = user_id()
+    email = f"{uid}+{login}@users.noreply.github.com" if uid else f"{login}@users.noreply.github.com"
+    return {"name": login, "email": email}
+
+
+def ensure_identity(cwd: str) -> None:
+    """Give the clone `cwd` belongs to a commit identity of its own, when it has none: the one Javis commits with.
+
+    Javis names itself through the environment of its own commits, so the clone never needed `user.name`. The chat's
+    engine runs git in the worktree too (`git merge` in a conflict fix round, `git stash`, a commit of its own), and
+    there git falls back on the machine: with no global identity, as in a container or on a fresh server, it stops
+    with "empty ident name" or "unable to auto-detect email address" before doing anything. A value the clone already
+    holds is kept. Best effort: a failure here must not stop the caller.
+    """
+    try:
+        for key, value in (("user.name", identity()["name"]), ("user.email", identity()["email"])):
+            if not git_out(["config", "--local", "--get", key], cwd, check=False):
+                git(["config", "--local", key, value], cwd, check=False)
+    except (RepoError, OSError):
+        pass
 
 
 def is_dirty(path: str) -> bool:
@@ -363,7 +623,7 @@ def norm_full_name(full_name: str) -> str:
     if s.endswith(".git"):
         s = s[:-4]
     if not _NAME_RE.match(s) or ".." in s:
-        raise RepoError(_c(f"Tên repo không hợp lệ: {full_name}", f"Invalid repo name: {full_name}"))
+        raise RepoError(_c(f"Tên repository không hợp lệ: {full_name}", f"Invalid repository name: {full_name}"))
     return s
 
 
@@ -377,14 +637,27 @@ def clone_path(brain_root: str, full_name: str) -> Path:
     return REPOS_DIR / _brain_slug(brain_root) / owner / name
 
 
+def _same_brain(stored: Any, brain: str) -> bool:
+    """A record belongs to `brain` whichever spelling either side uses (#1109). A chat turn passes the alias "brain"
+    for the default brain while the dashboard saved the record with its folder ("/brains/Brain Default"); comparing
+    the strings hid the record, so the gate ran CI's commands instead of the saved ones and the GitHub card listed
+    nothing. brain_ident never folds an unknown folder into the default brain."""
+    return stored == brain or brain_ident.same_brain(stored, brain)
+
+
 def list_local(brain: str = "") -> List[Dict[str, Any]]:
-    return [dict(r) for r in _load()["repos"] if not brain or r.get("brain") == brain]
+    return [dict(r) for r in _load()["repos"] if not brain or _same_brain(r.get("brain"), brain)]
 
 
 def find(brain: str, full_name: str) -> Optional[Dict[str, Any]]:
     fn = norm_full_name(full_name).lower()
-    for r in _load()["repos"]:
-        if r.get("brain") == brain and str(r.get("full_name") or "").lower() == fn:
+    same_name = [r for r in _load()["repos"] if str(r.get("full_name") or "").lower() == fn]
+    # The exact spelling first: an older install may hold one record per spelling of the same brain.
+    for r in same_name:
+        if r.get("brain") == brain:
+            return dict(r)
+    for r in same_name:
+        if _same_brain(r.get("brain"), brain):
             return dict(r)
     return None
 
@@ -478,7 +751,7 @@ def remote_repos(q: str = "", brain: str = "") -> List[Dict[str, Any]]:
         try:
             items = GitHub(tok).repos()
         except GitHubError as e:
-            raise RepoError(_c(f"Không lấy được danh sách repo: {e}", f"Could not list repos: {e}"))
+            raise RepoError(_c(f"Không lấy được danh sách repository: {e}", f"Could not list repositories: {e}"))
         _REPO_CACHE.update(at=now, token=tok, items=items)
     local = {str(r.get("full_name") or "").lower() for r in list_local(brain)}
     term = str(q or "").strip().lower()
@@ -505,9 +778,9 @@ def ensure_clone(brain: str, brain_root: str, full_name: str) -> Dict[str, Any]:
         meta = gh.repo(full_name)
     except GitHubError as e:
         if e.status == 404:
-            raise RepoError(_c(f"Không thấy repo {full_name}, hoặc token chưa được cấp quyền vào repo này.",
-                               f"Repo {full_name} not found, or the token has no access to it."))
-        raise RepoError(_c(f"Không đọc được repo {full_name}: {e}", f"Could not read repo {full_name}: {e}"))
+            raise RepoError(_c(f"Không thấy repository {full_name}, hoặc token chưa được cấp quyền vào repository này.",
+                               f"Repository {full_name} not found, or the token has no access to it."))
+        raise RepoError(_c(f"Không đọc được repository {full_name}: {e}", f"Could not read repository {full_name}: {e}"))
     full_name = meta.get("full_name") or full_name
     default_branch = meta.get("default_branch") or "main"
     clone_url = meta.get("clone_url") or f"https://github.com/{full_name}.git"
@@ -516,13 +789,16 @@ def ensure_clone(brain: str, brain_root: str, full_name: str) -> Dict[str, Any]:
     with _repo_lock(str(dest)):
         rec = find(brain, full_name)
         if dest.is_dir() and (dest / ".git").exists():
-            git(["fetch", "--prune", "origin"], str(dest), auth=True, timeout=CLONE_TIMEOUT)
+            # `origin` follows GitHub's own answer: a URL that drifted, or that a chat's shell rewrote, is put back
+            # before the token goes anywhere (auth_env refuses a clone whose origin is not this URL).
+            git(["remote", "set-url", "origin", clone_url], str(dest), check=False)
+            git(["fetch", "--prune", "origin"], str(dest), auth=True, timeout=CLONE_TIMEOUT, origin=clone_url)
         else:
             if dest.exists():
                 shutil.rmtree(dest, ignore_errors=True)   # a half-finished clone from a crash, never user work
             dest.parent.mkdir(parents=True, exist_ok=True)
             git(["clone", "--filter=blob:none", "--no-tags", clone_url, str(dest)], str(dest.parent),
-                auth=True, timeout=CLONE_TIMEOUT)
+                auth=True, timeout=CLONE_TIMEOUT, origin=clone_url)
         if not rec:
             rec = {"id": uuid.uuid4().hex[:12], "brain": brain, "added_at": _now()}
         # Merge methods the repo allows, in Javis's order of preference (spec 11.1: follow the repo's settings).
@@ -555,6 +831,7 @@ def _worktree_dir(rec: Dict[str, Any], sid: str) -> Path:
 
 def ensure_worktree(sid: str, rec: Dict[str, Any]) -> Dict[str, str]:
     """This conversation's worktree of the repo, created on `javis/<session>` from origin's default branch."""
+    ensure_identity(rec["path"])       # the engine runs git in the worktree: merge and stash need a committer
     existing = coding_store.worktree_thu_muc(sid, rec["folder_id"])
     if existing and Path(existing).is_dir():
         return {"worktree": existing, "branch": coding_store.nhanh_hien_tai(existing)}
@@ -574,7 +851,7 @@ def ensure_worktree(sid: str, rec: Dict[str, Any]) -> Dict[str, str]:
                     timeout=300)
             base = f"origin/{base_name}"
             args = ["worktree", "add", str(dest), branch] if have else ["worktree", "add", "-b", branch, str(dest), base]
-            git(args, clone)
+            git(args, clone, **CHECKOUT)
             # The branch tracks nothing yet; the first push sets its upstream.
             git(["config", f"branch.{branch}.javisBase", base_name], clone, check=False)
     coding_store.dat_worktree_thu_muc(sid, rec["folder_id"], str(dest))
@@ -608,6 +885,128 @@ def attach(sid: str, brain: str, brain_root: str, full_names: List[str]) -> Dict
     return session_view(sid, brain)
 
 
+def _attach_one(sid: str, brain: str, brain_root: str, full_name: str) -> Dict[str, Any]:
+    """Bind ONE more repo to the chat, after what it already has, with its worktree. Nothing else is touched.
+
+    A folder bound without its worktree would put the engine in the shared clone, so a failure takes the binding off
+    again before it is raised."""
+    rec = ensure_clone(brain, brain_root, full_name)
+    ids = [r["id"] for r in coding_store.thu_muc_cua_phien(sid)]
+    fresh = rec["folder_id"] not in ids
+    try:
+        if fresh:
+            coding_store.dat_rang_buoc(sid, thu_muc_ids=ids + [rec["folder_id"]])
+        ensure_worktree(sid, rec)
+    except Exception:
+        if fresh:
+            try:
+                coding_store.dat_rang_buoc(sid, thu_muc_ids=ids)
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+    return rec
+
+
+def add(sid: str, brain: str, brain_root: str, full_name: str) -> Dict[str, Any]:
+    """Attach one repo to a conversation and leave its other repos alone (the "+" of the picker, 2026-11-21).
+
+    The picker used to send the whole list (`attach`) for every tick. One repo that could not come off (unsaved work)
+    then refused the request as a whole, so the repo just ticked was dropped with it and the chat "jumped back" to the
+    old one. Adding and removing are separate requests now: this one, and `detach`."""
+    sid = str(sid or "").strip()
+    if not sid:
+        raise RepoError(_c("Thiếu mã cuộc trò chuyện.", "Missing conversation id."))
+    n = norm_full_name(full_name)
+    on_chat = {str(r.get("repo") or "").lower() for r in coding_store.thu_muc_cua_phien(sid) if r.get("nguon") == SOURCE}
+    if n.lower() not in on_chat:
+        _attach_one(sid, brain, brain_root, n)
+    return session_view(sid, brain)
+
+
+# ============================================================
+# Repos a chat inherits from its project or its assistant (2026-11-15)
+# ============================================================
+# Owner, 15/11/2026: "ở chức năng project cũng có khả năng thêm repo để dễ dàng tạo các dự án code, hoặc cả trong tài
+# liệu của agent và team". A project (sessions.project_repos) or an assistant (`assets.repos` in its file) lists repos;
+# every chat of it gets them on its next turn, each on the chat's own branch like a repo picked in the composer.
+# Each repo is offered ONCE per chat (`seeded` in the registry): a repo the person detached from one chat stays
+# detached, while a repo added to the project later still reaches its older chats.
+def prepare(brain: str, brain_root: str, full_names: List[str]) -> List[str]:
+    """Check and clone the repos a project or an assistant is about to list, so a chat that inherits one later only
+    adds a worktree. Returns the names as GitHub spells them; raises RepoError (localized) on the first failure."""
+    out: List[str] = []
+    for fn in full_names or []:
+        n = norm_full_name(fn)
+        if n.lower() in {o.lower() for o in out}:
+            continue
+        out.append(ensure_clone(brain, brain_root, n)["full_name"])
+    return out
+
+
+def seeded(sid: str) -> List[str]:
+    """Lower-cased names of the inherited repos this chat was already given (or already had)."""
+    got = (_load().get("seeded") or {}).get(str(sid or ""), [])
+    return [str(x) for x in got] if isinstance(got, list) else []
+
+
+def _mark_seeded(sid: str, names: List[str]) -> None:
+    if not names:
+        return
+    with _lock:
+        d = _load()
+        per = d.setdefault("seeded", {}).setdefault(str(sid), [])
+        for n in names:
+            if n.lower() not in per:
+                per.append(n.lower())
+        _save(d)
+
+
+def _forget_seeds(sid: str) -> None:
+    with _lock:
+        d = _load()
+        if (d.get("seeded") or {}).pop(str(sid), None) is not None:
+            _save(d)
+
+
+def seed_session(sid: str, brain: str, brain_root: str, full_names: List[str]) -> Dict[str, Any]:
+    """Attach to a chat the inherited repos it has not been given yet. Never detaches anything, never moves the chat's
+    main folder: a new repo goes after what the chat already has (a chat with nothing gets it as its main folder).
+
+    A repo that fails (GitHub disconnected, no access) is not marked, so the next turn tries again.
+    Returns {"attached": [names], "failed": [{"full_name", "error"}]}.
+    """
+    sid = str(sid or "").strip()
+    out: Dict[str, Any] = {"attached": [], "failed": []}
+    if not sid or not full_names:
+        return out
+    done = set(seeded(sid))
+    todo: List[str] = []
+    for fn in full_names:
+        try:
+            n = norm_full_name(fn)
+        except RepoError:
+            continue
+        if n.lower() not in done and n.lower() not in {t.lower() for t in todo}:
+            todo.append(n)
+    if not todo:
+        return out
+    on_chat = {str(r.get("repo") or "").lower() for r in coding_store.thu_muc_cua_phien(sid) if r.get("nguon") == SOURCE}
+    marked: List[str] = []
+    for n in todo:
+        if n.lower() in on_chat:
+            marked.append(n)          # already picked in the composer: nothing to add, only remember it was offered
+            continue
+        try:
+            rec = _attach_one(sid, brain, brain_root, n)
+        except Exception as e:  # noqa: BLE001 - one repo failing must not stop the turn or the other repos
+            out["failed"].append({"full_name": n, "error": str(e) or type(e).__name__})
+            continue
+        out["attached"].append(rec.get("full_name") or n)
+        marked.append(n)
+    _mark_seeded(sid, marked)
+    return out
+
+
 def _rec_for_folder(brain: str, folder: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     fn = folder.get("repo") or ""
     if not fn:
@@ -618,16 +1017,28 @@ def _rec_for_folder(brain: str, folder: Dict[str, Any]) -> Optional[Dict[str, An
         return None
 
 
-def _work_at_risk(path: str) -> str:
-    """Why deleting `path` would lose work, or "" when it is safe."""
+def _risk_of(path: str) -> tuple:
+    """What deleting `path` would lose: ("dirty", 0) for edits not committed, ("unpushed", n) for commits GitHub does
+    not have, ("", 0) when it is safe."""
     if not Path(path).is_dir():
-        return ""
+        return "", 0
     if is_dirty(path):
-        return _c("còn sửa đổi chưa commit", "has uncommitted changes")
+        return "dirty", 0
     n = unpushed_count(path)
-    if n:
+    return ("unpushed", n) if n else ("", 0)
+
+
+def _risk_text(kind: str, n: int) -> str:
+    if kind == "dirty":
+        return _c("còn sửa đổi chưa commit", "has uncommitted changes")
+    if kind == "unpushed":
         return _c(f"còn {n} commit chưa đẩy lên GitHub", f"has {n} commit(s) not pushed to GitHub")
     return ""
+
+
+def _work_at_risk(path: str) -> str:
+    """Why deleting `path` would lose work, or "" when it is safe."""
+    return _risk_text(*_risk_of(path))
 
 
 def _remove_worktree(clone: str, wt: str) -> None:
@@ -648,10 +1059,13 @@ def detach(sid: str, full_name: str, brain: str = "", force: bool = False) -> Di
     folder = folders[0]
     wt = coding_store.worktree_thu_muc(sid, folder["id"])
     if wt and not force:
-        risk = _work_at_risk(wt)
-        if risk:
+        kind, n = _risk_of(wt)
+        if kind:
+            risk = _risk_text(kind, n)
+            # The code lets the picker ask "detach anyway?" on that row (force) instead of leaving a dead end.
             raise RepoError(_c(f"Chưa bỏ được {full_name} khỏi cuộc trò chuyện: nhánh của cuộc này {risk} (tại {wt}).",
-                               f"Cannot detach {full_name}: this chat's branch {risk} (at {wt})."))
+                               f"Cannot detach {full_name}: this chat's branch {risk} (at {wt})."),
+                            code="work_at_risk", data={"full_name": full_name, "risk": kind, "count": n})
     if wt:
         _remove_worktree(folder["duong_dan"], wt)
     coding_store.dat_worktree_thu_muc(sid, folder["id"], "")
@@ -668,7 +1082,7 @@ def remove_from_brain(brain: str, full_name: str, busy: Optional[List[str]] = No
     """
     rec = find(brain, full_name)
     if not rec:
-        raise RepoError(_c(f"Brain này không có repo {full_name}.", f"This brain has no repo {full_name}."))
+        raise RepoError(_c(f"Brain này không có repository {full_name}.", f"This brain has no repository {full_name}."))
     problems: List[str] = []
     for b in busy or []:
         problems.append(_c(f"đang có việc chạy: {b}", f"a job is running: {b}"))
@@ -762,7 +1176,7 @@ def set_base(sid: str, brain: str, full_name: str, base: str) -> Dict[str, Any]:
                                "(or start a new chat) before changing branch."))
         git(["fetch", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], wt, auth=True, timeout=300)
         cur = coding_store.nhanh_hien_tai(wt) or session_branch(sid)
-        git(["checkout", "-q", "-B", cur, f"origin/{base}"], wt)
+        git(["checkout", "-q", "-B", cur, f"origin/{base}"], wt, **CHECKOUT)
         git(["config", f"branch.{cur}.javisBase", base], wt, check=False)
     _set_session_base(sid, fn, "" if base == (repo.get("default_branch") or "main") else base)
     return session_view(sid, brain)
@@ -778,7 +1192,7 @@ def local_view(brain: str) -> List[Dict[str, Any]]:
         users = coding_store.sessions_using(r.get("folder_id") or "")
         out.append({"full_name": r["full_name"], "path": r["path"], "exists": Path(r["path"]).is_dir(),
                     "default_branch": r.get("default_branch") or "", "chats": len(users),
-                    "auto_merge": auto_merge_on(r), "fetched_at": r.get("fetched_at") or 0})
+                    "auto_merge": auto_merge_on(r), "review": review_settings(r), "fetched_at": r.get("fetched_at") or 0})
     return out
 
 
@@ -803,7 +1217,8 @@ def prompt_block(sid: str, brain: str = "") -> str:
                  "test TÁI HIỆN lỗi trước (đỏ), sửa, rồi chạy lại đúng test đó cho xanh. KHÔNG bỏ qua, xoá hay nới "
                  "test, không sửa workflow CI để cho xanh. Sau mỗi lượt Javis tự chạy bộ kiểm tra của repo; xanh thì Javis "
                  "tự commit, đẩy lên nhánh của cuộc này, mở PR và theo dõi CI. CI đỏ thì Javis mở một lượt sửa "
-                 "kèm log, tối đa 3 vòng.")
+                 "kèm log, tối đa 3 vòng. CI xanh thì Javis tự merge nếu repo bật tự merge (mặc định bật).")
+    lines += _work_state_lines(sid, repos)
     # Spec 7.1: the repo's own rules reach every engine, not only the ones that read CLAUDE.md natively.
     # Spec 13.1: plus the lessons Javis wrote down for this repo after real failures (kept in the brain).
     try:
@@ -821,6 +1236,37 @@ def prompt_block(sid: str, brain: str = "") -> str:
     except Exception:
         pass
     return "\n".join(lines) + "\n"
+
+
+def _work_state_lines(sid: str, repos: List[Dict[str, Any]]) -> List[str]:
+    """What GitHub really holds for this chat right now, read from github_work's store, never from earlier answers.
+
+    Without it the model guessed: asked to "push it" after a failed push it said it was not allowed to and offered to
+    edit code just to trigger a push (owner, 06/11/2026)."""
+    try:
+        import github_work
+        out = []
+        for r in repos:
+            row = github_work.st().get(sid, r["full_name"]) or {}
+            if not row:
+                continue
+            fn = r["full_name"]
+            if github_work.ship_failed(row):
+                out.append(f"Trạng thái {fn}: code đã commit trên máy nhưng CHƯA lên GitHub. Lý do: "
+                           f"{row.get('stuck_reason') or '?'} Không cần sửa code hay làm lại gì để đẩy: Javis tự đẩy lại "
+                           "ngay sau lượt này, định kỳ vài phút một lần, và ngay khi GitHub được kết nối lại; nút Đẩy lại "
+                           "ở bảng GitHub của cuộc này cũng được.")
+            elif row.get("pr_number"):
+                out.append(f"Trạng thái {fn}: nhánh {row.get('branch')}, PR #{row['pr_number']} {row.get('pr_url') or ''}, "
+                           f"CI {row.get('ci')}, PR {row.get('integ')}"
+                           + (f", đang kẹt: {row['stuck_reason']}" if row.get("exec") == "stuck" and row.get("stuck_reason")
+                              else "") + ".")
+        if out:
+            out.append("Người dùng bảo đẩy lên hay merge thì nói đúng trạng thái trên và việc Javis sẽ làm tiếp; KHÔNG nói "
+                       "là mình không được làm, KHÔNG bảo họ tự chạy git, KHÔNG đề nghị sửa code chỉ để kích hoạt việc đẩy.")
+        return out
+    except Exception:
+        return []
 
 
 def forget_session(sid: str) -> Dict[str, Any]:
@@ -841,6 +1287,7 @@ def forget_session(sid: str) -> Dict[str, Any]:
             continue
         _remove_worktree(folder["duong_dan"], wt)
         coding_store.dat_worktree_thu_muc(sid, folder["id"], "")
+    _forget_seeds(sid)
     if not kept:
         coding_store.xoa_rang_buoc(sid)
         _forget_bases(sid)
@@ -851,7 +1298,7 @@ def set_checks(brain: str, full_name: str, checks: Optional[List[Dict[str, str]]
     """Save the repo's local check commands (None = go back to the suggested ones)."""
     rec = find(brain, full_name)
     if not rec:
-        raise RepoError(_c(f"Brain này không có repo {full_name}.", f"This brain has no repo {full_name}."))
+        raise RepoError(_c(f"Brain này không có repository {full_name}.", f"This brain has no repository {full_name}."))
     if checks is None:
         rec.pop("checks", None)
     else:
@@ -868,7 +1315,7 @@ def set_checks(brain: str, full_name: str, checks: Optional[List[Dict[str, str]]
 def get_checks(brain: str, full_name: str) -> Dict[str, Any]:
     rec = find(brain, full_name)
     if not rec:
-        raise RepoError(_c(f"Brain này không có repo {full_name}.", f"This brain has no repo {full_name}."))
+        raise RepoError(_c(f"Brain này không có repository {full_name}.", f"This brain has no repository {full_name}."))
     import github_gate
     suggested = github_gate.suggest_checks(rec["path"]) if Path(rec["path"]).is_dir() else []
     saved = rec.get("checks")
@@ -884,7 +1331,23 @@ def auto_merge_on(rec: Dict[str, Any]) -> bool:
 def set_auto_merge(brain: str, full_name: str, on: bool) -> Dict[str, Any]:
     rec = find(brain, full_name)
     if not rec:
-        raise RepoError(_c(f"Brain này không có repo {full_name}.", f"This brain has no repo {full_name}."))
+        raise RepoError(_c(f"Brain này không có repository {full_name}.", f"This brain has no repository {full_name}."))
     rec["auto_merge"] = bool(on)
     _put(rec)
     return {"full_name": rec["full_name"], "auto_merge": bool(on)}
+
+
+def review_settings(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """Cross review of one repo (owner, 08/11/2026: "the person decides, not Javis"). Off by default; when on, Javis
+    reviews each green commit before merging, on `provider` when one is pinned, else on the background model."""
+    r = rec.get("review") if isinstance(rec.get("review"), dict) else {}
+    return {"on": r.get("on") is True, "provider": str(r.get("provider") or "")}
+
+
+def set_review(brain: str, full_name: str, on: bool, provider: str = "") -> Dict[str, Any]:
+    rec = find(brain, full_name)
+    if not rec:
+        raise RepoError(_c(f"Brain này không có repository {full_name}.", f"This brain has no repository {full_name}."))
+    rec["review"] = {"on": bool(on), "provider": str(provider or "").strip()[:64]}
+    _put(rec)
+    return {"full_name": rec["full_name"], "review": review_settings(rec)}

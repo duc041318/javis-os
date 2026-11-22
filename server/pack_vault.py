@@ -31,6 +31,13 @@ Cài vào brain NÀO
 Brain đang mở lúc bấm Cài, và ghi tên brain đó vào sổ. Vì agent/workflow/skill vốn thuộc về một
 brain cụ thể (khác hẳn connector và plugin vốn dùng chung mọi brain), nên "cài vào tất cả" là
 áp đặt: người dùng có brain việc và brain cá nhân, và họ không muốn mọi thứ ở cả hai nơi.
+
+Several brains (owner, 16/11/2026, after a community report: "installed in one brain, the other brain
+says installed but I cannot install it there"). The ledger keeps one entry PER BRAIN the user installed
+the pack into, each with its own items and hashes. Installing from another brain adds that brain; an
+update refreshes every brain that still holds the pack; uninstalling the pack clears every brain.
+Ledger shape: `{"brains": {root: {"items": {...}}}, "brain": first root, "items": its items}`. The two
+top-level keys mirror the first brain so an older Javis (a rollback) still reads that brain correctly.
 """
 from __future__ import annotations
 
@@ -53,6 +60,86 @@ LOAI = {
     "workflows": {"thu_muc": "workflows", "la_thu_muc": False, "duoi": ".md"},
     "skills":    {"thu_muc": "skills",    "la_thu_muc": True,  "duoi": ""},
 }
+
+# The folder the app READS each kind from (0.4xx, owner report 2026-11-04). The app falls back to the old
+# `Javis/agents` / `Javis/workflows` while the flat folder does not exist (`main._brain_sub`). Writing into
+# `<brain>/agents` on such a brain would create that folder, the app would switch to it, and every agent in
+# `Javis/agents` would vanish from the Partners page.
+_LEGACY = {"agents": "Javis/agents", "workflows": "Javis/workflows"}
+
+# How many `-2`, `-3`... names to try before giving up on a clash.
+_MAX_ALT = 50
+
+
+def _dir_for(root: Path, loai: str) -> Path:
+    new = root / LOAI[loai]["thu_muc"]
+    old = _LEGACY.get(loai)
+    if not new.is_dir() and old and (root / old).is_dir():
+        return root / old
+    return new
+
+
+def _target(root: Path, loai: str, slug: str) -> Path:
+    return _dir_for(root, loai) / (slug + LOAI[loai]["duoi"])
+
+
+def _skill_disabled(p: Path) -> Path:
+    """`skills/<slug>` -> `skills/.disabled/<slug>`, where the app moves a skill the user turned off."""
+    return p.parent / ".disabled" / p.name
+
+
+def _where(m: dict) -> Path | None:
+    """Where an item the pack placed lives NOW, or None when the user deleted it.
+
+    A skill the user turned off sits in `skills/.disabled/<slug>`: still there, still the pack's. Missing that
+    case made a disabled skill look deleted (the Store said "not installed") and left it behind on uninstall."""
+    p = Path(m.get("duong") or "")
+    if not str(p) or str(p) == ".":
+        return None
+    if p.exists():
+        return p
+    if m.get("loai") == "skills":
+        d = _skill_disabled(p)
+        if d.exists():
+            return d
+    return None
+
+
+def _taken(p: Path, loai: str) -> bool:
+    return p.exists() or (loai == "skills" and _skill_disabled(p).exists())
+
+
+def _free_slug(root: Path, loai: str, slug: str) -> str:
+    """First `<slug>-N` that is free in this brain, or "" when none is."""
+    for n in range(2, _MAX_ALT + 2):
+        cand = f"{slug}-{n}"
+        if not _taken(_target(root, loai, cand), loai):
+            return cand
+    return ""
+
+
+def _set_slug(md: Path, old: str, new: str) -> None:
+    """Point the `slug:` line of a copied agent/workflow file at its new file name.
+
+    Only inside the frontmatter, and only the exact old value: the body is the author's text."""
+    try:
+        text = md.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if not text.startswith("---"):
+        return
+    end = text.find("\n---", 3)
+    if end < 0:
+        return
+    head, rest = text[:end], text[end:]
+    lines = head.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() in (f"slug: {old}", f"slug: '{old}'", f'slug: "{old}"'):
+            lines[i] = f"slug: {new}"
+            break
+    else:
+        return
+    md.write_text("\n".join(lines) + rest, encoding="utf-8")
 
 
 def _hash(duong: Path) -> str:
@@ -113,6 +200,47 @@ def _xoa_so(pack_id: str) -> None:
         pass
 
 
+def brains_of_ledger(so: dict) -> dict:
+    """{brain root: items} of a ledger, in either shape (one brain before 16/11/2026, several after)."""
+    if not isinstance(so, dict):
+        return {}
+    many = so.get("brains")
+    if isinstance(many, dict):
+        return {str(k): dict((v or {}).get("items") or {}) for k, v in many.items()
+                if k and isinstance(v, dict) and isinstance(v.get("items") or {}, dict)}
+    if so.get("brain") and isinstance(so.get("items") or {}, dict):
+        return {str(so["brain"]): dict(so.get("items") or {})}
+    return {}
+
+
+def _same_brain(a: str, b: str) -> bool:
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return str(a) == str(b)
+
+
+def _key_for(brains: dict, root) -> str:
+    """The ledger key that names brain `root`, "" when the pack has nothing recorded there."""
+    return next((k for k in brains if _same_brain(k, str(root))), "")
+
+
+def _write_brains(pack_id: str, brains: dict) -> None:
+    """Write the ledger from {root: items}; brains with no items are dropped, an empty ledger is deleted."""
+    brains = {k: v for k, v in brains.items() if v}
+    if not brains:
+        _xoa_so(pack_id)
+        return
+    first = next(iter(brains))
+    _ghi_so(pack_id, {"brains": {k: {"items": v} for k, v in brains.items()},
+                      "brain": first, "items": brains[first]})
+
+
+def brains(pack_id: str) -> list:
+    """The brain roots this pack placed items in, in install order."""
+    return list(brains_of_ledger(doc_so(pack_id)))
+
+
 def _nguon(thu_muc_goi: Path, loai: str) -> list:
     """Các mục loại này mà gói mang theo, dạng [(slug, đường_dẫn_nguồn)]."""
     goc = thu_muc_goi / LOAI[loai]["thu_muc"]
@@ -139,22 +267,46 @@ def liet_ke(thu_muc_goi: Path) -> dict:
 def ke_hoach_cai(thu_muc_goi: Path, brain_root: str) -> dict:
     """Cài gói này vào brain thì đụng gì. KHÔNG ghi gì cả.
 
-    `xung_dot` là những mục brain ĐÃ CÓ mà không phải do gói này đặt vào. Chúng sẽ bị BỎ QUA
-    khi cài chứ không ghi đè - người dùng tự đặt tên trùng thì tệp của họ thắng."""
+    `xung_dot` là những mục brain ĐÃ CÓ mà không phải do gói này đặt vào. Chúng KHÔNG bị ghi đè:
+    tệp của người dùng thắng, và bản trong gói được cài dưới một tên mới (`<slug>-2`), xem `cai`."""
     root = Path(brain_root)
     ra = {"them": [], "cap_nhat": [], "xung_dot": [], "giu_nguyen": []}
-    so = {}
+    so = doc_so_brain(thu_muc_goi.name, root)
     for loai in LOAI:
         for slug, nguon in _nguon(thu_muc_goi, loai):
-            dich = root / LOAI[loai]["thu_muc"] / (slug + LOAI[loai]["duoi"])
+            khoa = f"{loai}/{slug}"
+            cu = so.get(khoa)
+            hien = _where(cu) if cu else None
+            dich = hien or _target(root, loai, slug)
             muc = {"loai": loai, "slug": slug, "duong": str(dich)}
-            if not dich.exists():
+            if cu and not hien:
                 ra["them"].append(muc)
-            elif _hash(dich) == so.get(f"{loai}/{slug}"):
-                ra["cap_nhat"].append(muc)
+            elif cu:
+                (ra["cap_nhat"] if _hash(hien) == cu.get("hash") else ra["giu_nguyen"]).append(muc)
+            elif not _taken(dich, loai):
+                ra["them"].append(muc)
             else:
                 ra["xung_dot"].append(muc)
     return ra
+
+
+def doc_so_brain(pack_id: str, root: Path) -> dict:
+    """Items this pack placed in THIS brain.
+
+    Each brain has its own entry. Installing into a brain with no entry is a fresh install there: using another
+    brain's entries would compare against (and write to) files of a brain the user did not open."""
+    by_brain = brains_of_ledger(doc_so(pack_id))
+    return by_brain.get(_key_for(by_brain, root), {})
+
+
+def _copy(nguon: Path, dich: Path, loai: str) -> None:
+    dich.parent.mkdir(parents=True, exist_ok=True)
+    if LOAI[loai]["la_thu_muc"]:
+        if dich.exists():
+            shutil.rmtree(dich, ignore_errors=True)
+        shutil.copytree(nguon, dich)
+    else:
+        shutil.copy2(nguon, dich)
 
 
 def cai(pack_id: str, thu_muc_goi: Path, brain_root: str) -> dict:
@@ -162,63 +314,206 @@ def cai(pack_id: str, thu_muc_goi: Path, brain_root: str) -> dict:
 
     KHÔNG BAO GIỜ ghi đè một tệp mà gói không phải người đặt vào đó. Với bản cập nhật của chính
     gói này thì ghi đè chỉ khi tệp còn y nguyên - người dùng đã sửa thì giữ bản của họ, y như
-    `system_sync` làm với skill hệ thống."""
+    `system_sync` làm với skill hệ thống.
+
+    Trùng tên với một mục gói KHÔNG đặt vào (owner report 2026-11-04): the user renamed or edited the
+    pack's agent, uninstalled (their edited copy is kept, by design), then installed again. Before, the
+    install skipped the item without a word, so the agent never came back and the Store still said
+    "installed". Now: an identical copy is adopted as the pack's again, and a different one stays the
+    user's while the pack's copy goes in under a free name (`javis-vu-2`), reported in `doi_ten`."""
     root = Path(brain_root)
-    so_cu = doc_so(pack_id)
-    muc_cu = so_cu.get("items") or {}
+    muc_cu = doc_so_brain(pack_id, root)
     moi = {}
-    bao = {"them": [], "cap_nhat": [], "bo_qua": [], "loi": []}
+    bao = {"them": [], "cap_nhat": [], "bo_qua": [], "doi_ten": [], "loi": []}
 
     for loai in LOAI:
         for slug, nguon in _nguon(thu_muc_goi, loai):
             khoa = f"{loai}/{slug}"
-            dich = root / LOAI[loai]["thu_muc"] / (slug + LOAI[loai]["duoi"])
+            cu = muc_cu.get(khoa)
             try:
-                if dich.exists():
-                    h = _hash(dich)
-                    if khoa not in muc_cu:
-                        # Của người dùng, hoặc của một gói khác. Không đụng.
-                        bao["bo_qua"].append({"khoa": khoa, "vi_sao": localefmt.chu("brain đã có mục cùng tên",
-                                                                                  "the brain already has an item with that name")})
-                        continue
-                    if h != muc_cu[khoa].get("hash"):
-                        bao["bo_qua"].append({"khoa": khoa, "vi_sao": localefmt.chu("bạn đã sửa, giữ bản của bạn",
-                                                                                  "you edited it, your version is kept")})
-                        moi[khoa] = muc_cu[khoa]      # vẫn ghi nhận là của gói, để lúc gỡ còn biết
-                        continue
-                    ke = "cap_nhat"
+                if cu:
+                    hien = _where(cu)
+                    if hien is not None:
+                        if _hash(hien) != cu.get("hash"):
+                            bao["bo_qua"].append({"khoa": khoa, "vi_sao": localefmt.chu(
+                                "bạn đã sửa, giữ bản của bạn", "you edited it, your version is kept")})
+                            moi[khoa] = cu      # vẫn ghi nhận là của gói, để lúc gỡ còn biết
+                            continue
+                        # Unchanged: update in place, where it is (a turned-off skill stays off).
+                        dich, ke, ten = hien, "cap_nhat", cu.get("slug") or slug
+                    else:
+                        # The user deleted it. Put it back under the name it had.
+                        ten = cu.get("slug") or slug
+                        dich, ke = _target(root, loai, ten), "them"
+                        if _taken(dich, loai):
+                            ten = ""
                 else:
-                    ke = "them"
-                dich.parent.mkdir(parents=True, exist_ok=True)
-                if LOAI[loai]["la_thu_muc"]:
-                    if dich.exists():
-                        shutil.rmtree(dich, ignore_errors=True)
-                    shutil.copytree(nguon, dich)
-                else:
-                    shutil.copy2(nguon, dich)
-                moi[khoa] = {"duong": str(dich), "hash": _hash(dich), "loai": loai, "slug": slug}
-                bao[ke].append({"khoa": khoa, "duong": str(dich)})
+                    ten, ke = slug, "them"
+                    dich = _target(root, loai, slug)
+                    if _taken(dich, loai):
+                        hien = dich if dich.exists() else _skill_disabled(dich)
+                        if _hash(hien) == _hash(nguon):
+                            # Same content as the pack ships: it is the pack's copy, take it back.
+                            moi[khoa] = {"duong": str(dich), "hash": _hash(hien), "loai": loai, "slug": slug}
+                            bao["cap_nhat"].append({"khoa": khoa, "duong": str(hien)})
+                            continue
+                        ten = ""
+                if not ten:
+                    ten = _free_slug(root, loai, slug)
+                    if not ten:
+                        bao["bo_qua"].append({"khoa": khoa, "vi_sao": localefmt.chu(
+                            "brain đã có mục cùng tên", "the brain already has an item with that name")})
+                        continue
+                    dich = _target(root, loai, ten)
+                    ke = "doi_ten"
+                _copy(nguon, dich, loai)
+                if ten != slug and not LOAI[loai]["la_thu_muc"]:
+                    _set_slug(dich, slug, ten)
+                moi[khoa] = {"duong": str(dich), "hash": _hash(dich), "loai": loai, "slug": ten}
+                hang = {"khoa": khoa, "duong": str(dich)}
+                if ke == "doi_ten":
+                    hang.update({"slug": ten, "goc": slug, "loai": loai})
+                bao[ke].append(hang)
             except OSError as e:
                 bao["loi"].append(f"{khoa}: {e}")
 
-    if moi:
-        _ghi_so(pack_id, {"brain": str(root), "items": moi})
-    else:
-        _xoa_so(pack_id)
+    # Only this brain's entry changes: the pack may also live in other brains (16/11/2026).
+    by_brain = brains_of_ledger(doc_so(pack_id))
+    key = _key_for(by_brain, root) or str(root)
+    by_brain[key] = moi
+    _write_brains(pack_id, by_brain)
     return bao
 
 
-def ke_hoach_go(pack_id: str) -> dict:
-    """Gỡ gói này thì mất năng lực nào, và giữ lại cái nào vì người dùng đã sửa."""
-    so = doc_so(pack_id)
-    xoa, giu = [], []
-    for khoa, m in (so.get("items") or {}).items():
-        p = Path(m.get("duong") or "")
-        if not p.exists():
+def cai_moi_brain(pack_id: str, thu_muc_goi: Path, brain_root: str) -> dict:
+    """Install into the open brain, then refresh every other brain that still holds this pack.
+
+    Returns the report of the open brain (what the install screen shows), plus `brains_khac`, the names of the
+    other brains brought to this version. An update clicked in one brain must not leave the copies in the other
+    brains on the old version. A brain whose folder is gone, or where the user deleted every item of the pack, is
+    dropped from the ledger instead of being written to again."""
+    bao = cai(pack_id, thu_muc_goi, brain_root)
+    bao["brains_khac"] = []
+    by_brain = brains_of_ledger(doc_so(pack_id))
+    for key in list(by_brain):
+        if _same_brain(key, brain_root):
             continue
-        (xoa if _hash(p) == m.get("hash") else giu).append(
-            {"khoa": khoa, "slug": m.get("slug"), "loai": m.get("loai"), "duong": str(p)})
-    return {"brain": so.get("brain", ""), "xoa": xoa, "giu": giu}
+        items = by_brain.get(key) or {}
+        if not Path(key).is_dir() or not any(_where(m) is not None for m in items.values()):
+            by_brain.pop(key, None)
+            _write_brains(pack_id, by_brain)
+            continue
+        khac = cai(pack_id, thu_muc_goi, key)
+        by_brain = brains_of_ledger(doc_so(pack_id))
+        bao["loi"].extend(khac.get("loi") or [])
+        bao["brains_khac"].append(Path(key).name)
+    return bao
+
+
+def con_lai(pack_id: str, brain_root: str = "") -> dict:
+    """How many brain items this pack placed, and how many are still there (in every brain, or in `brain_root`).
+
+    The Store uses it: a pack that only brings agents/workflows/skills, whose items the user deleted from the
+    app, is not "installed" any more, and must offer Install again instead of Uninstall."""
+    by_brain = brains_of_ledger(doc_so(pack_id))
+    if brain_root:
+        key = _key_for(by_brain, brain_root)
+        by_brain = {key: by_brain[key]} if key else {}
+    items = [m for v in by_brain.values() for m in v.values()]
+    return {"placed": len(items), "present": sum(1 for m in items if _where(m) is not None)}
+
+
+def brain_of(pack_id: str, open_root: str = "") -> dict:
+    """Which brains hold the items this pack placed (#1308, several brains since 16/11/2026).
+
+    The pack itself (connector, plugin, the "Installed" mark) is for the whole machine, its assistants and skills
+    are per brain. `{"brain", "name", "present", "here", "other", "names"}`: `brain`/`name` is the first brain that
+    still holds items, `present` counts items in every brain, `here` those in `open_root`, and `other` is True when
+    the pack's items are only in OTHER brains: the Store then offers "Install in this brain"."""
+    by_brain = brains_of_ledger(doc_so(pack_id))
+    holding = [k for k, v in by_brain.items() if any(_where(m) is not None for m in v.values())]
+    present = con_lai(pack_id)["present"]
+    here = con_lai(pack_id, open_root)["present"] if open_root else 0
+    first = holding[0] if holding else ""
+    if open_root:
+        others = [k for k in holding if not _same_brain(k, open_root)]
+        first = others[0] if others and not here else first
+    return {"brain": first, "name": Path(first).name if first else "", "present": present, "here": here,
+            "other": bool(open_root and present and not here),
+            "names": [Path(k).name for k in holding]}
+
+
+def agent_packs(brain_root: str) -> dict:
+    """{agent slug: pack id} for the agent files of this brain that a pack placed and nobody changed since.
+
+    The Auto registry asks this to tell "the pack put its own agent back" from "some file showed up under an old
+    name" (owner report 2026-11-11). Only an untouched file counts: one the user edited, or wrote by hand over the
+    pack's, is the user's and says nothing about where the agent came from. Never raises."""
+    out = {}
+    try:
+        root = Path(brain_root).resolve()
+        ledgers = sorted(HIEU_UNG_DIR.glob("*.json")) if HIEU_UNG_DIR.is_dir() else []
+    except OSError:
+        return out
+    for f in ledgers:
+        try:
+            so = json.loads(f.read_text(encoding="utf-8"))
+            items = next((v for k, v in brains_of_ledger(so).items() if Path(k).resolve() == root), None)
+            if items is None:
+                continue
+            for m in items.values():
+                if not isinstance(m, dict) or m.get("loai") != "agents":
+                    continue
+                p = _where(m)
+                if p is not None and p.is_file() and m.get("hash") and _hash(p) == m.get("hash"):
+                    out.setdefault(p.stem, f.stem)
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def ke_hoach_go(pack_id: str) -> dict:
+    """Gỡ gói này thì mất năng lực nào, và giữ lại cái nào vì người dùng đã sửa.
+
+    Every brain the pack was installed in (16/11/2026): each row carries its `brain` root, and `brains` lists the
+    roots that still hold something, so the confirmation can name them."""
+    by_brain = brains_of_ledger(doc_so(pack_id))
+    xoa, giu, holding = [], [], []
+    for brain, items in by_brain.items():
+        for khoa, m in items.items():
+            p = _where(m)
+            if p is None:
+                continue
+            if brain not in holding:
+                holding.append(brain)
+            (xoa if _hash(p) == m.get("hash") else giu).append(
+                {"khoa": khoa, "slug": m.get("slug"), "loai": m.get("loai"), "duong": str(p), "brain": brain})
+    return {"brain": holding[0] if holding else next(iter(by_brain), ""), "brains": holding, "xoa": xoa, "giu": giu}
+
+
+def _valid_skill_slug(slug: str) -> bool:
+    try:
+        import skill_router
+        return skill_router.valid_slug(slug)
+    except Exception:
+        return False
+
+
+def _drop_mirror(brain: str, slug: str) -> None:
+    """Remove the `.claude/skills/<slug>` copy Claude Code loads natively.
+
+    `system_sync.mirror_skills` only ever adds; removing is the job of whoever removes the skill (the
+    /skills/delete route does it). Without this an uninstalled pack skill kept loading in every Claude Code
+    turn run inside the brain."""
+    if not brain or not _valid_skill_slug(slug):
+        return
+    base = Path(brain) / ".claude" / "skills"
+    for d in (base / slug, base / ".disabled" / slug):
+        try:
+            if d.is_dir() and base.resolve() in d.resolve().parents:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def go(pack_id: str) -> dict:
@@ -236,6 +531,8 @@ def go(pack_id: str) -> dict:
                 shutil.rmtree(p, ignore_errors=True)
             elif p.is_file():
                 p.unlink()
+            if m.get("loai") == "skills":
+                _drop_mirror(m.get("brain") or ke.get("brain", ""), p.name)
             bao["da_xoa"].append(m["khoa"])
         except OSError as e:
             bao["loi"].append(f"{m['khoa']}: {e}")

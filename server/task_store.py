@@ -30,6 +30,11 @@ QA_KEEP = 8
 QA_TEXT_MAX = 1000
 QA_PROGRESS_MAX = 1500
 TERMINAL_STATUS = {"done", "cancelled", "archived"}
+# A finished job the acceptance checker failed, waiting for the owner to pick "fix and run again" or "accept as is".
+# Not `needs_input`: there is no question to answer, the worker missed a criterion (owner report, 2026-11-08).
+ACCEPTANCE_FAILED = "acceptance_failed"
+# How many times a failed check sends the job straight back to its worker before the owner sees it.
+ACCEPTANCE_AUTO_FIXES = 1
 ACTIVE_STATUS = {"triage", "todo", "ready", "running", "review", "blocked"}
 # Trạng thái của làn `team` (nhóm chat). Cố ý KHÔNG nằm trong VALID_STATUS: lệnh kéo thả
 # của bảng Việc (`move`) không thể đặt một việc Kanban vào làn nhóm hay ngược lại.
@@ -213,6 +218,11 @@ class TaskStore:
                 CREATE INDEX IF NOT EXISTS idx_events_task
                     ON task_events(task_id, created_at DESC);
 
+                -- 2026-11-05: the Tasks page stats read finished events by type and time (task_stats.kanban_events),
+                -- which was a full scan of every event ever recorded, under the store lock.
+                CREATE INDEX IF NOT EXISTS idx_events_type_time
+                    ON task_events(event_type, created_at);
+
                 CREATE TABLE IF NOT EXISTS task_migrations (
                     migration_key TEXT PRIMARY KEY,
                     migrated_at REAL NOT NULL
@@ -250,6 +260,13 @@ class TaskStore:
                     brain_root TEXT NOT NULL, hint_key TEXT NOT NULL, created_at REAL NOT NULL,
                     PRIMARY KEY(brain_root, hint_key));
                 """
+            )
+            # Before the acceptance_failed state, a failed check parked the job as a question with no question in it.
+            # Move those cards to the new state so they get the two buttons instead of an empty reply box.
+            self._db.execute(
+                """UPDATE tasks SET block_kind=? WHERE status='blocked' AND block_kind='needs_input'
+                   AND lane<>'team' AND block_reason LIKE 'Chưa đạt điều kiện hoàn thành:%'""",
+                (ACCEPTANCE_FAILED,),
             )
             self._db.commit()
 
@@ -324,6 +341,7 @@ class TaskStore:
         max_attempts: int = 3,
         task_id: str = "",
         dedupe_title: bool = True,
+        metadata: Optional[dict] = None,
     ) -> str:
         root = str(brain_root)
         self.ensure_board(root)
@@ -361,14 +379,15 @@ class TaskStore:
                         id, brain_root, title, normalized_title, intent, route,
                         capability, execution_mode, priority, status, needs_approval,
                         created_by, chat_id, idempotency_key, max_attempts,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        created_at, updated_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         tid, root, title, normalized, intent or title, route or "auto",
                         capability or "auto", execution_mode or "auto",
                         max(1, min(3, int(priority or 2))), safe_status,
                         int(bool(needs_approval)), created_by or "user", str(chat_id or ""),
                         idempotency_key or "", max(1, int(max_attempts or 3)), ts, ts,
+                        _json(metadata or {}),
                     ),
                 )
                 for dep in dict.fromkeys(str(d) for d in (deps or []) if str(d)):
@@ -595,6 +614,51 @@ class TaskStore:
             ).fetchall()
         return [{"id": str(r["id"]), "title": str(r["title"])} for r in rows]
 
+    # A job that keeps being running when the server dies gets its attempt back this many times; after that a cut
+    # costs an attempt like any failure, so a job that brings the server down cannot run for ever.
+    BOOT_REFUNDS = 2
+
+    def reclaim_boot(self, brain_root: str) -> int:
+        """At process start no worker is alive, so every `running` job of this brain was cut by the restart (owner,
+        16/11/2026: work in flight carries on by itself after an update). It goes back to `ready` at once instead of
+        waiting out its lease (`reclaim_stale`, up to 90 s), and the attempt the dead run had taken is given back:
+        a restart is not the job's failure, and on Windows every update is a hard kill, so three updates in the
+        middle of a long job used to fail it. Outside actions of the dead run stay protected by once_ledger.py.
+        Team jobs (`team_running`) are not touched: the team runner recovers those."""
+        ts = now()
+        with self._lock:
+            self._tx()
+            try:
+                rows = self._db.execute(
+                    "SELECT id, attempts, current_run_id FROM tasks WHERE brain_root=? AND status='running'",
+                    (brain_root,),
+                ).fetchall()
+                for row in rows:
+                    tid = str(row["id"])
+                    run_id = str(row["current_run_id"] or "")
+                    before = self._db.execute(
+                        "SELECT COUNT(*) AS n FROM task_runs WHERE task_id=? AND status='stale' AND error='server restarted'",
+                        (tid,),
+                    ).fetchone()["n"]
+                    back = 1 if int(before) < self.BOOT_REFUNDS else 0
+                    self._db.execute(
+                        """UPDATE tasks SET status='ready', claimed_by='', claim_expires_at=0, current_run_id='',
+                           attempts=MAX(attempts-?, 0), updated_at=? WHERE id=? AND status='running'""",
+                        (back, ts, tid),
+                    )
+                    if run_id:
+                        self._db.execute(
+                            """UPDATE task_runs SET status='stale', finished_at=?, error='server restarted'
+                               WHERE id=? AND status='running'""",
+                            (ts, run_id),
+                        )
+                    self._event(tid, "reclaimed", "server restarted", run_id)
+                self._db.commit()
+                return len(rows)
+            except Exception:
+                self._db.rollback()
+                raise
+
     def reclaim_stale(self, brain_root: str, active_worker_ids: set[str]) -> int:
         ts = now()
         with self._lock:
@@ -734,7 +798,7 @@ class TaskStore:
 
     # 0.411.0: a stopped job only the owner can move on (a question, a permission, a result to approve), as opposed
     # to one Javis handles itself (technical hitch, usage limit). The Work page and the notices split on this.
-    OWNER_BLOCK_KINDS = ("needs_input", "capability")
+    OWNER_BLOCK_KINDS = ("needs_input", "capability", ACCEPTANCE_FAILED)
 
     @classmethod
     def waits_for_owner(cls, task: dict) -> bool:
@@ -1146,9 +1210,12 @@ class TaskStore:
 
     def ask(
         self, task_id: str, worker_id: str, question: str, result: str = "",
-        extra_meta: Optional[dict] = None,
+        extra_meta: Optional[dict] = None, qa_extra: Optional[dict] = None,
     ) -> Optional[dict]:
         """Chặn việc ở `needs_input` VÀ ghi câu hỏi vào `metadata.qa` (0.235.0).
+
+        `qa_extra`: thêm vào ĐÚNG mục hỏi này (vd `wf_wait` của một mốc duyệt workflow), để câu
+        trả lời gắn với đúng chỗ đang dừng chứ không với cả việc.
 
         Trước đây câu hỏi chỉ nằm lẫn trong `block_reason`, và đường duy nhất để gỡ là Thử lại:
         việc chạy lại từ đầu mà không ai nói cho nó câu trả lời, nên nó hỏi lại y hệt. Giờ mỗi
@@ -1164,6 +1231,7 @@ class TaskStore:
             "q": (question or "").strip()[:QA_TEXT_MAX],
             "asked_at": now(),
             "progress": (result or "").strip()[:QA_PROGRESS_MAX],
+            **(qa_extra or {}),
         })
         meta["qa"] = qa[-QA_KEEP:]
         meta.update(extra_meta or {})
@@ -1223,6 +1291,17 @@ class TaskStore:
     # through `answer`). Finished jobs included: "make paragraph 2 shorter" on a done job is the common case.
     FOLLOWUP_STATUS = ("blocked", "review", "done", "cancelled", "triage", "todo", "ready")
 
+    @staticmethod
+    def _followup_entry(text: str, by: str, progress: str) -> dict:
+        """One owner follow-up in the Q&A log. `TasksFeature._hoi_dap` hands it to the next run as the newest
+        instruction, which wins over the original goal where the two differ."""
+        return {
+            "q": "Chủ nhắn thêm cho việc này",
+            "a": text[:QA_TEXT_MAX], "kind": "followup", "by": by,
+            "asked_at": now(), "answered_at": now(),
+            "progress": progress.strip()[:QA_PROGRESS_MAX],
+        }
+
     def followup(self, task_id: str, text: str, by: str = "owner") -> tuple[Optional[dict], str]:
         """The owner's extra instruction for a job, then back to the queue (0.411.0).
 
@@ -1254,16 +1333,14 @@ class TaskStore:
                     return None, "not_found"
                 meta = _loads(row["metadata_json"], {})
                 qa = [x for x in (meta.get("qa") or []) if isinstance(x, dict)]
-                qa.append({
-                    "q": "Chủ nhắn thêm cho việc này",
-                    "a": text[:QA_TEXT_MAX], "kind": "followup", "by": by,
-                    "asked_at": now(), "answered_at": now(),
-                    "progress": str(row["result"] or "").strip()[:QA_PROGRESS_MAX],
-                })
+                qa.append(self._followup_entry(text, by, str(row["result"] or "")))
                 meta["qa"] = qa[-QA_KEEP:]
                 meta.pop("once_pending", None)
-                if meta.get("acceptance_check") in ("unverified", "checking"):
+                if meta.get("acceptance_check") in ("unverified", "checking", "failed"):
                     meta.pop("acceptance_check", None)
+                # A new instruction is a new piece of work: it gets its own automatic fix round.
+                meta.pop("acceptance_fixes", None)
+                meta.pop("acceptance_from", None)
                 self._db.execute(
                     """UPDATE tasks SET status='ready', block_kind='', block_reason='', attempts=0,
                        metadata_json=?, claimed_by='', claim_expires_at=0, not_before=0,
@@ -1278,10 +1355,106 @@ class TaskStore:
                 raise
         return self.get_task(task_id), ""
 
-    def set_acceptance(self, task_id: str, state: str, why: str = "") -> Optional[dict]:
+    def acceptance_failed(
+        self, task_id: str, worker_id: str, why: str, result: str = "",
+        metadata: Optional[dict] = None, artifacts: Optional[list] = None, needs_approval: bool = False,
+        auto_fix: bool = True,
+    ) -> Optional[dict]:
+        """A run finished but the acceptance check did not pass. The first `ACCEPTANCE_AUTO_FIXES` times the job goes
+        back to its worker with the checker's reason (a `acceptance_fix` entry in the Q&A log, read by the next run);
+        after that it waits for the owner as `acceptance_failed`. Never a question to the owner: the worker missed a
+        criterion, the owner has nothing to answer (owner report, 2026-11-08). A fix round does not use up an
+        attempt, so a job with `max_attempts=1` can still be fixed once. `auto_fix=False` (the worker said itself
+        it could not finish, so a rerun would most likely stop at the same place) skips the fix round."""
+        meta = dict(metadata or {})
+        reason = (why or "").strip()[:QA_TEXT_MAX]
+        fixes = int(meta.get("acceptance_fixes") or 0)
+        meta["acceptance_from"] = "review" if needs_approval else "done"
+        if auto_fix and fixes < ACCEPTANCE_AUTO_FIXES:
+            qa = [x for x in (meta.get("qa") or []) if isinstance(x, dict)]
+            qa.append({"kind": "acceptance_fix", "q": reason, "a": reason, "by": "checker",
+                       "asked_at": now(), "answered_at": now(),
+                       "progress": (result or "").strip()[:QA_PROGRESS_MAX]})
+            meta["qa"] = qa[-QA_KEEP:]
+            meta["acceptance_fixes"] = fixes + 1
+            meta.pop("acceptance_check", None)
+            return self._finish(
+                task_id, worker_id, "ready", result=result, error=reason, metadata=meta,
+                artifacts=artifacts, event_type="acceptance_retry", keep_attempt=True,
+            )
+        meta["acceptance_check"] = "failed"
+        return self._finish(
+            task_id, worker_id, "blocked", result=result, error=reason, block_kind=ACCEPTANCE_FAILED,
+            block_reason=reason, metadata=meta, artifacts=artifacts, event_type="acceptance_failed",
+        )
+
+    def resolve_acceptance(self, task_id: str, decision: str, by: str = "owner",
+                           note: str = "") -> tuple[Optional[dict], str]:
+        """The owner's pick on an `acceptance_failed` job: "fix" sends it back to the worker with the checker's
+        reason and fresh attempts, "accept" closes it as done (or back to review when it was waiting for approval)
+        with `acceptance_check: accepted`. Returns (task, "") or (None, "bad_decision" | "not_found" |
+        "not_waiting").
+
+        `note` (fix only): the owner's extra instruction for the redo, stored as a follow-up entry right after the
+        checker's reason, in the same transaction. A separate `followup` call after this one would race the
+        dispatcher, which can claim the job the moment it is ready and run it without the note."""
+        if decision not in ("fix", "accept"):
+            return None, "bad_decision"
+        note = (note or "").strip()
+        with self._lock:
+            self._tx()
+            try:
+                row = self._db.execute(
+                    "SELECT * FROM tasks WHERE id=? AND lane<>'team'", (task_id,)
+                ).fetchone()
+                if not row:
+                    self._db.rollback()
+                    return None, "not_found"
+                if row["status"] != "blocked" or row["block_kind"] != ACCEPTANCE_FAILED:
+                    self._db.rollback()
+                    return None, "not_waiting"
+                meta = _loads(row["metadata_json"], {})
+                reason = str(row["block_reason"] or "").strip()[:QA_TEXT_MAX]
+                if decision == "fix":
+                    qa = [x for x in (meta.get("qa") or []) if isinstance(x, dict)]
+                    qa.append({"kind": "acceptance_fix", "q": reason, "a": reason, "by": by,
+                               "asked_at": now(), "answered_at": now(),
+                               "progress": str(row["result"] or "").strip()[:QA_PROGRESS_MAX]})
+                    if note:
+                        qa.append(self._followup_entry(note, by, str(row["result"] or "")))
+                    meta["qa"] = qa[-QA_KEEP:]
+                    meta.pop("acceptance_check", None)
+                    meta.pop("acceptance_from", None)
+                    self._db.execute(
+                        """UPDATE tasks SET status='ready', block_kind='', block_reason='', attempts=0,
+                           metadata_json=?, claimed_by='', claim_expires_at=0, not_before=0,
+                           current_run_id='', updated_at=? WHERE id=?""",
+                        (_json(meta), now(), task_id),
+                    )
+                    self._event(task_id, "acceptance_fix", reason[:500], metadata={"by": by})
+                    if note:
+                        self._event(task_id, "followup", note[:500], metadata={"by": by, "from": row["status"]})
+                else:
+                    status = "review" if meta.pop("acceptance_from", "") == "review" else "done"
+                    meta["acceptance_check"] = "accepted"
+                    self._db.execute(
+                        """UPDATE tasks SET status=?, block_kind='', block_reason='', metadata_json=?,
+                           claimed_by='', claim_expires_at=0, current_run_id='', updated_at=? WHERE id=?""",
+                        (status, _json(meta), now(), task_id),
+                    )
+                    self._event(task_id, "acceptance_accepted", reason[:500], metadata={"by": by})
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return self.get_task(task_id), ""
+
+    def set_acceptance(self, task_id: str, state: str, why: str = "",
+                       handoff: Optional[list] = None) -> Optional[dict]:
         """Record a re-check of a finished job (0.411.0). `state`: "checking" while it runs, "ai" when it passed,
-        "failed" when it did not (the job moves to Needs you with the reason as its question, so the reply box can
-        fix it), "unverified" when the checker could not run again. Only a done or review job is touched."""
+        "failed" when it did not, "unverified" when the checker could not run again. Only a done or review job is
+        touched. A failed re-check goes straight to the owner as `acceptance_failed` (fix and run again, or accept
+        as is): the owner asked for this check, so the job is not rerun behind their back."""
         with self._lock:
             self._tx()
             try:
@@ -1293,19 +1466,22 @@ class TaskStore:
                     return None
                 meta = _loads(row["metadata_json"], {})
                 if state == "failed":
-                    reason = ("Chưa đạt điều kiện hoàn thành: " + (why or "lượt kiểm không nói rõ."))[:QA_TEXT_MAX]
-                    qa = [x for x in (meta.get("qa") or []) if isinstance(x, dict)]
-                    qa.append({"q": reason, "asked_at": now()})
-                    meta["qa"] = qa[-QA_KEEP:]
+                    reason = (why or "").strip()[:QA_TEXT_MAX]
                     meta["acceptance_check"] = "failed"
+                    meta["acceptance_from"] = row["status"]
                     self._db.execute(
-                        """UPDATE tasks SET status='blocked', block_kind='needs_input', block_reason=?,
+                        """UPDATE tasks SET status='blocked', block_kind=?, block_reason=?,
                            metadata_json=?, updated_at=? WHERE id=?""",
-                        (reason, _json(meta), now(), task_id),
+                        (ACCEPTANCE_FAILED, reason, _json(meta), now(), task_id),
                     )
                     self._event(task_id, "acceptance_failed", reason[:500])
                 else:
                     meta["acceptance_check"] = state
+                    if handoff:
+                        # 2026-11-21: steps the checker moved to the owner ("Left for you") on a passing re-check.
+                        old = [str(x) for x in (meta.get("handoff") or []) if str(x).strip()]
+                        meta["handoff"] = (old + [str(x).strip() for x in handoff
+                                                  if str(x).strip() and str(x).strip() not in old])[:10]
                     self._db.execute("UPDATE tasks SET metadata_json=?, updated_at=? WHERE id=?",
                                      (_json(meta), now(), task_id))
                     if state != "checking":
@@ -1669,12 +1845,16 @@ class TaskStore:
             self._db.commit()
 
     def claim_team_next(
-        self, team_id: str, worker_id: str, lease_s: int = 90, max_running: int = 1,
+        self, team_id: str, worker_id: str, lease_s: int = 90, max_running: Optional[int] = 1, task_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Nhận việc đầu hàng của nhóm nếu nhóm còn chỗ chạy (mặc định một việc mỗi nhóm).
 
         Kiểm chỗ chạy, chọn việc, đặt `team_running`, ghi `task_runs` và tăng version trong MỘT
-        giao dịch `BEGIN IMMEDIATE`: không bao giờ có hai việc cùng chạy trong một nhóm."""
+        giao dịch `BEGIN IMMEDIATE`: không bao giờ có hai việc cùng chạy trong một nhóm.
+
+        2026-11-12: `task_id` names the waiting job to take instead of the head of the queue. The team runner picks it
+        when a team may run several jobs at once (`max_running` > 1) and the head belongs to an assistant that is
+        already working. A job that is no longer waiting, or of another team, gives None."""
         team_id = str(team_id)
         # Cross-store preparation deliberately precedes the claim transaction. A crash leaves the task unready.
         if self.quality_prepare:
@@ -1688,14 +1868,21 @@ class TaskStore:
                     "SELECT COUNT(*) AS n FROM tasks WHERE lane='team' AND team_id=? AND status='team_running'",
                     (team_id,),
                 ).fetchone()["n"]
-                if int(running) >= max(1, int(max_running)):
+                # `max_running=None`: no cap on the jobs a team runs at once (team_runner, 17/11/2026).
+                if max_running is not None and int(running) >= max(1, int(max_running)):
                     self._db.rollback()
                     return None
-                row = self._db.execute(
-                    f"""SELECT * FROM tasks WHERE lane='team' AND team_id=? AND status='team_queued'
-                        ORDER BY {_TEAM_ORDER} LIMIT 1""",
-                    (team_id,),
-                ).fetchone()
+                if task_id:
+                    row = self._db.execute(
+                        "SELECT * FROM tasks WHERE id=? AND lane='team' AND team_id=? AND status='team_queued'",
+                        (str(task_id), team_id),
+                    ).fetchone()
+                else:
+                    row = self._db.execute(
+                        f"""SELECT * FROM tasks WHERE lane='team' AND team_id=? AND status='team_queued'
+                            ORDER BY {_TEAM_ORDER} LIMIT 1""",
+                        (team_id,),
+                    ).fetchone()
                 if not row:
                     self._db.rollback()
                     return None

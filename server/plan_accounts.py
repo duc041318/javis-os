@@ -8,9 +8,13 @@ the CLI at it (`CODEX_HOME`, `GROK_HOME`, `CLAUDE_CONFIG_DIR`). The CLI keeps an
 Rotation is sequential: the first account switched on, signed in and not resting runs; one out of quota rests
 (model_routing.mark_rest) and the next takes over; a rested account comes back first once its reset time passes.
 All accounts of a card are used before the next card in the usage order.
+Chat turns, background work, team turns and workflow steps all pick the account this way (team turns and workflow
+steps since 10/11/2026: before, they always ran on account 1, so a team kept answering "You've hit your weekly limit"
+while the card's other account had quota).
 
 What an extra account does NOT carry (stated plainly in the guide): the plan usage meters, image generation and
-the HTTP-only ChatGPT paths (chat without tools, bots, voice) still read account 1. A conversation that switches
+the HTTP-only ChatGPT paths (chat without tools, bots) still read account 1. ChatGPT Live calls DO rotate (06/11/2026):
+each account gets its own Codex app-server (codex_realtime) and a call that runs out rests that account. A conversation that switches
 account cannot resume the CLI thread of the other account, so that turn starts a fresh thread with the history
 rebuilt (the existing resume fallback).
 """
@@ -27,18 +31,39 @@ import config as cfgmod
 import model_routing
 
 MAIN = "main"
-KIND = {"openai-oauth": "codex", "grok-cli": "grok", "anthropic-cli": "claude"}
-ENV = {"codex": "CODEX_HOME", "grok": "GROK_HOME", "claude": "CLAUDE_CONFIG_DIR"}
+KIND = {"openai-oauth": "codex", "grok-cli": "grok", "anthropic-cli": "claude", "antigravity-cli": "agy"}
+ENV = {"codex": "CODEX_HOME", "grok": "GROK_HOME", "claude": "CLAUDE_CONFIG_DIR", "agy": "HOME"}
+# Antigravity (owner 05/11/2026: "a way to rotate Antigravity"). `agy` keeps ONE Google login per machine in the OS
+# keyring, so an extra account cannot simply get a config folder. On Linux, `GEMINI_FORCE_FILE_STORAGE=true` makes it
+# keep the token in a file under its HOME (~/.gemini/antigravity-cli/), which is what community multi-account tools for
+# agy rely on; so an extra account runs `agy` with its own HOME and that variable. macOS and Windows still hold one
+# keyring login per machine, so the card offers extra Google accounts only on Linux (VPS, Docker). NOT MEASURED on a real
+# `agy` in this repo (no binary at build time): the owner checks it on a VPS before relying on it.
+AGY_FILE_STORAGE = "GEMINI_FORCE_FILE_STORAGE"
+_AGY_TOKEN_DIR = (".gemini", "antigravity-cli")
 # Files copied from account 1's folder into an extra account's folder before each run, so the extra account sees
 # the same settings and MCP servers (Codex `config.toml` and Javis's hub profile, Grok `config.toml`, Claude
 # `settings.json`). Logins and history are never copied.
-_SHARED = {"codex": ("*.toml",), "grok": ("config.toml",), "claude": ("settings.json",)}
+_SHARED = {"codex": ("*.toml",), "grok": ("config.toml",), "claude": ("settings.json",),
+           # agy reads its MCP servers (Javis's hub) from HOME, so an extra account's HOME gets the same files.
+           "agy": (".gemini/config/mcp_config.json", ".gemini/antigravity-cli/mcp_config.json")}
 # Claude keeps user-scope MCP servers (added through Claude Code's own MCP, `--scope user`) in `.claude.json` NEXT TO the
 # config folder, together with that login's account data. Only its `mcpServers` list is carried over (0.355.0).
 _MARK = ".javis-signed-in"
+# 2026-11-22 (owner): an extra Claude account signs in with a long-lived token from `claude setup-token`, like account 1
+# (claude_auth.TOKEN), so its sign-in never runs out midway. The token lives in the account's own folder, encrypted, so
+# it goes with the folder when the account is removed.
+_CLAUDE_TOKEN = ".javis-claude-token.json"
 
 
 def supported(provider: str) -> bool:
+    return provider in KIND and available(provider)
+
+
+def available(provider: str) -> bool:
+    """Antigravity keeps a file login only on Linux (see AGY_FILE_STORAGE); every other plan card works everywhere."""
+    if provider == "antigravity-cli":
+        return sys.platform.startswith("linux")
     return provider in KIND
 
 
@@ -53,6 +78,8 @@ def default_home(provider: str) -> Path:
     env = (os.environ.get(ENV[kind]) or "").strip()
     if env:
         return Path(env).expanduser()
+    if kind == "agy":
+        return _home_dir()
     return _home_dir() / (".codex" if kind == "codex" else ".grok" if kind == "grok" else ".claude")
 
 
@@ -80,6 +107,8 @@ def env_for(provider: str, folder) -> dict:
     """Variables that point the CLI at an account's folder. {} for account 1."""
     if not folder or not supported(provider):
         return {}
+    if KIND[provider] == "agy":
+        return {"HOME": str(folder), AGY_FILE_STORAGE: "true"}
     return {ENV[KIND[provider]]: str(folder)}
 
 
@@ -96,7 +125,12 @@ def prepare(provider: str, folder) -> None:
         for f in files:
             if not f.is_file() or f.name in ("auth.json", ".credentials.json"):
                 continue
-            dst = Path(folder) / f.name
+            # agy's files keep their place under HOME; the others sit at the top of the account's folder.
+            dst = Path(folder) / (f.relative_to(src) if KIND[provider] == "agy" else f.name)
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
             try:
                 if not dst.exists() or f.stat().st_mtime > dst.stat().st_mtime:
                     shutil.copy2(f, dst)
@@ -138,6 +172,57 @@ def mark_signed_in(provider: str, folder) -> None:
         pass
 
 
+def claude_token(folder) -> str:
+    """The long-lived token an extra Claude account signed in with, "" when it has none (or it cannot be read)."""
+    if not folder:
+        return ""
+    try:
+        d = json.loads((Path(folder) / _CLAUDE_TOKEN).read_text(encoding="utf-8")) or {}
+        import secrets_store
+        return str(secrets_store.decrypt(d.get("token") or "") or "").strip()
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def save_claude_token(folder, token: str) -> bool:
+    """Keep an extra Claude account's token in its folder, encrypted, readable by this user only. True when saved."""
+    if not folder or not token:
+        return False
+    import secrets_store
+    f = Path(folder) / _CLAUDE_TOKEN
+    tmp = f.with_name(f.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps({"token": secrets_store.encrypt(str(token).strip()), "at": int(time.time())}),
+                       encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, f)
+        return True
+    except OSError:
+        return False
+
+
+def claude_token_info(folder, now: float = None) -> dict:
+    """The card's view of an extra account's token (never the token): set, saved, expires, days left."""
+    tok = claude_token(folder)
+    if not tok:
+        return {}
+    try:
+        at = float((json.loads((Path(folder) / _CLAUDE_TOKEN).read_text(encoding="utf-8")) or {}).get("at") or 0)
+    except (OSError, ValueError, AttributeError):
+        at = 0.0
+    import claude_auth
+    out = {"token_set": True}
+    if at:
+        now = time.time() if now is None else now
+        exp = at + claude_auth.TOKEN_DAYS * 86400
+        out.update(token_expires_at=int(exp), token_days_left=claude_auth.token_days_left(exp, now),
+                   token_expired=exp <= now)
+    return out
+
+
 def signed_in(provider: str, account_id: str) -> bool:
     """Whether an account can run. Account 1 counts as signed in: its own card already says when it is not."""
     if account_id == MAIN:
@@ -158,11 +243,24 @@ def signed_in(provider: str, account_id: str) -> bool:
             return bool(grok_cli.auth_status(home=folder).get("connected"))
         except Exception:  # noqa: BLE001
             return False
+    if kind == "agy":
+        return bool(agy_token_file(folder))
+    if claude_token(folder):
+        return True
     if (folder / ".credentials.json").exists():
         return True
     # Only macOS keeps the Claude token in the Keychain, where no file proves it; elsewhere a missing credentials
     # file means signed out, whatever Javis remembered (0.355.0).
     return sys.platform == "darwin" and (folder / _MARK).exists()
+
+
+def agy_token_file(folder):
+    """The file an extra Antigravity account keeps its Google token in (file storage), or None."""
+    d = Path(folder).joinpath(*_AGY_TOKEN_DIR)
+    try:
+        return next((f for f in d.iterdir() if f.is_file() and "token" in f.name.lower()), None)
+    except OSError:
+        return None
 
 
 def accounts(m: dict, provider: str) -> list:
@@ -249,13 +347,73 @@ def remove_folder(provider: str, account_id: str) -> None:
         pass
 
 
+def identity(provider: str, account_id: str) -> dict:
+    """{'email', 'plan'} of an EXTRA account, as its own CLI recorded them in its folder; a value is "" when unknown.
+
+    The card's status line names the account a turn runs on now. It used to show account 1's e-mail and plan whatever
+    account was in use, so a card running on a Max account still read "Pro" (owner's video, 10/11/2026). Account 1 is
+    the card's own login, which the card already reads, so it gets {}. No CLI is started and nothing is guessed."""
+    out = {"email": "", "plan": ""}
+    if account_id == MAIN:
+        return {}
+    folder = home(provider, account_id, create=False)
+    if not folder or not folder.exists():
+        return out
+    try:
+        import plan_limits
+        kind = KIND[provider]
+        if kind == "claude":
+            # `.claude.json` holds the profile Claude Code fetched for this login (no token in it).
+            for f in plan_limits._file_claude_json(folder):
+                try:
+                    acc = (json.loads(f.read_text(encoding="utf-8")) or {}).get("oauthAccount") or {}
+                except (OSError, ValueError, AttributeError):
+                    continue
+                if isinstance(acc, dict) and acc.get("emailAddress"):
+                    out["email"] = str(acc["emailAddress"]).strip()[:120]
+                    break
+            out["plan"] = plan_limits.ten_goi_claude(folder, out["email"])
+        elif kind == "codex":
+            import openai_oauth
+            tok = (json.loads((folder / "auth.json").read_text(encoding="utf-8")) or {}).get("tokens") or {}
+            claims = openai_oauth._decode_jwt_claims(str(tok.get("id_token") or ""))
+            out["email"] = str(claims.get("email") or "").strip()[:120]
+            code = (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type") or ""
+            out["plan"] = plan_limits.ten_goi(str(code), "codex")
+        elif kind == "grok":
+            import grok_cli
+            st = grok_cli.auth_status(home=folder)
+            out["email"] = str(st.get("account") or "").strip()[:120]
+            out["plan"] = plan_limits.ten_goi(str(st.get("plan") or ""), "grok")
+    except Exception as e:  # noqa: BLE001 - a missing name only shortens the status line
+        print(f"[plan accounts] identity {provider}: {type(e).__name__}: {e}", file=sys.stderr)
+    return out
+
+
 def view(m: dict, provider: str) -> list:
     """What the Models page draws for a plan card's account list."""
     out = []
     for a in accounts(m, provider):
-        out.append({"id": a["id"], "label": a["label"], "enabled": a["enabled"], "main": a["id"] == MAIN,
-                    "signed_in": signed_in(provider, a["id"]),
-                    "resting_until": model_routing.resting_until(provider, a["id"])})
+        row = {"id": a["id"], "label": a["label"], "enabled": a["enabled"], "main": a["id"] == MAIN,
+               "signed_in": signed_in(provider, a["id"]),
+               "resting_until": model_routing.resting_until(provider, a["id"])}
+        if row["signed_in"]:
+            row.update(identity(provider, a["id"]))
+        if KIND.get(provider) == "claude":
+            # The token's dates (2026-11-22): account 1's from the card's own token, an extra one's from its folder.
+            if a["id"] == MAIN:
+                try:
+                    import claude_auth
+                    if claude_auth.che_do() == claude_auth.TOKEN:
+                        ti = claude_auth.token_info()
+                        if ti.get("set") and ti.get("expires_at"):
+                            row.update(token_set=True, token_expires_at=ti["expires_at"],
+                                       token_days_left=ti.get("days_left", 0), token_expired=bool(ti.get("expired")))
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                row.update(claude_token_info(home(provider, a["id"], create=False)))
+        out.append(row)
     return out
 
 
@@ -298,16 +456,74 @@ def use(engine, provider: str, account_id: str):
         engine.codex_home = str(folder) if folder else None
     elif kind == "grok":
         engine.grok_home = str(folder) if folder else None
+    elif kind == "agy":
+        engine.agy_home = str(folder) if folder else None
     else:
         _claude_use(engine, folder)
+        _claude_drop_foreign_thread(engine, folder)
     return engine
+
+
+_SID_CHARS = set("0123456789abcdefABCDEF-")
+
+
+def _claude_thread_in(folder: Path, session_id: str) -> bool:
+    """Whether a Claude config folder keeps the transcript of `session_id` (projects/<cwd>/<id>.jsonl)."""
+    try:
+        return any(Path(folder, "projects").glob(f"*/{session_id}.jsonl"))
+    except OSError:
+        return False
+
+
+def claude_thread_owner(session_id: str, folder=None):
+    """Which account folder keeps a Claude thread: `folder` itself when it does (None = account 1), another account's
+    folder when only that one does, or "" when no folder has it (left to Claude Code to report)."""
+    sid = str(session_id or "")
+    if not sid or len(sid) > 80 or not set(sid) <= _SID_CHARS:
+        return ""
+    here = Path(folder) if folder else default_home("anthropic-cli")
+    if _claude_thread_in(here, sid):
+        return here
+    others = [default_home("anthropic-cli")]
+    try:
+        others += [d / "claude" for d in root().iterdir() if d.is_dir()]
+    except OSError:
+        pass
+    for f in others:
+        if f != here and _claude_thread_in(f, sid):
+            return f
+    return ""
+
+
+def _claude_drop_foreign_thread(engine, folder) -> None:
+    """A chat moving to another Claude account must not resume the thread of the account it ran on before.
+
+    Claude Code keeps a thread in the config folder of the account that wrote it, so `--resume` from another account
+    finds nothing and exits 1 at once (owner's report, 07/11/2026: account 1 ran out, the chat moved to account 2 and
+    every turn died with "SDK engine: ProcessError: Command failed with exit code 1"). Dropping the id here sends the
+    turn down the usual "no thread" path, which primes the new thread from the saved history. Only dropped on positive
+    evidence: the transcript sits in another account's folder and not in this one."""
+    sid = getattr(engine, "session_id", None)
+    if not sid:
+        return
+    try:
+        owner = claude_thread_owner(sid, folder)
+        here = Path(folder) if folder else default_home("anthropic-cli")
+        if owner and owner != here:
+            engine.session_id = None
+            print(f"[plan accounts] claude: thread {str(sid)[:8]} belongs to another account, priming a new one",
+                  file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 - choosing an account must never stop a turn
+        print(f"[plan accounts] claude thread check: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def _claude_use(engine, folder) -> None:
     """Claude runs through claude-agent-sdk; its options are built per run, so the account's folder is added to
     the environment the SDK hands the `claude` process. The engine file itself is pinned (improvement profile),
-    so this wraps the built options instead of editing it."""
+    so this wraps the built options instead of editing it. An extra account signed in with a long-lived token
+    (2026-11-22) gets that token, never account 1's."""
     engine.claude_config_dir = str(folder) if folder else None
+    engine.claude_account_token = claude_token(folder) if folder else ""
     # Wrapped once PER INSTANCE: background work copies the chat's engine (copy.copy) for a second account, and the
     # copy must build options from its own attributes, not through the original's closure.
     if getattr(engine, "_javis_wrap_owner", None) is engine:
@@ -323,6 +539,13 @@ def _claude_use(engine, folder) -> None:
         if d and hasattr(o, "env"):
             env = dict(getattr(o, "env", None) or {}) or dict(os.environ)
             env["CLAUDE_CONFIG_DIR"] = d
+            # 2026-11-22: the CLI reads CLAUDE_CODE_OAUTH_TOKEN before its config folder, so account 1's long-lived
+            # token (claude_auth.TOKEN) would run every extra account on account 1's plan. An extra account's own
+            # token takes its place.
+            env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+            own = getattr(engine, "claude_account_token", "") or ""
+            if own:
+                env["CLAUDE_CODE_OAUTH_TOKEN"] = own
             o.env = env
         return o
 

@@ -123,7 +123,8 @@ check("xoá nói rõ brain và Agent KHÔNG bị xoá",
 check("form nói rõ bot tạo ra ở trạng thái tắt",
   /<b>' \+\s*\n?\s*esc\(window\.t\("cb\.tao_xong_tat"\)\) \+ '<\/b>/.test(CB)
   && VI["cb.tao_xong_tat"] === "TẮT" && tu("cb.tao_xong_1", "trạng thái"));
-check("form nói rõ bot đọc tài liệu của brain nào", noi("cb2.s_ai_hint", "chỉ đọc tài liệu trong brain"));
+// 2026-11-09 (owner): a bot reads the documents listed on its Agent, not the whole brain; the form says so.
+check("form nói rõ bot đọc tài liệu nào", noi("cb2.s_ai_hint", "chỉ đọc tài liệu ghim ở mục Tài liệu của Agent"));
 // 0.352.0 (owner): the "what does the bot answer from" choice is gone. Every bot answers from its Agent and the
 // brain's documents, so the form shows no choice and always sends "agent".
 check("form không còn mục chọn nguồn trả lời", !/cbNguon/.test(CB) && !/cb2\.s_nguon/.test(CB));
@@ -254,7 +255,7 @@ check("đang mở form thì không vẽ lại dưới chân người dùng",
 // Nạp NGẦM khác nạp do người bấm: không được xoá lưới đang hiện để thay bằng "Đang tải…", và
 // mạng hỏng một nhịp thì giữ nguyên màn hình cũ. Nhấp nháy mỗi 5 giây tệ hơn số cũ vài giây.
 check("nạp ngầm không nhấp nháy màn hình", /async function tai\(im\)/.test(CB) &&
-  /if \(!im\) box\.innerHTML = '<div class="cb-empty">' \+ esc\(window\.t\("common\.loading"\)\)/.test(CB)
+  /if \(!im\) box\.innerHTML = '<div class="cb-empty pg-loading">' \+ esc\(window\.t\("common\.loading"\)\)/.test(CB)
   && tu("common.loading", "Đang tải"));
 
 // ============================================================
@@ -264,9 +265,11 @@ check("nạp ngầm không nhấp nháy màn hình", /async function tai\(im\)/.
 // tự nhận việc trong nhóm lạ" là đúng, nhưng cách từ chối thì sai: im hoàn toàn, không log,
 // không dòng nào ở đây. "Hành vi đúng" và "bot hỏng" trông y hệt nhau.
 check("thẻ hiện nhóm đang chờ chủ cho phép", /b\.nhom_cho/.test(CB) && /cb-nhomcho/.test(CB));
-check("cho phép nhóm bằng ĐÚNG một cú bấm",
-  /cb-ok-nhom/.test(CB) && /\/groups"/.test(CB) && /choNhom\(b, cid, true, loai\)/.test(CB));
-check("và bỏ qua được nhóm không muốn", /cb-bo-nhom/.test(CB) && /choNhom\(b, cid, false, loai\)/.test(CB));
+// 13/11/2026: mỗi dòng chờ là một ô tích, Cho phép / Bỏ qua là MỘT thanh nút cho mọi dòng đã tích (chủ repo: chín nhóm
+// chờ là chín lượt mở popup rồi bấm). Hành vi chi tiết ở tests/js/test_bot_pending_bulk.js.
+check("cho phép nhiều nhóm bằng MỘT cú bấm: dòng có ô tích, một nút Cho phép chung",
+  /class="cb-pd-c"/.test(CB) && /cb-pd-ok/.test(CB) && /\/groups"/.test(CB) && /settle\(true\)/.test(CB));
+check("và bỏ qua được các nhóm không muốn", /cb-pd-skip/.test(CB) && /settle\(false\)/.test(CB));
 check("CSS cho khối nhóm chờ đã có", /\.cb-nhomcho \{/.test(CSS));
 // Khai nhóm ngay lúc TẠO. Bản trước chỉ cho khai ở form Sửa, nên đường đi tự nhiên nhất (tạo
 // bot rồi thả thẳng vào nhóm) bảo đảm lần thử đầu của mọi người dùng gặp một con bot im lặng.
@@ -325,7 +328,21 @@ check("kênh lạ trả rỗng chứ không vẽ dấu hỏi", /if \(!k\) return
 // 0.61.0: bot TRỎ tới tài khoản kênh (một bot trực được nhiều tài khoản), kênh không còn là
 // một trường của bot. Thẻ hiện một chip cho MỖI tài khoản; huy hiệu ở icon chỉ khi có đúng một.
 check("kênh hiện trên thẻ bot (huy hiệu ở icon khi một tài khoản + chip cho từng tài khoản)",
-  /class="cb-ico-kenh"/.test(CB) && /function chipTK\(/.test(CB) && /\.map\(chipTK\)/.test(CB));
+  /class="cb-ico-kenh"/.test(CB) && /function chipTK\(/.test(CB) && /\.map\(function \(a\) \{ return chipTK\(a, b\); \}\)/.test(CB));
+// Chủ repo 19/11/2026: chip Fanpage hiện Page ID dạng số thay vì tên Trang. Chạy thật tenTK trên các ca.
+{
+  const m = CB.match(/function tenTK\(a, k, b\) \{[\s\S]*?\n  \}/);
+  const tenTK = m && new Function("return " + m[0])();
+  const MS = { nhan: "Messenger" }, TG = { nhan: "Telegram", tien_to_ten: "@" };
+  const bot = { name: "Khánh Ngân - Báo giá Zalo" };
+  check("chip Messenger hiện tên Trang thay vì Page ID", !!tenTK &&
+    tenTK({ external_id: "1312748711929369", label: "1312748711929369", meta: { bot_name: "Vĩnh Cửu" } }, MS, bot) === "Vĩnh Cửu" &&
+    tenTK({ external_id: "1312748711929369", label: bot.name, meta: { bot_name: "Vĩnh Cửu" } }, MS, bot) === "Vĩnh Cửu" &&
+    tenTK({ external_id: "1312748711929369", label: "VCSG Q7", meta: { bot_name: "Vĩnh Cửu" } }, MS, bot) === "VCSG Q7" &&
+    tenTK({ external_id: "1312748711929369", label: "1312748711929369" }, MS, bot) === "1312748711929369" &&
+    tenTK({ external_id: "mybot", label: "Shop" }, TG, bot) === "@mybot" &&
+    tenTK({ label: "Khánh Ngân Vcsg" }, { nhan: "Zalo" }, bot) === "Khánh Ngân Vcsg");
+}
 check("form hỏi KÊNH NGAY Ở ĐẦU, trước cả tên bot",
   tu("cb.lb_tai_khoan", "kênh") && CB.indexOf('window.t("cb.lb_tai_khoan")') > -1 &&
   CB.indexOf('window.t("cb.lb_tai_khoan")') < CB.indexOf('"cb2.s_ai"'));
@@ -390,10 +407,11 @@ check("hai nút ở chân form đổi vai theo bước chứ không mọc thêm 
   noi("cb.quay_lai", "Quay lại") && noi("cb.tiep_tuc", "Tiếp tục"));
 // Ba ô có mặc định dùng được ngay mới được gấp. Mức quyền thì KHÔNG: đọc sót nó là mất tiền
 // thật, nên nó phải nằm phơi ra trên màn hình chứ không phải sau một cú bấm.
-check("chỉ ngôn ngữ gấp vào Nâng cao; nhóm và người nằm ở phần Bot trả lời ai, ngoài khối gấp",
-  /class="cb-nangcao"/.test(CB) && noi("cb.nang_cao", "Nâng cao: ngôn ngữ trả lời") &&
-  CB.indexOf('class="cb-nangcao"') < CB.indexOf('id="cbNgonNgu"') &&
-  CB.indexOf('id="cbPk"') < CB.indexOf('class="cb-nangcao"') && !/id="cbNhomBox"/.test(CB));
+// 15/11/2026 (chủ repo): bot luôn trả lời khách bằng đúng thứ tiếng khách nhắn, nên ô ghim ngôn ngữ và khối
+// "Nâng cao" chỉ chứa mỗi ô đó đã bị gỡ.
+check("form không còn ô ghim ngôn ngữ; nhóm và người nằm ở phần Bot trả lời ai",
+  !/id="cbNgonNgu"/.test(CB) && !/class="cb-nangcao"/.test(CB) && !/ngon_ngu:/.test(CB) &&
+  CB.indexOf('id="cbPk"') > -1 && !/id="cbNhomBox"/.test(CB));
 // 0.64.83: chủ dự án bỏ ô "người trực nhận chuyển tiếp" (Chat ID Telegram, vô nghĩa với bot Zalo).
 check("form KHÔNG còn ô người trực nhận chuyển tiếp và không gửi handoff_to lên server",
   !/id="cbHandoff"/.test(CB) && !/handoff_to:\s*ho/.test(CB) && !/cb\.lb_handoff/.test(CB));
@@ -434,13 +452,17 @@ check("chọn 'mọi cuộc chat' phải tick xác nhận rủi ro (server cũng
 check("ô chọn người/nhóm lấy danh sách từ Hộp thư qua /chatbots/chats, không bắt dán id",
   /\/chatbots\/chats\?account_ids=/.test(CB) && /id="cbPkQ"/.test(CB) && /id="cbPkAdd"/.test(CB) &&
   tu("cb2.pk_cho", "Chờ bạn cho phép"));
+check("the chosen-recipient picker defaults to private chats and requests the active chat type",
+  CB.includes('co ? ["private", "group"] : ["private"]') &&
+  CB.includes('"&chat_type=" + encodeURIComponent(pkTab)') &&
+  VI["cb2.pk_nguoi"] === "Nhắn riêng" && EN["cb2.pk_nguoi"] === "Private");
 check("kênh không có nhóm thì ẨN thẻ 'mọi cuộc chat' và đổi chữ hai thẻ còn lại",
   /aud_moi_t/.test(CB) && /aud_chon_ko_t/.test(CB));
 check("thẻ bot có một dòng 'Trả lời: ...' và menu '...' cho việc phụ",
   /tomTatDoiTuong\(b\)/.test(CB) && /class="cb-mn"/.test(CB) && /class="cb-mn-l" hidden/.test(CB) &&
   /cb-log/.test(CB) && /cb-hoi-thoai/.test(CB) && /cb-del/.test(CB));
 check("hàng chờ duyệt có cả người, nút Cho phép gọi /people cho người và /groups cho nhóm",
-  /\/people"/.test(CB) && /cb2\.cho_nguoi/.test(CB) && /data-loai=/.test(CB));
+  /\/people"/.test(CB) && /kind === "private" \? "\/people" : "\/groups"/.test(CB) && /data-loai=/.test(CB));
 check("cảnh báo mức quyền gọn: hiện 2 câu đầu, còn lại sau 'Xem đủ rủi ro'",
   /const HIEN|var HIEN = 2/.test(CB) && /class="cb-xem-du"/.test(CB) && tu("cb2.xem_du", "Xem đủ rủi ro"));
 check("mọi khoá cb2.* giao diện dùng đều có trong tiếng Việt và tiếng Anh", (function () {
@@ -450,11 +472,11 @@ check("mọi khoá cb2.* giao diện dùng đều có trong tiếng Việt và t
   if (thieu.length) console.log("  thiếu:", thieu.join(", "));
   return Object.keys(ks).length > 30 && !thieu.length;
 })());
-check("CANARY: mức quyền KHÔNG bị gấp vào khối Nâng cao",
-  CB.indexOf('htmlMuc(muc0)') > -1 && CB.indexOf('htmlMuc(muc0)') < CB.indexOf('class="cb-nangcao"'));
+check("CANARY: mức quyền KHÔNG bị gấp vào khối nào",
+  CB.indexOf('htmlMuc(muc0)') > -1 && !/class="cb-nangcao"/.test(CB));
 check("CSS của form hai bước đã có",
   /\.cb-wizard \.cb-form-acts/.test(CSS) && /\.cb-buoc \{/.test(CSS) &&
-  /\.cb-tom \{/.test(CSS) && /\.cb-nangcao \{/.test(CSS) &&
+  /\.cb-tom \{/.test(CSS) &&
   /\.cb-rc \{|\.cb-form label\.cb-rc \{/.test(CSS) && /\.cb-seg \{/.test(CSS) && /\.cb-pk \{/.test(CSS) &&
   /\.cb-mn \{/.test(CSS));
 // Gõ lại đúng cái tên vừa đọc ở bước trước là việc thừa.

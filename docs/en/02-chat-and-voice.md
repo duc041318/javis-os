@@ -197,7 +197,8 @@ Unlike `/plan`, `/goal` does real work (within the permissions you gave Javis), 
 
 **The goal bar (since 0.290.0).** While a goal exists, a bar sits right above the chat box in every chat view: an icon, the goal text, a timer of how long it has run, then three buttons: **delete**, **pause / resume** and an **arrow** that opens the details (full goal text, round out of five, what is still missing). With several goals (one per conversation) a **number** at the start of the bar says how many; press it to drop down the list and press a row to open that goal's conversation.
 
-- **Pause instead of stop:** pressing the chat's Stop button or typing a new message mid-run only pauses the goal (the timer stops), and your words still come first. Press resume on the bar and Javis runs the next round.
+- **Typing mid-run does not stop the goal:** a message you type while the goal runs is added to the goal. The running round reads it at its next step and every later round carries it, so you can adjust or widen the goal while Javis works. Each such message gives the goal one more round (10 at most). If the running round reports the goal met before it read your message, Javis still runs one more round for it.
+- **Pause instead of stop:** pressing the chat's Stop button only pauses the goal (the timer stops). Press resume on the bar and Javis runs the next round.
 - **Moving to another conversation:** the goal is not lost, it waits. It only moves on while its conversation is open, because the automatic rounds are sent by the browser into the chat you are looking at. Open that conversation again and it carries on.
 - **Reloading the page:** the goal stays on the bar, paused; press resume to run the next round. The five-round cap still holds.
 
@@ -362,7 +363,7 @@ The row under the text box holds three controls side by side:
 
 The badge next to **CONVERSATION** (and in the top right of the Chat page) shows the **real** engine and model of the last turn, taken from the server rather than from what the model claims about itself. If the badge disagrees with what you expected, trust the badge.
 
-On phones, the model chip moves into the header and the picker opens in the middle of the screen.
+On phones, the model chip stays in the input card next to the Effort chip, just as on a computer, and the picker opens right above the card.
 
 ### Pin a working folder
 
@@ -461,7 +462,13 @@ If none is available, spoken turns go to the main brain. Questions that need dat
 
 On the Basic path the browser only hears one language, so a sentence like "Mở dashboard Facebook ads" often comes out as "Mở double Facebook add". The **listening ear** is a multilingual model that listens to the audio of what you just said again before settling the text in the bubble. The browser's interim text still shows instantly while you talk.
 
-- Javis always picks the ear itself: **Groq Whisper** when a Groq key is on the **Models** page, otherwise the browser's text as before.
+- Javis always picks the ear itself, there is nothing to set. The ear of **the main brain's own vendor** goes first: with ChatGPT as the brain your **ChatGPT plan** hears (ChatGPT connected on the **Models** page is enough, no key), with Groq it is **Groq Whisper**, with the OpenAI API it is **gpt-4o-transcribe**.
+- Claude, Antigravity and Grok offer no speech-to-text on their plans, so with one of them as the brain Javis uses the best ear it has, in this order: Groq, the ChatGPT plan, then an OpenAI key. With no ear at all it keeps the browser's text as before.
+- **Agents hear with their own ear**: an agent on a vendor's model has the dictation in its chat and the voice messages to its dedicated bot heard by that vendor. An agent left on Default follows the main brain. The Teams page (several agents at once) and the Conversations page use the main brain's ear.
+- When an ear fails (network, quota, the plan refusing), the next ear hears that sentence. Telegram and Zalo voice messages follow the same order.
+- **Each ear's model upgrades by itself**: once a day Javis asks Groq, OpenAI and Google for their models and uses the newest speech-to-text one (full size, stable, hears Vietnamese; never a preview, a lite version or an English-only one). The ChatGPT plan picks its model on ChatGPT's side. If a vendor refuses the new model, the old one hears that sentence again and the new one is left aside for a day. To keep one Groq model fixed, put its name in `voice.stt_model`.
+- **Scored before a switch**: when a new model appears, it and the model in use hear the same 13 sample sentences (Vietnamese, English, and Vietnamese with English terms such as "Mở dashboard Facebook ads") read by an Edge voice, and Javis counts word errors and the terms heard right. The new model is used only if it is **not worse**; otherwise the old one stays and that new model is not scored again for a month. Each scoring costs about a minute of audio per model and only runs when a vendor releases a model. The result is kept in `stt_models.json` in Javis's data folder, and the server log shows a `[stt gate]` line.
+- To score with your own voice: record a few sentences, put them in `stt_bench/real/` in the data folder, and list them in `stt_bench/real/refs.tsv`, one line each: `file name<TAB>exact sentence<TAB>term|term`. The next scoring uses them too.
 - Measured on 20 Vietnamese-English mixed commands: the browser got 41% of words wrong, the Groq ear 14%. Each sentence takes about 1 second longer.
 - If the ear fails, takes over 8 seconds, or returns a sentence far from the draft (Whisper sometimes invents sentences from noise), Javis keeps the browser's text and the turn is not lost.
 - The message sent is the ear's text when there is an ear, otherwise the browser's text when you finished the sentence. Once sent, the AI does not rewrite the message in history.
@@ -526,7 +533,7 @@ A Pro/Max plan keeps Claude Code's prompt cache for one hour. After a longer bre
 Below 860px wide, the interface changes to fit the screen:
 
 - Navigation collapses into a drawer: tap **☰** to open it, then tap the dimmed background, pick an item or press Esc to close.
-- The **model chip** and the **+** button (new conversation) move into the header.
+- The **+** button (new conversation) moves into the header. The model chip stays in the input card next to the Effort chip, as on a computer.
 - The **System** group (brain picker, light/dark toggle, the SYSTEM and MCP strips) moves to the bottom of the navigation drawer.
 - The input shortens its placeholder to "Speak or type to Javis…".
 - The **🕘 History** button in the header is hidden (the **Chat** page has the history built in).

@@ -46,6 +46,34 @@ def _inside(p: Path, root: Path) -> bool:
     return p == root or root in p.parents
 
 
+# A picture's description, as `save_description` names it ("x - mo ta anh.txt", "x - mo ta anh (2).txt").
+_DESCRIPTION_RE = re.compile(r" - mo ta anh( \(\d+\))?\.txt$", re.I)
+
+
+def rows_to_drop(rows: Iterable[dict], team_dir_rel: str, need: int = 1) -> List[str]:
+    """Ids of the document rows that leave a full team list to let `need` new ones in: the OLDEST pictures sent in the
+    team and the oldest descriptions written for them, nothing else.
+
+    Why (customer, 2026-11-12: "up hình tới một lúc nó không cho up nữa"). A conversation holds a fixed number of
+    documents. Every picture sent in a team takes two places (the picture, and the text another brain wrote about it so
+    text-only member turns can read it), so about 25 picture messages filled the list, and from then on every file
+    sent was dropped without a word. Pictures are what fills it and what ages: the newest ones stay, the oldest leave
+    the list (the file stays on disk and its message stays in the chat). A document the owner attached (a price list,
+    a brief, a PDF and its text copy) never leaves by itself.
+
+    `rows` are `list_session_files` rows; `team_dir_rel` is the team's own upload folder as stored in `path`."""
+    prefix = str(team_dir_rel or "").replace("\\", "/").rstrip("/") + "/"
+    old = []
+    for r in rows or []:
+        path = str(r.get("path") or "").replace("\\", "/")
+        if not path.startswith(prefix):
+            continue                                   # a file of the brain itself: the owner put it there
+        if Path(path).suffix.lower() in IMAGE_SUFFIXES or _DESCRIPTION_RE.search(path):
+            old.append((float(r.get("added_at") or 0), str(r.get("id") or "")))
+    old.sort()
+    return [rid for _, rid in old[:max(0, int(need))] if rid]
+
+
 def save(attachments: Iterable[dict], *, staging: Path, brain_root: Path, dest_dir: Path,
          to_rel: Callable[[Path], str], add: Callable[[str, str], Optional[str]],
          pin: Callable[[str], object], readable: Iterable[str],
@@ -55,7 +83,8 @@ def save(attachments: Iterable[dict], *, staging: Path, brain_root: Path, dest_d
     A staged upload is copied into `dest_dir` (inside the brain: the staging area is swept after a few days). A file
     already in the brain stays where it is. Every file becomes a document row of the team's conversation; text files are
     pinned so team turns read them; a PDF or Word file gets a pinned `.txt` copy. Anything outside the staging area and
-    the brain is refused. Returns [{name, path, image}] for the files kept."""
+    the brain is refused. A folder of the brain is kept as one row, pinned (its tree is what turns read). Returns
+    [{name, path, image}] for the files kept."""
     staging, brain_root = Path(staging).resolve(), Path(brain_root).resolve()
     readable = {s.lower() for s in readable}
     extract_suffixes = {s.lower() for s in extract_suffixes}
@@ -66,6 +95,21 @@ def save(attachments: Iterable[dict], *, staging: Path, brain_root: Path, dest_d
         try:
             src = Path(str(a.get("path") or "")).resolve()
         except (OSError, RuntimeError):
+            continue
+        if src.is_dir():
+            # 2026-11-12 (owner: "chọn được cả thư mục"): a folder of the brain joins as ONE document, stored with a
+            # trailing "/". It is pinned, which loads a short tree of what it holds: a text-only team turn cannot list a
+            # folder, so the tree is all it can read of it. A staged folder does not exist, and the brain root itself
+            # is not something to attach.
+            if src == brain_root or not _inside(src, brain_root):
+                continue
+            name = _safe_name(a.get("name") or src.name)
+            rel = to_rel(src).rstrip("/") + "/"
+            fid = add(rel, name)
+            if not fid:
+                continue
+            pin(fid)
+            out.append({"name": name, "path": rel, "image": False, "dir": True})
             continue
         if not src.is_file():
             continue

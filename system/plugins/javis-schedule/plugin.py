@@ -214,7 +214,8 @@ _LOOP_MODE_MAC_DINH = "full"
 
 
 def _create_loop_file(vault_root: str, name: str, prompt: str, schedule: str,
-                      owner_chat: str = "", brain_name: str = "", mode: str = "", bot_id: str = "") -> str:
+                      owner_chat: str = "", brain_name: str = "", mode: str = "", bot_id: str = "",
+                      agent: str = "") -> str:
     """Ghi 1 loop mới vào <vault_root>/Javis/loops/<slug>.md. enabled luôn false (người dùng bật
     ở trang Việc); mode mặc định full, hạ xuống auto/suggest khi model truyền. Trùng slug (việc đã có) -> báo lỗi rõ, KHÔNG
     ghi đè - self_improve.py lấy định danh loop theo TÊN FILE nên đẻ bản ascii song song sẽ để
@@ -254,6 +255,8 @@ def _create_loop_file(vault_root: str, name: str, prompt: str, schedule: str,
         f"interval_min: {interval}\n"
         f"owner_chat: {_yaml_scalar((owner_chat or '').strip())}\n"
         + (f"bot_id: {_yaml_scalar(bot_id)}\n" if bot_id else "")
+        # made in a partner chat -> each round runs as that assistant (self_improve.py reads `agent`).
+        + (f"agent: {_yaml_scalar(agent)}\n" if agent else "")
         + f"updated: {_today()}\n"
         "---\n"
         "\n"
@@ -439,20 +442,92 @@ def _turn_bot() -> str:
     return str(t.get("bot_id") or "").strip()
 
 
+def _turn_origin(vault_root: str) -> tuple:
+    """(chat, assistant) of the turn creating the job, read from what the host set, never from the model.
+
+    `chat` is `web:<session id>` on a dashboard turn, so the result goes back to the chat that asked. A partner chat
+    never sees the channel block that teaches the model this id, and the job used to land in Javis Core, success and
+    failure alike. With no turn at all (an engine that cannot carry it yet), the running-turn ledger names the chat
+    when exactly one chat of this brain is running (same rule as javis_task, 0.64.49). Any other turn (Kanban, a
+    chatbot, Telegram) keeps what the model passed. `assistant` is the slug of the Partners-page assistant of that
+    chat, "" elsewhere: the job then runs as that assistant and the Tasks page files it under it."""
+    try:
+        import turn_context
+        t = turn_context.current()
+    except Exception:
+        t = None
+    if t:
+        chat = ""
+        if t.get("kenh") == "dashboard" and str(t.get("session_id") or "").strip():
+            chat = "web:" + str(t["session_id"]).strip()
+        return chat, str(t.get("assistant") or "").strip()
+    try:
+        import luot_dang_chay
+        return luot_dang_chay.doan_chat_id(vault_root) or "", ""
+    except Exception:
+        return "", ""
+
+
+def _script_time_payload(schedule: str):
+    """Time fields of a SCRIPT job (issue 1563): a plain interval ('1m', 'mỗi 5 phút', '2h') repeats with `repeat_min`,
+    with no 5-minute floor (a script runs no model, so a one-minute watch is cheap); a cron or a daily time is a cron;
+    anything else fires once. Returns (payload, error)."""
+    if _route_kind(schedule) == "loop":
+        norm = _strip_diacritics(schedule)
+        m = _INTERVAL_SEARCH_RE.search(norm)
+        if m:
+            try:
+                n = float(m.group(1).replace(",", ".")) * _UNIT_MINUTES.get(m.group(2), 1)
+            except ValueError:
+                n = 0
+        else:
+            bare = _BARE_UNIT_RE.search(norm)
+            n = _UNIT_MINUTES.get(bare.group(1), 1) if bare else 0
+        if n <= 0:
+            return None, f"ERROR: cannot read the interval '{schedule}' for a script job. Examples: '1m', '5 minutes', '2h'."
+        n = max(1, int(round(n)))
+        # The store needs a first time too: one interval from now, then every `n` minutes.
+        return {"repeat_min": n, "delay_min": n}, ""
+    return _reminder_time_payload(schedule), ""
+
+
+async def _create_script_job(vault_root: str, args: dict, name: str, script: str, schedule: str) -> str:
+    """A job that runs a script from Javis/scripts on schedule, no model involved (issue 1563: before, the model had to
+    call POST /reminders by hand). The server checks the file name (only a file in Javis/scripts, no path) on create."""
+    time_payload, err = _script_time_payload(schedule)
+    if err:
+        return err
+    payload = {"text": str(args.get("prompt") or "").strip(), "label": name, "mode": "script", "script": script,
+               "brain": vault_root, "chat_id": str(args.get("chat_id") or args.get("owner_chat") or "").strip(),
+               "created_by": "javis_schedule"}
+    payload.update(time_payload)
+    return await _post_reminder(payload, brain_name=Path(vault_root).name)
+
+
 async def _do_create(vault_root: str, args: dict) -> str:
     name = str(args.get("name") or "").strip()
     prompt = str(args.get("prompt") or "").strip()
     schedule = str(args.get("schedule") or "").strip()
+    script = str(args.get("script") or "").strip()
+    if script:
+        if not name or not schedule:
+            return "ERROR: a script job needs 'name', 'script' (a file name in Javis/scripts) and 'schedule'."
+        return await _create_script_job(vault_root, args, name, script, schedule)
     if not name or not prompt or not schedule:
         return "ERROR: cần đủ 'name', 'prompt' và 'schedule' để tạo việc."
     notify_only = bool(args.get("notify_only") or False)
     chat_id = str(args.get("chat_id") or args.get("owner_chat") or "").strip()
+    origin_chat, assistant = _turn_origin(vault_root)
+    auto_chat = not chat_id and bool(origin_chat)
+    if auto_chat:
+        chat_id = origin_chat
     brain_name = Path(vault_root).name   # tên brain phiên → nói cho user biết việc rơi vào đâu
     kind = _route_kind(schedule, notify_only)
     if kind == "loop":
-        return _create_loop_file(vault_root, name=name, prompt=prompt, schedule=schedule,
-                                 owner_chat=chat_id, brain_name=brain_name,
-                                 mode=str(args.get("muc_quyen") or ""), bot_id=_turn_bot())
+        ra = _create_loop_file(vault_root, name=name, prompt=prompt, schedule=schedule,
+                               owner_chat=chat_id, brain_name=brain_name,
+                               mode=str(args.get("muc_quyen") or ""), bot_id=_turn_bot(), agent=assistant)
+        return ra + _origin_note(ra, chat_id if auto_chat else "", assistant)
     # I2: notify_only=True nghĩa là CHỈ nhắc bằng lời (mode "notify" - reminders.py:342 "⏰ Nhắc
     # anh: ..."), KHÔNG dựng nguyên engine Claude + MCP để "làm hộ" (mode "task" - reminders.py:
     # 418 _run_task, tốn tới max_wall_s=300). Trước đây hard-code "task" nên notify_only vô nghĩa -
@@ -471,8 +546,24 @@ async def _do_create(vault_root: str, args: dict) -> str:
         payload["call"] = True
     if _turn_bot():
         payload["bot_id"] = _turn_bot()
+    if assistant:
+        payload["agent"] = assistant
     payload.update(_reminder_time_payload(schedule))
-    return await _post_reminder(payload, brain_name=brain_name)
+    ra = await _post_reminder(payload, brain_name=brain_name)
+    return ra + _origin_note(ra, chat_id if auto_chat else "", assistant)
+
+
+def _origin_note(result: str, auto_chat: str, assistant: str) -> str:
+    """One closing line on a created job: who gets the result when the tool picked the chat itself, and which assistant
+    runs it. Nothing after an error."""
+    if str(result or "").startswith("ERROR"):
+        return ""
+    out = ""
+    if auto_chat:
+        out += f" Kết quả báo về khung chat đang hỏi ({auto_chat})."
+    if assistant:
+        out += f" Tới giờ việc chạy bằng vai trợ lý '{assistant}' (prompt, bộ nhớ và luật của trợ lý đó)."
+    return out
 
 
 async def _update_reminder(vault_root: str, rid: str, fields: dict) -> str:
@@ -551,11 +642,24 @@ async def _do_update(vault_root: str, args: dict) -> str:
     if isinstance(args.get("remember_last"), bool):
         fields["remember_last"] = args["remember_last"]
     call = args.get("call") if isinstance(args.get("call"), bool) else None
-    if not fields and call is None:
-        return "ERROR: không có gì để sửa - truyền ít nhất một trong name / prompt / schedule."
+    # Issue 1482: muc_quyen, chat_id and speak are in the schema for every op, but update used to drop them and still
+    # answer "Đã sửa", so the model told the owner a level had changed when it had not. They now reach the reminder
+    # store; a field this kind of job cannot take is an error and nothing changes.
+    level = str(args.get("muc_quyen") or "").strip().lower()
+    if level and level not in ("suggest", "auto", "full"):
+        return f"ERROR: invalid muc_quyen '{level}' (use suggest, auto or full). Nothing was changed."
+    chat = str(args.get("chat_id") or "").strip()
+    speak = args.get("speak") if isinstance(args.get("speak"), bool) else None
+    reminder_only = [k for k, v in (("muc_quyen", level), ("chat_id", chat), ("speak", speak), ("call", call))
+                     if v not in (None, "")]
+    if not fields and not reminder_only:
+        return ("ERROR: nothing to change - pass at least one of name / prompt / schedule / remember_last / "
+                "muc_quyen / chat_id / speak / call.")
     if (_loops_dir(vault_root) / f"{rid}.md").is_file():
-        if not fields:
-            return "ERROR: việc lặp không gọi điện được; 'call' chỉ dành cho nhắc hẹn."
+        not_for_loop = reminder_only + (["remember_last"] if "remember_last" in fields else [])
+        if not_for_loop:
+            return ("ERROR: a loop takes only name / prompt / schedule here; " + ", ".join(not_for_loop)
+                    + " of a loop is changed on the Tasks page. Nothing was changed.")
         return _update_loop_file(vault_root, rid, fields)
     # Kho nhắc hẹn: đổi lịch thì dịch chuỗi lịch sang tham số thời gian như lúc tạo.
     payload = {}
@@ -569,6 +673,12 @@ async def _do_update(vault_root: str, args: dict) -> str:
         payload["remember_last"] = "true" if fields["remember_last"] else "false"
     if call is not None:
         payload["call"] = "true" if call else "false"
+    if level:
+        payload["muc_quyen"] = level
+    if chat:
+        payload["chat_id"] = chat
+    if speak is not None:
+        payload["speak"] = "true" if speak else "false"
     return await _update_reminder(vault_root, rid, payload)
 
 
@@ -590,6 +700,11 @@ async def _do_list(vault_root: str) -> str:
             # user hiểu ngay, không phải tự dịch "0 7 * * *".
             extra = (f" (lặp {r.get('cron_human') or r.get('cron')} - cron {r.get('cron')})"
                      if r.get("cron") else "")
+            if r.get("mode") == "script" and r.get("script"):
+                extra += f" (script {r.get('script')})"
+            if int(r.get("missed_total") or 0):
+                # issue 1480: runs skipped because an earlier one was late or long
+                extra += f" - {int(r.get('missed_total'))} runs skipped because an earlier run was late"
             lines.append(f"- [{r.get('id')}] {r.get('label') or r.get('text')} - "
                          f"kế tiếp {r.get('due_human')}{extra}")
     if rem.get("error"):
@@ -673,9 +788,17 @@ def register(ctx) -> None:
                                              "cron 5 trường '0 7 * * *', macro '@daily'. Một lần: "
                                              "'30 phút nữa', '8h30' (qua giờ hôm nay -> tự sang "
                                              "mai), hoặc đủ ngày giờ '2026-07-20 09:00'.")},
+                "script": {"type": "string",
+                           "description": ("op=create: a script FILE NAME in Javis/scripts (e.g. 'check_shop.py'; "
+                                           ".py/.sh/.ps1/.js/.bat). With it the job runs that script on schedule "
+                                           "and no model at all (cheap, fits a check every minute); 'prompt' is "
+                                           "optional; an interval like '1m' is fine, no 5-minute floor.")},
                 "notify_only": {"type": "boolean",
-                                 "description": ("true = ép thành nhắc MỘT LẦN (kho reminders) dù "
-                                                 "schedule trông giống chu kỳ lặp. Mặc định false.")},
+                                 "description": ("true = CHỈ nhắc bằng lời, MỘT LẦN (kho reminders, dù "
+                                                 "schedule trông giống chu kỳ lặp): tới giờ dán nguyên văn "
+                                                 "prompt vào chat người đặt, KHÔNG chạy model hay tool nào "
+                                                 "(không gửi Zalo, không đọc MCP). Việc cần LÀM gì đó lúc "
+                                                 "tới giờ thì để false. Mặc định false.")},
                 "muc_quyen": {"type": "string", "enum": ["suggest", "auto", "full"],
                               "description": ("Quyền của việc lúc chạy, áp cho cả loop lẫn nhắc "
                                               "hẹn. 'full' (mặc định) = dùng được mọi công cụ đã "
@@ -692,7 +815,8 @@ def register(ctx) -> None:
                                   "description": ("true = mỗi lần chạy nhận lại kết quả lần trước (theo dõi, "
                                                   "báo cái mới). Chỉ cho nhắc hẹn tự làm, không cho loop.")},
                 "chat_id": {"type": "string",
-                             "description": "chat_id Telegram người yêu cầu, để báo đúng người. Bỏ trống nếu không rõ."},
+                             "description": ("Người nhận kết quả: `web:<id phiên>` (dashboard) hoặc chat_id Telegram. "
+                                             "Bỏ trống thì tool tự gắn khung chat đang hỏi.")},
                 "allow_no_channel": {"type": "boolean",
                                       "description": ("Chỉ đặt true khi tool đã báo THIẾU KÊNH GỬI, "
                                                       "bạn đã nói với user thiếu gì, và user vẫn "

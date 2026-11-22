@@ -3,6 +3,8 @@
     GET  /github/status                        the built-in connection (no token ever leaves the server)
     POST /github/connect                       token=...  or  use_backup=1 (reuse the brain-backup token after a check)
     POST /github/disconnect
+    GET  /github/git                           is git on this machine, and how its install (if any) is going
+    POST /github/git/install                   install git when it is missing ("Connect" runs this first, 09/11/2026)
     POST /github/oauth/start                   "Sign in with GitHub": a device code to type at github.com/login/device
     POST /github/oauth/poll                    one poll; on success the token is stored and status comes back
     POST /github/oauth/cancel                  drop a pending sign-in
@@ -13,13 +15,22 @@
     GET  /github/local/checks                  the repo's local check commands (saved, or suggested from its CI)
     POST /github/local/checks                  brain, full_name, commands (one per line) or reset=1
     POST /github/local/automerge               brain, full_name, on: the per-repo auto-merge switch (default on)
+    POST /github/local/review                  brain, full_name, on, provider: the per-repo cross-review switch (default
+                                               off) and its pinned reviewer ("" = the chat's own engine)
+    GET  /github/reviewers                     engines that can review now (text-only, ready), labelled with their model
     GET  /github/local/metrics?full_name=      per engine and model: first-push green, fix rounds, review findings
     GET  /github/icons?sids=a,b                status icon per conversation for the chat list
     POST /github/session/{sid}/merge           full_name: a person merges a ready PR
+    POST /github/session/{sid}/push            full_name: push again a commit whose push or PR failed
+    POST /github/session/{sid}/review          full_name, provider: a person asks for a cross review now
+    POST /github/session/{sid}/review/fix      full_name: send the open findings to the author as a fix round
+    POST /github/session/{sid}/review/skip     full_name: drop the open findings and merge when CI is green
     POST /github/session/{sid}/next            text: a job to start once this chat's PRs are merged; cancel=<id>
     GET  /github/session/{sid}?brain=          repos attached to a conversation, with its branch and worktree
-    POST /github/session/{sid}/repos           brain, repos (comma separated full names): set the chat's repos
-    POST /github/session/{sid}/detach          brain, full_name, force: remove one repo from this chat only
+    POST /github/session/{sid}/repos           brain, repos (comma separated full names): set the chat's repos;
+                                               or brain, add (one full name): attach one more and keep the rest
+    POST /github/session/{sid}/detach          brain, full_name, force: remove one repo from this chat only. Refused
+                                               with code "work_at_risk" (risk, count) while work would be lost
     POST /github/session/{sid}/base            brain, full_name, branch: the base branch this chat works from
 
 Every handler runs its git and HTTP work in a worker thread: a clone can take minutes and must not block the loop.
@@ -47,18 +58,31 @@ class GitHubDeps:
 _DEPS: Optional[GitHubDeps] = None
 
 
-def _err(msg: str, status: int = 400):
-    return JSONResponse({"ok": False, "error": msg}, status_code=status)
+def _err(msg: str, status: int = 400, code: str = "", data: Optional[dict] = None):
+    body = {"ok": False, "error": msg}
+    if code:
+        # A failure the dashboard answers itself (github_repos.RepoError.code), with what it needs for that.
+        body.update(data or {})
+        body["code"] = code
+    return JSONResponse(body, status_code=status)
 
 
 async def _call(fn, *args, **kw):
     try:
         out = await run_in_threadpool(fn, *args, **kw)
     except github_repos.RepoError as e:
-        return _err(str(e))
+        return _err(str(e), code=getattr(e, "code", ""), data=getattr(e, "data", None))
     if isinstance(out, dict):
         return {"ok": True, **out}
     return {"ok": True, "items": out}
+
+
+def _connected(res):
+    """A successful (re)connect pushes, right away, what failed earlier for want of a working sign-in."""
+    if isinstance(res, dict) and res.get("connected"):
+        import github_work
+        github_work.on_connected()
+    return res
 
 
 def _root(brain: str) -> str:
@@ -70,13 +94,26 @@ def _make_router() -> APIRouter:
 
     @r.get("/github/status")
     async def gh_status():
-        return {"ok": True, **github_repos.status()}
+        # 0.444.4: status() may ask api.github.com (installs, up to its 20 s timeout): off the event loop.
+        return {"ok": True, **(await run_in_threadpool(github_repos.status))}
+
+    @r.get("/github/git")
+    async def gh_git():
+        import git_setup
+        return {"ok": True, **(await run_in_threadpool(git_setup.state))}
+
+    @r.post("/github/git/install")
+    async def gh_git_install():
+        """Cloning a repo needs git, so the card checks it before connecting and installs it when it is missing. The
+        install runs in its own thread (minutes); the dashboard polls GET /github/git."""
+        import git_setup
+        return {"ok": True, **(await run_in_threadpool(git_setup.start))}
 
     @r.post("/github/connect")
     async def gh_connect(token: str = Form(""), use_backup: str = Form("")):
         if str(use_backup).strip() in ("1", "true", "on"):
-            return await _call(github_repos.connect_backup)
-        return await _call(github_repos.connect, token)
+            return _connected(await _call(github_repos.connect_backup))
+        return _connected(await _call(github_repos.connect, token))
 
     @r.post("/github/oauth/start")
     async def gh_oauth_start():
@@ -96,7 +133,7 @@ def _make_router() -> APIRouter:
         res = await _call(github_repos.connect_app, out["token"])
         if isinstance(res, dict):
             res["status"] = "connected"
-        return res
+        return _connected(res)
 
     @r.post("/github/oauth/cancel")
     async def gh_oauth_cancel():
@@ -148,6 +185,16 @@ def _make_router() -> APIRouter:
     async def gh_automerge(brain: str = Form(""), full_name: str = Form(...), on: str = Form("1")):
         return await _call(github_repos.set_auto_merge, brain, full_name, str(on).strip() in ("1", "true", "on"))
 
+    @r.post("/github/local/review")
+    async def gh_review_setting(brain: str = Form(""), full_name: str = Form(...), on: str = Form("0"),
+                                provider: str = Form("")):
+        return await _call(github_repos.set_review, brain, full_name, str(on).strip() in ("1", "true", "on"), provider)
+
+    @r.get("/github/reviewers")
+    async def gh_reviewers():
+        import github_work
+        return await _call(lambda: {"items": github_work.reviewer_options()})
+
     @r.get("/github/local/metrics")
     async def gh_metrics(full_name: str = Query("")):
         """Per engine and model: jobs merged, share green on the first push, fix rounds, review findings (spec 13.2)."""
@@ -165,10 +212,47 @@ def _make_router() -> APIRouter:
 
     @r.post("/github/session/{sid}/merge")
     async def gh_merge(sid: str, full_name: str = Form(...)):
-        """A person presses Merge (auto-merge off, no CI, or a change Javis would not merge alone)."""
+        """A person presses Merge (auto-merge off, no CI, or a change Javis would not merge alone).
+
+        The merge runs as its own task: if this request is dropped (panel or tab closed), it still finishes."""
         import github_work
         try:
             return {"ok": True, **(await github_work.merge_by_person(sid, full_name))}
+        except github_repos.RepoError as e:
+            return _err(str(e))
+
+    @r.post("/github/session/{sid}/push")
+    async def gh_push(sid: str, full_name: str = Form(...)):
+        """A person presses "Push again" after a failed push. Javis also retries on its own; this is the shortcut."""
+        import github_work
+        try:
+            row = await github_work.retry_ship(sid, full_name, by_person=True)
+            return {"ok": True, "row": github_work._row_view(row)}
+        except github_repos.RepoError as e:
+            return _err(str(e))
+
+    @r.post("/github/session/{sid}/review")
+    async def gh_review_now(sid: str, full_name: str = Form(...), provider: str = Form("")):
+        """Review now: starts in the background and returns at once; the findings reach the chat."""
+        import github_work
+        try:
+            return {"ok": True, **github_work.review_now(sid, full_name, provider)}
+        except github_repos.RepoError as e:
+            return _err(str(e))
+
+    @r.post("/github/session/{sid}/review/fix")
+    async def gh_review_fix(sid: str, full_name: str = Form(...)):
+        import github_work
+        try:
+            return {"ok": True, **(await github_work.review_fix(sid, full_name))}
+        except github_repos.RepoError as e:
+            return _err(str(e))
+
+    @r.post("/github/session/{sid}/review/skip")
+    async def gh_review_skip(sid: str, full_name: str = Form(...)):
+        import github_work
+        try:
+            return {"ok": True, **(await github_work.review_skip(sid, full_name))}
         except github_repos.RepoError as e:
             return _err(str(e))
 
@@ -194,7 +278,11 @@ def _make_router() -> APIRouter:
         return await _call(view)
 
     @r.post("/github/session/{sid}/repos")
-    async def gh_session_repos(sid: str, brain: str = Form(""), repos: str = Form("")):
+    async def gh_session_repos(sid: str, brain: str = Form(""), repos: str = Form(""), add: str = Form("")):
+        """`add`: one full name to attach next to what the chat has (the picker's "+"). Without it `repos` sets the
+        whole list, which detaches what is left out."""
+        if str(add or "").strip():
+            return await _call(github_repos.add, sid, brain, _root(brain), str(add).strip())
         names = [x.strip() for x in str(repos or "").split(",") if x.strip()]
         return await _call(github_repos.attach, sid, brain, _root(brain), names)
 

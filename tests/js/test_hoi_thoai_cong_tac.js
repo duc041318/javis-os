@@ -82,7 +82,7 @@ check("setWho: a toast with Undo puts the old state back (not for Dismiss)", /to
   /setWho\(now, wasOn \? wasMode : "off", false, true\)/.test(sw));
 check("the old two-state switch and status line are gone", !/ht-seg|renderStatusLine|renderActions|function doiMode|ht\.sw_|ht\.st_/.test(CV) &&
   !/\.ht-seg|\.ht-status|\.ht-act/.test(OLDCSS));
-check("'Bot im: lý do' nằm TRONG vùng tin, ngay sau tin cuối", /_msgs\.map\(veTin\)\.join\(""\) \+ renderSilenceLine\(c\)/.test(CV));
+check("'Bot im: lý do' nằm TRONG vùng tin, ngay sau tin cuối", /_msgs\.map\(renderMessage\)\.join\(""\) \+ renderSilenceLine\(c\)/.test(CV));
 check("lý do lấy nhãn từ bộ phán xử (codeLabel), kèm điểm/ngưỡng khi có; mã lạ thì hiện nguyên mã",
   /RP\.codeLabel\(s\.code\)/.test(CV) && /toFixed\(2\)/.test(CV) && /function codeLabel\(code\)/.test(RP) &&
   /CODE_LB\[code\] \? tt\(CODE_LB\[code\]\) : String\(code \|\| ""\)/.test(RP));
@@ -113,7 +113,7 @@ const keys = ["ib.ai_lbl", "ib.m_ai", "ib.m_ai_s", "ib.m_draft", "ib.m_draft_s",
   "ib.allow_here", "ib.make_bot", "ib.back_ai", "ib.ask_ai_now", "ht.silent", "ht.silent_why"].concat(codes.map((k) => "ib.wc_" + k));
 check("khoá có ở cả vi và en", keys.every((k) => VI[k] && EN[k]), keys.filter((k) => !VI[k] || !EN[k]).join(","));
 check("the self-action buttons speak in the first person (owner, 2026-10-28)", VI["ib.m_human"] === "Tôi trả lời" &&
-  VI["ib.m_draft"] === "A.I. soạn, tôi duyệt");
+  VI["ib.m_draft"] === "Javis soạn, tôi duyệt");
 check("khoá của công tắc và dòng trạng thái cũ đã bỏ", ["ht.sw_auto", "ht.sw_mine", "ht.st_ai", "ht.st_off", "ht.tra_ai", "ht.tiep_quan"]
   .every((k) => !(k in VI) && !(k in EN)));
 check("không dùng em dash trong test này", fs.readFileSync(__filename, "utf8").indexOf(String.fromCharCode(0x2014)) < 0);

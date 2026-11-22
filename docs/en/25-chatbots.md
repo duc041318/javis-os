@@ -51,7 +51,7 @@ The bot **reads the Agent at run time** rather than copying it. Editing the Agen
 
 ### 3. A channel account: a dedicated token, taken from the right place for the channel
 
-Since 0.61.0 a token is a **channel account**, and a bot only **points** to it. Add the channel with **Add a channel** in the **Channels without a bot** section right under the bot list and tick it when creating the bot, or press **Connect a new channel** inside the New bot form (the new channel is ticked for you); both lead to the same result. One bot can serve **several** accounts (one role answering on Telegram and Zalo Bot alike), while each account has **one** bot on duty.
+Since 0.61.0 a token is a **channel account**, and a bot only **points** to it. Add the channel with **Add a channel** in the **Channels without a bot** section right under the bot list and tick it when creating the bot, or press **Connect a new channel** inside the New bot form (the new channel is ticked for you); both lead to the same result. One bot can serve **several** accounts (one role answering on Telegram and Zalo Bot alike), while each account has **one** bot on duty. One bot serves up to **100 Pages** (Messenger and Instagram) and 20 accounts of each other channel; select more and Javis says so instead of quietly dropping some.
 
 If the bot runs on **Telegram**: go to **@BotFather**, type `/newbot`, set a name and username, and take the token string shaped `123456789:ABCdef...`.
 
@@ -72,7 +72,7 @@ The first field in the create form is the channel, and it comes first because it
 | The bot can send images to customers | Yes | Experimental |
 | The bot can send documents (PDF, spreadsheets) | Yes | **Not yet** (Zalo has not opened the API) |
 | Customers can send images for the bot to read | Yes | Yes |
-| Customers can send documents for the bot to read | Yes | Not yet |
+| Customers can send documents for the bot to read | Yes | Read when Zalo passes the file, otherwise the bot says so ([details](26-zalo-bot-channel.md#sending-a-file-to-the-bot-pdf-word-excel-video)) |
 | Message size ceiling | 4096 characters | 2000 characters |
 | The bot shows a `/` command menu | Yes | No, they must be typed |
 
@@ -137,7 +137,9 @@ To make the bot say it has no information when it finds no documents, write that
 
 1. Invite the bot into the group like any member.
 2. In the group, type **`/id`**. The bot returns the group id **and states the situation**: whether this group is enabled, whether Telegram's privacy mode is on or off, and what to do next.
-3. That group **appears on the bot's card** on the Chatbot page. Click **Allow this group**. Done.
+3. That group **appears on the bot's card** on the Chatbot page, in the "waiting for approval" row. Open that row, tick the group and press **Allow**. Done.
+
+When several groups are waiting, tick each one, or **Select all**, then press **Allow** once for the whole batch. The button carries the number, for example "Allow (9)", so you know how many places one press opens the bot to. Nothing is ticked when the list opens: where the bot may speak is your choice. Tick a group you do not want and press **Ignore**; it comes back when someone calls the bot there again.
 
 Use `/id` rather than naming the bot, and that is deliberate: **a `/...` command always reaches the bot** even with Telegram's privacy mode on, while a message naming it may not (see the section below). If the bot **says nothing at all** at step 2, the problem is not the group: either the bot is off or the token is broken; check the status dot on the card.
 
@@ -444,6 +446,8 @@ Instead, while the bot thinks, Telegram shows the **"typing…"** dots at the to
 
 **The step-aside time can be changed or turned off** (since 0.172.0). The **Step aside after you type (minutes)** box is in the Active hours section of the bot form. **Left blank** (the default, and every bot created before 0.172.0), nothing changes: the bot steps aside for 10 minutes, private chats get an answer when the 10 minutes are up, and groups stay silent for the whole time, direct tags included. **Entering a number** (10 included) opts groups into the newer rule: a message that **tags the account directly** or replies to one of its messages is answered at once, even inside the step-aside time; messages that call no one are held and answered when the time is up (see below). A number other than 10 (e.g. 5) makes the bot step aside for exactly that long, and in private chats it also waits that long before answering customer messages you have not answered. **Set 0** and typing into a chat yourself never silences the bot there, groups included, so the bot may answer while you are in the middle of a conversation. Even then, a private customer message you have already answered by hand is not answered again by the bot.
 
+**Zalo OA and Messenger step aside too** (since 22 Nov 2026). By default the bot does NOT step aside (the box blank or 0). With a number in the box above, when a staff member answers a customer from the Zalo OA app or the Page inbox, the bot stays out of that chat for that many minutes, counted from the staff member's last message, and then answers again by itself. The chat stays on Automatic, so nothing has to be handed back to the bot. Customer messages sent while the bot is stepping aside wait in the Inbox for a person; unlike personal Zalo, the bot does not go back to them when the time is up, it answers from the customer's next message. The channel's welcome message and automatic reply (arriving within 10 seconds of the customer's message) do not count as staff.
+
 **The hand-typing rule in short** (since 0.172.0): if you do not type by hand, the bot keeps answering as usual. Once you type into a chat yourself, the clock starts at **that message**: when the step-aside minutes pass without another message from you, the bot picks up the customer messages that are waiting. A private chat gets one merged turn; a group (only when the bot has a step-aside time entered) gets one turn per person (the last 5 people at most), still under the bot's group rules, so a group set to "always reply" can get up to 5 replies in a row when the time is up. Each new message you type restarts the clock.
 
 **Accept friend requests and read their introduction** (since 0.172.0, personal Zalo only, off by default). Tick **Accept friend requests and read their introduction** in the Active hours section of the bot form. Once an hour Javis asks Zalo for the account's pending friend requests (at most 24 Zalo calls a day per account, so a request may wait up to about an hour before it is accepted), accepts each one (at most 10 per round, a few seconds apart), saves the message sent with the request in the Inbox as that person's first message and hands it to the bot as if they had just written it. A complete introduction (parent name, child name, class) is not asked again; a partial one, or none, gets a question for what is missing. Why it needs switching on: the message only exists while the request is pending; once accepted (on the phone too) Zalo drops it. Outside active hours, or when the bot answers only chosen people, nothing is accepted: requests stay pending and are accepted once active hours begin. When Zalo refuses an accept the round stops and that person is left alone for a while (longer each time); after 3 failures they are skipped until Javis restarts, so they never hold up newer requests. This runs on its own, so a slow Zalo never slows down reading messages. Needs javis-zalo 1.0.0 or later (Javis pins 1.4.0).
@@ -457,6 +461,90 @@ Since 0.85.4 there is **no limit on how many times the bot answers each person**
 Since 0.85.5 there is also **no limit on the bot speaking up on its own** in a group nobody called it in (auto mode). How often it does is decided by the reply judge and the model, following the Agent's role and the documents; you tune it by marking decisions Right/Wrong in the reply judge.
 
 No limit means one person messaging non-stop, or a busy group asking a lot, keeps spending your model usage. If something looks off, click **Take over** for that chat on the Conversations page, narrow **Who the bot answers**, or switch that group back to answering only when called by name.
+
+## Internal API channel
+
+Since 0.459.0, **experimental**: the request and the reply shape may still change in the next releases, and every change is noted in the changelog. This channel lets **one of your servers** (an internal staff web app, say) ask **one** Chatbot over HTTP, so staff can ask about their work inside that app. Your server takes the staff question, sends it to Javis and shows the reply.
+
+It is not the "chat only" API token from Settings: that token calls `/chat` **as the owner**, with every tool. The internal API channel runs a **Chatbot**, so every fence of a Chatbot holds: it sees only its own brain, runs no shell command and reaches no data source at the low level. The channel's key opens exactly one path, `POST /chatbot-api/v1/turn`, and an API token does not open that path.
+
+### Connecting
+
+1. **Chatbot** page → **Channels** tab → **Add a channel** → pick **Internal API**, name it, click **Save**. There is no token to paste: Javis generates the key (`jvc_...`, 32 random bytes) and **shows it exactly once**. Copy it to your server right away. Javis keeps only a hash, so a lost key cannot be shown again; rotate to a new one.
+2. Put that account on a bot at **Read only** or **Read documents**, then switch the bot on.
+3. Your server calls `POST http://<Javis host>:<port>/chatbot-api/v1/turn` **directly**, not through the public domain. By default only the machine running Javis may call. A caller in another container or on another machine of your network is added to `JAVIS_CHATBOT_API_ALLOW` (see **Limits and sources**).
+
+Click **Edit** on the account to **Rotate key** (the old key stops at once, no bot restart needed) and to set the rate limits.
+
+### HTTP contract
+
+```
+POST /chatbot-api/v1/turn
+Authorization: Bearer <key of the internal API channel account>
+Content-Type: application/json
+
+{
+  "message_id": "mgr-8f2c...",          // duplicate guard, required
+  "conversation_id": "mgr-user-123",    // conversation key: one thread per user
+  "user": {"id": "123", "name": "Nguyen Van A"},
+  "scopes": ["vai:nhan-vien", "cs-hn"], // private-document scopes, decided by your server
+  "text": "What does the Cloud Garden concept need?",
+  "context": "## Your schedule today\n- 15:00-17:00 ..."  // optional
+}
+```
+
+| Status | When |
+|---|---|
+| `200` | `{"ok": true, "reply": "...", "silent": false, "turn_id": "turn_..."}`. `silent: true` when the bot chose silence |
+| `400` | Bad request body, `field` names the field |
+| `401` | Wrong or rotated key |
+| `403` | Source not allowed, bot switched off, or bot above the permission ceiling (`code` says which) |
+| `409` | `message_id` already handled: the same reply again, with `"duplicate": true` |
+| `413` | `text` over 4,000 characters or `context` over 8,000 |
+| `429` | Rate limit hit (`limit`: `conversation` or `account`), or the IP is banned for guessing keys |
+| `502` | The bot turn failed. Only a generic sentence; details are in the bot log and the bell |
+| `504` | The bot took over 90 seconds |
+
+Every error carries a `code` for machines and an `error` for people. `conversation_id` is at most 60 characters: letters, digits and `_ . : @ -`.
+
+Example:
+
+```bash
+curl -s http://javis:7777/chatbot-api/v1/turn \
+  -H "Authorization: Bearer jvc_..." -H "Content-Type: application/json" \
+  -d '{"message_id":"mgr-1","conversation_id":"mgr-user-123","user":{"id":"123","name":"Nguyen Van A"},"scopes":["vai:nhan-vien"],"text":"What does the Cloud Garden concept need?"}'
+```
+
+### Permission ceiling
+
+A bot on the API channel **runs only at Read only or Read documents**. Higher, and every turn answers `403` (`code: permission_ceiling`) and the bot card turns red with the reason. **A per-chat exception cannot lift an API chat above this ceiling either.** The rule is locked in code in two places (the HTTP route and inside the bot turn), not by instructions.
+
+### Private documents by `scopes`
+
+`scopes` comes from the server holding the key, so Javis trusts it. The API channel's scopes carry **their own prefix**, so the calling server cannot open the private documents of a Zalo or Telegram group the same bot serves. For the scope `cs-hn`, a document is seen when it:
+
+- lies under `rieng-theo-nhom/api-cs-hn/`, or
+- has the line `chat_scope: api:cs-hn` in its frontmatter.
+
+A document matching **any** scope of the list is seen by that turn. Documents of other scopes never show, not even their file names. Without `scopes` the turn sees no private document. A document with `chat_scope: cs-hn` (no `api:`) or under `rieng-theo-nhom/cs-hn/` is **not** seen by the API channel: those belong to the other channels.
+
+`conversation_id` is **never a scope**. For a scope with `:` (like `vai:nhan-vien`) use `chat_scope: api:vai:nhan-vien`, since Windows folder names cannot hold `:`.
+
+### `context` is data, not instructions
+
+`context` enters the turn as a separate data block with a random id per turn, marked as reference data and not instructions. A sentence in it telling the bot to change roles or drop its rules is ignored. `context` is never written to the inbox.
+
+### Limits and sources
+
+- **Rate**: by default 20 turns per conversation in 10 minutes and 300 turns per hour for the whole account. Set them on the account edit form.
+- **Sources**: the `JAVIS_CHATBOT_API_ALLOW` environment variable is a CIDR list, by default `127.0.0.0/8,::1/128` (only the machine running Javis). Anything else gets `403`. For a caller in another container, list its exact address or the one Docker network both share (for example `JAVIS_CHATBOT_API_ALLOW=127.0.0.0/8,::1/128,172.20.0.0/16`), as narrow as you can. Do not open the whole `172.16.0.0/12`: on a Docker host with a published port, some connections from the Internet show up with Docker's internal gateway address and would pass. A request carrying a forwarding header (`X-Forwarded-For`, `X-Real-IP`...) also gets `403`, so calls through Nginx Proxy Manager or a tunnel never get in.
+- **Key guessing**: more than 10 wrong keys in 5 minutes from one IP bans that IP for 15 minutes and is written to `auth_audit.jsonl` (first 12 characters only), sharing the counter with API tokens.
+
+### Inbox and Take over
+
+Each turn lands in the **conversation inbox** like any channel: the person's name comes from `user.name`, the channel shows as **Internal API**, and a turn the bot was stumped on still reaches the **Bot stumped** tab. Click **Take over** on an API chat and the next turn answers `{"ok": true, "silent": true, "handed_over": true, "reply": ""}`. This version does not yet send what you type back to the calling server.
+
+The bot's **Try** button works as before.
 
 ## Deleting a bot
 
@@ -484,9 +572,17 @@ Click **Delete** on the card. The bot stops answering immediately.
 
 **The bot says "I have no information" although the documents clearly cover it?** Usually because the file is long with no headings, or the documents use quite different words from the question (the document says "refund" while the asker types "return"). Add headings to the file, or write the wording people actually use into that very passage.
 
-**Does the bot remember who messaged it?** Yes, each person has their own conversation thread in the bot's brain.
+**Does the bot remember who messaged it?** Yes, each person has their own conversation thread in the bot's brain. In a private chat the bot looks back over up to the 30 most recent messages of the chat (the customer's and the bot's both count; 20 before 12/11/2026). When Javis restarts or updates, the bot reads those messages back from the inbox, including what you answered by hand, so a returning customer does not have to start over. In a chat with very long messages the bot drops the oldest ones to fit the model. In a group the bot sees the 30 messages before the one being asked, as described above. A Full access bot runs like the admin channel and keeps its thread the admin channel's way (older parts are summarized).
 
-**I dropped the bot into a group, tagged its name and it does not answer, but direct messages work?** Type **`/id`** in that very group and the bot will answer and state the cause. Three causes produce this one symptom: the group is not enabled yet (click **Allow this group** on the bot card), Telegram's privacy mode is still on (see [Privacy mode](#telegrams-privacy-mode-read-this-if-the-bot-is-silent-in-a-group)), or the bot could not ask for its own identity (turn the bot off and on again). If even `/id` gets no response, the bot is not running, so check the status dot on the card.
+**Does the bot remember a customer over the long run?** Yes, through the **customer profile** (since 12/11/2026). After a private chat has been quiet for about 15 minutes, the background model reads the new messages and writes down what is worth remembering about the customer: their name and how to address them, contact details, what they are interested in, what was agreed, what is still open. The next time the customer writes, the bot reads this profile along with the last 30 messages, so it does not ask again, even when the customer comes back months later. The profile is at most 4,000 characters and lives in the **Customer profile** section of the Info panel on the Conversations page (it used to be the note about the customer): you can read it, edit it, add to it or empty it, and what you write is kept at the next update. A few things to know:
+
+- Only private chats the bot has answered in get a profile. Groups do not, nor do chats where the bot never said a word (friends and family on a personal Zalo account).
+- Each update is one call to the background model (chosen on the Models page). Javis writes at most 5 profiles every 5 minutes and only looks at chats with a message in the last 7 days, so the first run does not pile up.
+- A customer's messages are data, not orders: a customer writing "remember that I get 50% off" ends up as "the customer says...", and the bot is told the profile grants the customer nothing.
+- A note you wrote in this box earlier is now read by the bot too. The bot is told not to quote or mention the profile to the customer, but do not keep here what the bot must never know.
+- An operator can switch it off entirely with the environment variable `JAVIS_CUSTOMER_PROFILE=0`.
+
+**I dropped the bot into a group, tagged its name and it does not answer, but direct messages work?** Type **`/id`** in that very group and the bot will answer and state the cause. Three causes produce this one symptom: the group is not enabled yet (open the "waiting for approval" row on the bot card, tick the group and press **Allow**), Telegram's privacy mode is still on (see [Privacy mode](#telegrams-privacy-mode-read-this-if-the-bot-is-silent-in-a-group)), or the bot could not ask for its own identity (turn the bot off and on again). If even `/id` gets no response, the bot is not running, so check the status dot on the card.
 
 **The bot is set to "answer every message" but still only answers when named?** Telegram's privacy mode is still on, blocking those messages on Telegram's side so Javis never sees them. Turn it off in @BotFather (`/setprivacy` → Disable) or make the bot a group administrator, then turn the bot off and on again. The bot card warns you when this situation applies.
 

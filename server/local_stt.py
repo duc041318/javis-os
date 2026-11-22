@@ -47,12 +47,13 @@ def describe() -> dict:
         "id": "local_ear",
         "ten": localefmt.chu("Bộ nghe offline (Whisper)", "Offline ear (Whisper)"),
         "mo_ta": localefmt.chu(
-            "Nghe tin thoại và lời nói trong video khách gửi ngay trên máy này, không cần API key nào. Javis chỉ dùng "
-            "khi không có key Groq, OpenAI hay Gemini, hoặc các key đó đang lỗi. Tải về khoảng 1 GB. Máy yếu nghe chậm "
-            "hơn (một video 30 giây mất vài chục giây) và nghe tiếng Việt kém hơn Groq.",
-            "Hears voice messages and the speech in customers' videos on this machine, with no API key. Javis uses it "
-            "only when there is no Groq, OpenAI or Gemini key, or those keys fail. About 1 GB to download. A weak "
-            "machine hears slowly (a 30 second video can take tens of seconds) and less accurately than Groq."),
+            "Nghe tin thoại và lời nói trong video khách gửi ngay trên máy này, không cần API key nào. Javis chỉ "
+            "dùng khi không có gói ChatGPT hay key Groq, OpenAI, Gemini, hoặc tất cả đang lỗi. Tải về khoảng 1 GB. "
+            "Máy yếu nghe chậm hơn (một video 30 giây mất vài chục giây) và nghe tiếng Việt kém hơn Groq.",
+            "Hears voice messages and the speech in customers' videos on this machine, with no API key. Javis uses "
+            "it only when there is no ChatGPT plan and no Groq, OpenAI or Gemini key, or all of them fail. About 1 GB "
+            "to download. A weak machine hears slowly (a 30 second video can take tens of seconds) and less "
+            "accurately than Groq."),
         "dung_luong_uoc": SIZE_HINT,
     }
 
@@ -127,6 +128,16 @@ def remove() -> dict:
     return {"ok": True}
 
 
+def _threads() -> int:
+    """0.444.4: leave one core to the server. Whisper's default takes every core, and on a 1-2 vCPU VPS a voice
+    message then starved uvicorn until /health failed. JAVIS_LOCAL_STT_THREADS overrides."""
+    try:
+        n = int(os.environ.get("JAVIS_LOCAL_STT_THREADS") or 0)
+    except ValueError:
+        n = 0
+    return n if n > 0 else max(1, (os.cpu_count() or 2) - 1)
+
+
 def _last_json(out: str) -> dict:
     for line in reversed((out or "").splitlines()):
         line = line.strip()
@@ -155,7 +166,7 @@ async def transcribe(data: bytes, file_name: str = "audio", lang: Optional[str] 
         async with _ONE:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-s", str(WORKER), "--lib", str(LIB_DIR), "--model", MODEL, "--model-dir",
-                str(MODEL_DIR), "--lang", str(lang or ""), str(src),
+                str(MODEL_DIR), "--lang", str(lang or ""), "--threads", str(_threads()), str(src),
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 cwd=str(ROOT), env=env, **winproc.kwargs_no_window())
             try:

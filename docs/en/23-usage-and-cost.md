@@ -180,6 +180,45 @@ This list is generated from the figures of the period you are viewing. The thres
 
 Each card carries a specific suggested action, for example the low-cache suggestion recommends `/compact` or splitting the session, and the opus suggestion recommends downgrading the model for light work. The 200,000-token threshold on the cache warning exists so the page does not shout after you have used it for a few minutes.
 
+## Most-used tools are pinned
+
+When a brain has many sources connected, Javis hides most tools and looks one up only when needed, so each question stays light. The price: a tool you use every day costs one extra "search, then call" round each time.
+
+From this version Javis counts which tools each brain calls most and **pins** a few of them (up to 4 by default; Javis Core widens that up to 8 when needed). A pinned tool is called directly, one round fewer each time. Background work such as loops gains the most.
+
+- Nothing to set up. The first pins and every added pin get a notice in the bell.
+- A tool you stop using leaves the list on its own. One brain's list changes at most once a day.
+- Ask Javis "which tools are pinned" to see them. Say "stop pinning tools" to turn it off.
+- Permissions do not change: a pinned tool still follows the permission level of its connection and of the job running.
+
+## Large tool results: stored whole, the model reads only what it needs
+
+A data source often returns far more than a model should read. Measured on a real install: ten shop orders are 99,000 to 183,000 characters, ten website posts 242,000. A model running on an API key used to get this cut to 8,000 characters (head and tail kept, the middle dropped), so it saw the total number of orders and not one whole order. Subscription brains received everything, and paid for it in plan allowance.
+
+From this version the hub shapes a result before the model reads it, the same way for every brain:
+
+- **Errors and small results** are passed on word for word.
+- **Medium results** lose only their indentation, never a field. A somewhat larger one that fits once the column names are written a single time is shown whole, as a table.
+- **Large results** are stored whole (encrypted, deleted after 24 hours). The model gets a view: the totals, the field names, a few whole records and a reference.
+- **Reading back or computing** is done with the `javis_query` tool: pick fields, page through, or run one read-only SQL query over all records. It can also page through a read tool by itself and compute, so a full month report no longer has to pass through the context.
+
+Three features come with it:
+
+- **Scout (`javis_scout`).** The main model can hand a read across several sources to the **background model** you chose on the Models page. A scout can only read, and only its findings return to the chat. If it cannot run, the main model does the reading itself as before.
+- **Read-only scripts (`javis_code`).** The model writes a short Python script that chains several read calls (paging, looking up each order, joining two sources), computes, and prints only the result. The raw data never passes through the chat. The script runs in its own process with no keys, no files and no network, and can call only plainly read-only tools.
+- **Recipes for recurring jobs.** After the same run on two different days, Javis fetches the data itself before the model starts. It does so only when every reading of the dates gives the same result that day; otherwise the job runs as before. Only calls that are plainly reads are repeated, and a job whose period is not written as `YYYY-MM-DD` (a month `2026-11`, a week number, `01/11/2026`) is never turned into a recipe. If the model still has to call a source again after the data was fetched for it, the recipe is dropped after two such runs. Each recipe is a file in `<brain>/Javis/recipes/`; delete the file to forget it.
+
+In a long turn, two more savings take nothing away from the model:
+
+- **Repeated results.** When the model calls the same tool with the same arguments and the result is identical (it reads a file again, lists the same data again), it gets a one-line reference to the copy it already holds instead of the whole text again. The tool still runs every time, so changed data reaches the model in full. When a turn grows long enough that Javis trims old results, the full text goes back into the newest reference. Claude Code and Codex keep a conversation Javis cannot see, so for them this happens at the hub, for Javis's tools and connections: a call right after a reference gets the full text, and when they compact their conversation Javis forgets that turn's record. Claude Code handles re-reading an unchanged file itself.
+- **Compact JSON.** A JSON result with indentation, or with Vietnamese letters written as `\u1ec7`, is written compactly with the same content. File reads, terminal output, web pages and skills stay exactly as they are, because the model may need to copy them exactly to edit.
+
+A long skill built as a "menu" (each request needs one part, like `javis-builder`: an agent OR a loop OR a plugin) is loaded **selectively**. Javis chooses what to load before loading it: it scores each section against the request, in any language (Latin script, Cyrillic, Arabic, Hindi, Chinese, Japanese, Korean, Thai...), always includes the rules and process sections, adds any part the chosen one says to create first (a workflow brings the agent template), and lists the rest so the model can fetch one in a single call. When it is not sure, it loads the whole skill as before. A skill that is one continuous procedure always loads whole, because a general request needs all of it. Javis learns from use: a section the model keeps fetching is loaded up front next time. It starts on about 10% of the owner's chat sessions and follows the **Off** level; see `JAVIS_SKILL_SECTIONS` in [Environment configuration](16-env-configuration.md).
+
+Background jobs (Kanban jobs, loops, reminders that do work) on an **API-key** engine carry a **short background rule set** instead of the whole CLAUDE.md, so the fixed part sent with every tool call is about 60% smaller. The rule set keeps every rule about acting: do exactly the job within its permission level, never invent numbers, report to whoever assigned the job, no empty promises, no jobs created unasked, new plugins always off. Subscription engines (Claude Code, ChatGPT, Grok, Antigravity) keep the full rules because they are not billed per token. It starts on about 10% of background jobs and follows the **Off** level; see `JAVIS_BG_LEAN_PROMPT` in [Environment configuration](16-env-configuration.md).
+
+The **Suggestions** section at the bottom has a line saying what share of tool results stayed out of the conversation in the last 7 days, both savings above included. To turn this off: choose the **Off** saving level, or see `JAVIS_TOOL_RESULT_*`, `JAVIS_RESULT_REPEAT_REFS`, `JAVIS_SCOUT` and `JAVIS_RECIPES` in [Environment configuration](16-env-configuration.md).
+
 ## Where these figures come from
 
 Javis calls no provider API for statistics. It **re-reads the raw logs on your own machine** then builds its own index:

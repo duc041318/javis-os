@@ -133,11 +133,150 @@ check("hết hạn từ chối thì về màu theo số", pl.doc(now=NOW + 901)[
 pl.ghi_het("gemini-cli", 0, now=NOW)
 check("engine lạ không ghi gì", "gemini-cli" not in json.load(open(os.path.join(_TMP, "plan_limits.json"))))
 
+# 8b. Issue 1334: a report measured AFTER the refusal that shows the plan usable again lifts the refusal. Before,
+#     nothing ever cleared `het`: the owner reset the plan on the provider's site, later reports said "allowed"
+#     with a low number, and the ring still stayed red at 100% (and Javis's own work paused) until the old reset.
+pl.ghi_het("claude-code", NOW + 9000, now=NOW + 100)
+pl.ghi_claude(RAW, now=NOW + 50)
+check("a report measured before the refusal keeps the ring red", "het" in pl.doc(now=NOW + 200)["claude"])
+pl.ghi_claude(RAW, now=NOW + 100)
+check("a report in the same second as the refusal keeps it red too", "het" in pl.doc(now=NOW + 200)["claude"])
+pl.ghi_claude(dict(RAW, status="rejected"), now=NOW + 150)
+c = pl.doc(now=NOW + 200)["claude"]
+check("a later report that still says rejected keeps it red", "het" in c and c["muc"] == "bad" and c["max"] == 100, c)
+check("Javis's own work waits while the plan refuses", pl.side_pause("anthropic-cli", now=NOW + 200)["paused"] is True)
+pl.ghi_claude(RAW, now=NOW + 300)
+c = pl.doc(now=NOW + 400)["claude"]
+check("a later allowed report lifts the refusal: the ring follows the meter again",
+      "het" not in c and c["muc"] == "ok" and c["max"] == 23, c)
+check("and Javis's own work runs again",
+      pl.side_pause("anthropic-cli", now=NOW + 400) == {"paused": False, "pct": 9, "resets_at": NOW + 11000},
+      pl.side_pause("anthropic-cli", now=NOW + 400))
+pl.ghi_het("claude-code", NOW + 9000, now=NOW + 500)
+pl.ghi_claude(dict(RAW, status="allowed_warning"), now=NOW + 600)
+check("allowed_warning is still allowed: it lifts the refusal as well", "het" not in pl.doc(now=NOW + 700)["claude"])
+
+
+def _codex_report(primary, secondary=None):
+    w = {"primary": {"usedPercent": primary, "windowDurationMins": 300, "resetsAt": NOW + 9000}}
+    if secondary is not None:
+        w["secondary"] = {"usedPercent": secondary, "windowDurationMins": 10080, "resetsAt": NOW + 86400}
+    return {"rateLimits": w}
+
+
+# Codex sends no status, so its numbers decide. Usage inside a window only grows, so only a clearly low number after
+# the refusal means a reset; the last report before the refusal reads just under 100% and must not lift it.
+pl.ghi_het("codex", NOW + 9000, now=NOW + 100)
+pl.ghi_codex(_codex_report(100, 40), now=NOW + 150)
+check("Codex: a full window after the refusal keeps the ring red", "het" in pl.doc(now=NOW + 200)["codex"])
+pl.ghi_codex(_codex_report(97, 40), now=NOW + 160)
+check("Codex: a window still near its limit keeps it red", "het" in pl.doc(now=NOW + 200)["codex"])
+pl.ghi_codex(_codex_report(12, 40), now=NOW + 90)
+check("Codex: a low report measured before the refusal keeps it red", "het" in pl.doc(now=NOW + 200)["codex"])
+pl.ghi_codex(_codex_report(12, 40), now=NOW + 300)
+x = pl.doc(now=NOW + 400)["codex"]
+check("Codex: every running window low again after the refusal lifts it",
+      "het" not in x and x["five_hour"]["pct"] == 12 and x["muc"] == "ok", x)
+pl.ghi_codex(_codex_report(3, 100), now=NOW + 450)
+pl.ghi_het("codex", NOW + 86400, now=NOW + 500)
+pl.ghi_codex(_codex_report(5), now=NOW + 600)
+check("Codex: a report that leaves out the window still full does not lift it", "het" in pl.doc(now=NOW + 700)["codex"])
+
+# 8c. Owner's report 20/11/2026: Claude Code on a Team plan, the ring red at 66% and 58% after a refusal on one model,
+#     and still red after switching to another. The refusal now remembers its model; picking a model lifts it; a
+#     later turn that answers lifts it (same model) or narrows it to that model (another model).
+T = NOW + 20000
+pl.ghi_claude({"status": "allowed", "unifiedWindows": {
+    "five_hour": {"utilization": 0.66, "resetsAt": T + 4500}, "seven_day": {"utilization": 0.58, "resetsAt": T + 300000}}},
+    now=T)
+pl.ghi_het("claude-code", 0, now=T + 60, model="fable-5-1")
+c = pl.doc(now=T + 70)["claude"]
+check("the refusal keeps the model it happened on", c["het"]["model"] == "fable-5-1" and not c["het"]["scoped"], c)
+check("the meters alone stay readable for the other models", c["meter_max"] == 66 and c["meter_muc"] == "warn"
+      and c["muc"] == "bad" and c["max"] == 100, c)
+check("a turn that started before the refusal lifts nothing", pl.lift_het("anthropic-cli", "opus", since=T + 60) == ""
+      and "het" in pl.doc(now=T + 70)["claude"])
+check("a later answer on another model narrows it to that model",
+      pl.lift_het("anthropic-cli", "claude-opus-5-5", since=T + 100) == "scoped")
+c = pl.doc(now=T + 200)["claude"]
+check("narrowed: the ring follows the meters again", c["het"]["scoped"] and c["muc"] == "warn" and c["max"] == 66, c)
+check("narrowed: background work on another model runs", not pl.side_pause("anthropic-cli", now=T + 200, model="opus")["paused"])
+check("narrowed: background work on the refused model still waits",
+      pl.side_pause("anthropic-cli", now=T + 200, model="fable-5-1")["paused"])
+check("a later answer on the refused model lifts it", pl.lift_het("claude-code", "fable-5-1", since=T + 300) == "lifted"
+      and "het" not in pl.doc(now=T + 400)["claude"])
+pl.ghi_het("claude-code", 0, now=T + 500)
+check("a refusal with no model goes on any later answer", pl.lift_het("claude", "sonnet", since=T + 600) == "lifted")
+pl.ghi_het("claude-code", 0, now=T + 700, model="fable")
+check("picking a model on purpose lifts the mark", pl.clear_het("anthropic-cli") and "het" not in pl.doc(now=T + 800)["claude"])
+check("nothing to lift: False", not pl.clear_het("anthropic-cli") and not pl.clear_het("not-a-plan"))
+check("an alias matches every version of its family", pl.same_model("opus", "claude-opus-5-5")
+      and pl.same_model("fable", "fable-5-1") and pl.same_model("claude-opus-5-5[1m]", "opus-5-5"))
+check("two versions are two models", not pl.same_model("fable-5-1", "fable-5-2") and not pl.same_model("fable-5", "fable-5-1")
+      and not pl.same_model("sonnet", "opus"))
+# A rejection on one model's own window (Opus, Sonnet, Fable credits) never paints the whole plan red.
+pl.ghi_claude({"status": "rejected", "rateLimitType": "seven_day_opus", "unifiedWindows": {
+    "five_hour": {"utilization": 0.4, "resetsAt": T + 4500}, "seven_day": {"utilization": 0.3, "resetsAt": T + 300000}}},
+    now=T + 900)
+c = pl.doc(now=T + 950)["claude"]
+check("a model window's rejection reads amber, not red", c["muc"] == "warn" and c["max"] == 40, c)
+pl.ghi_het("claude-code", 0, now=T + 1000, model="opus")
+pl.ghi_claude({"status": "rejected", "rateLimitType": "seven_day_overage_included"}, now=T + 1100)
+check("a model window's rejection does not keep a refusal", "het" in pl.doc(now=T + 1150)["claude"])
+pl.ghi_claude({"status": "rejected", "rateLimitType": "seven_day_overage_included", "unifiedWindows": {
+    "five_hour": {"utilization": 0.41, "resetsAt": T + 4500}}}, now=T + 1200)
+check("...and lifts it like an allowed report", "het" not in pl.doc(now=T + 1250)["claude"])
+pl.ghi_claude({"status": "rejected", "rateLimitType": "five_hour", "unifiedWindows": {
+    "five_hour": {"utilization": 1.0, "resetsAt": T + 4500}}}, now=T + 1300)
+c = pl.doc(now=T + 1350)["claude"]
+check("the 5-hour window's own rejection is still red", c["muc"] == "bad", c)
+
 # 9. Tên gói: chuẩn hoá, rỗng thì rỗng (không đoán).
 check("max -> Max, pro -> Pro", pl.ten_goi("max") == "Max" and pl.ten_goi("pro") == "Pro")
 check("ChatGPT plus -> Plus", pl.ten_goi("plus") == "Plus" and pl.ten_goi("chatgpt_plus") == "Plus")
 check("tên có chữ hoa giữ nguyên", pl.ten_goi("SuperGrok") == "SuperGrok")
 check("rỗng thì rỗng", pl.ten_goi("") == "" and pl.ten_goi(None) == "")
+# 9b. Tên gói THẬT do nhà cung cấp đặt (2026-11-04): Anthropic đổi Max 20x thành Ultra ngày 30/10/2026
+#     mà `claude auth status` vẫn trả mã "max" cho cả hai hạng. Claude Code tự lưu
+#     `planDisplayName` của profile vào `.claude.json` (file cấu hình, không chứa token): đọc trường đó.
+_cd = os.path.join(_TMP, "claude-a2")
+os.makedirs(_cd)
+_cj = os.path.join(_cd, ".claude.json")
+
+
+def _ghi_cj(acc):
+    with open(_cj, "w", encoding="utf-8") as f:
+        json.dump({"oauthAccount": acc, "mcpServers": {}}, f)
+
+
+_ghi_cj({"emailAddress": "a@x.vn", "planDisplayName": "Ultra"})
+check("đọc đúng tên gói Anthropic đặt (Ultra, dù mã vẫn là max)", pl.ten_goi_claude(_cd, "a@x.vn") == "Ultra")
+check("không truyền email vẫn đọc được", pl.ten_goi_claude(_cd) == "Ultra")
+check("file của tài khoản khác thì bỏ qua, không gán nhầm gói", pl.ten_goi_claude(_cd, "b@x.vn") == "")
+check("so email không phân biệt hoa thường", pl.ten_goi_claude(_cd, "A@X.vn") == "Ultra")
+_ghi_cj({"emailAddress": "a@x.vn", "planDisplayName": "Max 5x"})
+check("tên có số giữ nguyên", pl.ten_goi_claude(_cd) == "Max 5x")
+_ghi_cj({"emailAddress": "a@x.vn", "planDisplayName": "<script>" + "x" * 60})
+check("tên sai mẫu (ký tự lạ, quá 40 chữ) thì bỏ, như CLI", pl.ten_goi_claude(_cd) == "")
+_ghi_cj({"emailAddress": "a@x.vn"})
+check("CLI cũ chưa lưu tên thì rỗng, để rơi về mã gói", pl.ten_goi_claude(_cd) == "")
+check("thư mục không có file thì rỗng", pl.ten_goi_claude(os.path.join(_TMP, "khong-co")) == "")
+with open(_cj, "w", encoding="utf-8") as f:
+    f.write("{hỏng")
+check("file hỏng thì rỗng, không nổ", pl.ten_goi_claude(_cd) == "")
+_ghi_cj({"emailAddress": "a@x.vn", "planDisplayName": "Ultra"})
+os.environ["CLAUDE_CONFIG_DIR"] = _cd
+check("không truyền thư mục thì theo CLAUDE_CONFIG_DIR như CLI", pl.ten_goi_claude() == "Ultra")
+del os.environ["CLAUDE_CONFIG_DIR"]
+
+import claude_cli  # noqa: E402
+check("thẻ Models: có tên thật thì dùng tên thật", claude_cli._ten_goi_dong("max", "a@x.vn", folder=_cd) == "Ultra")
+check("thẻ Models: thiếu tên thật thì chỉ làm gọn mã (max -> Max)",
+      claude_cli._ten_goi_dong("max", "b@x.vn", folder=_cd) == "Max")
+check("goi_ten chỉ nhận tên thật, không đoán",
+      claude_cli._ten_goi_dong("max", "b@x.vn", folder=_cd, chi_ten_that=True) == "")
+check("không có mã gói (API key) thì không có tên", claude_cli._ten_goi_dong("", "a@x.vn", folder=_cd) == "")
+
 x = pl.tu_codex({"rateLimits": {"planType": "pro", "primary": {"usedPercent": 1, "windowDurationMins": 300}}})
 check("Codex báo planType thì giữ lại", x["goi"] == "pro", x)
 
@@ -156,15 +295,30 @@ check("móc gắn lúc tạo engine Claude (không phải lúc nạp main: khở
 src = (ROOT / "server" / "main.py").read_text(encoding="utf-8")
 i = src.rfind('@app.get("/plan-limits")')
 check("route /plan-limits đăng ký sau star_nudge", i > src.rfind("star_nudge_routes.register"))
-check("Claude chỉ tính là gói khi không chạy bằng API key", "not claude_auth.env_cho_cli()" in src[i:])
+# 2026-11-22: a long-lived token (claude_auth.TOKEN) is the plan too, so the test is "no API key", not "no env at all".
+import claude_auth  # noqa: E402
+check("Claude chỉ tính là gói khi không chạy bằng API key", '"anthropic-cli": claude_auth.on_plan()' in src[i:]
+      and claude_auth.on_plan({"model": {"claude_auth": "token", "claude_oauth_token": "sk-ant-oat01-" + "a" * 40}})
+      and claude_auth.on_plan({"model": {"claude_auth": "subscription"}})
+      and not claude_auth.on_plan({"model": {"claude_auth": "api_key", "anthropic_api_key": "sk-ant-api03-x"}}))
 than = src[i:i + 2500]
 check("Grok chạy API key xAI thì không có gói", '"grok-cli": grok_k.get("method") != "xai-api-key"' in than)
 check("tên gói chỉ hỏi khi mở bảng (goi=1)", "if goi:" in than and "claude_auth_status" in than)
 cli = (ROOT / "server" / "claude_cli.py").read_text(encoding="utf-8")
-check("tên gói Claude lấy riêng subscriptionType, không lẫn authMethod", '"goi": d.get("subscriptionType", "") or ""' in cli)
+check("tên gói Claude lấy riêng subscriptionType, không lẫn authMethod",
+      'goi = d.get("subscriptionType", "") or ""' in cli and '"goi": goi,' in cli)
+check("thẻ Models và vòng tròn dùng tên Anthropic đặt (goi_ten), không phải bảng tên tự điền",
+      '"goi_ten": _ten_goi_dong(' in cli and 'cl.get("goi_ten") or plan_limits.ten_goi(' in than)
+check("không còn bảng tên gói điền tay", "_TEN_GOI" not in (ROOT / "server" / "plan_limits.py").read_text(encoding="utf-8"))
 lf = src[src.find("def _limit_frame("):src.find("def _limit_frame(") + 2600]
 check("lượt bị từ chối vì hết hạn mức thì vòng tròn đỏ", "plan_limits.ghi_het(engine_hint" in lf
       and 'engine_hint in ("grok-cli", "antigravity-cli") and plan_limits.la_het_han_muc(raw)' in lf)
+check("the refusal carries the model of the refused turn", "model=model" in lf)
+_cp = src[src.find("def _clear_pin_limit("):src.find("def _clear_pin_limit(") + 1600]
+check("picking a model on purpose lifts the ring's mark too", "plan_limits.clear_het(prov)" in _cp)
+check("a turn that answers lifts an older mark", "plan_limits.lift_het, prov," in src and "_turn_t0 = time.time()" in src)
+_aux = (ROOT / "server" / "aux_engine.py").read_text(encoding="utf-8")
+check("background refusals carry their model too", "plan_limits.ghi_het(hint, float(hit.reset_epoch or 0), model=model)" in _aux)
 
 if fails:
     raise SystemExit(f"{len(fails)} FAIL")

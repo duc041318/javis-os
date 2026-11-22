@@ -10,6 +10,7 @@ Tool đa hành động kiểu Pancake (1 tool, tham số action=list|create|...)
 THAM SỐ qua arg_rules - enforcement thật diễn ra lúc tools/call (có args).
 """
 import json
+import kept
 import re
 import sys
 from fnmatch import fnmatch
@@ -24,14 +25,33 @@ CATALOG_PATH = ROOT / "system" / "mcp-catalog.json"
 WRITE_HINTS = ("create", "update", "delete", "add", "remove", "edit", "send", "set",
                "cancel", "refund", "pay", "post", "write", "upsert", "order", "purchase", "transaction",
                "reply", "accept", "invite", "join", "approve", "deploy", "publish", "upload",
-               "execute", "submit", "launch", "react", "block", "kick")
+               "execute", "submit", "launch", "react", "block", "kick",
+               # Vá bảo mật 2026-11-05: những động từ này từng rơi vào "read" nên chạy được ở mức Chỉ đọc
+               # (forward mail, share file, trash, chuyển tiền). Thà chặn nhầm một tool đọc của connector
+               # tự thêm còn hơn để lọt một hành động; connector trong catalog khai tool_meta nên không bị ảnh hưởng.
+               "forward", "share", "trash", "transfer", "move", "archive", "assign", "withdraw", "revoke",
+               "grant", "rename", "insert", "patch", "replace", "merge", "subscribe", "enable", "disable",
+               "notify", "restore", "import")
 
 PERM_RANK = {"readonly": 0, "safe": 1, "full": 2}
 # "gated" (0.207.0, team_gate.py): a Team step that needs the owner's approval for outside actions. Caps like auto, so
 # anything that does not know the gate fails closed; the hub lists the step's tools like full and asks the gate.
 _MODE_CAP = {"suggest": "readonly", "auto": "safe", "full": "full", "gated": "safe"}
 
-_cache = {"sig": None, "by_id": {}}
+_cache = {"sig": None, "by_id": {}, "path": None}
+
+# How long a checked catalog is trusted without looking at the disk again (2026-11-09). `load()` runs for every
+# connection of every tool list (mcp_hub.discover_all), for every Zalo message and every bot list, and each run used to
+# stat the catalog, the removed list and every pack folder. On the owner's VPS the disk sometimes took seconds per stat,
+# and all of that ran on the event loop: `packs.signature` under `load()` was the top freeze, 53 s in 15 minutes.
+# Changes made through Javis (installing or removing a pack, removing a connector) call `invalidate()` and show at once;
+# a hand edit of the files shows within this many seconds.
+CHECK_S = 2.0
+
+
+def invalidate() -> None:
+    """Make the next `load()` look at the disk again (a pack or a removed connector just changed)."""
+    _LOADED.drop()
 
 
 def _da_go():
@@ -78,7 +98,17 @@ def load():
     nhất lọc được một lần cho tất cả.
 
     Cache theo (chữ ký file catalog, chữ ký danh sách đã gỡ). Thiếu vế thứ hai thì gỡ một
-    connector sẽ không có hiệu lực cho tới khi ai đó sửa file catalog, tức là không bao giờ."""
+    connector sẽ không có hiệu lực cho tới khi ai đó sửa file catalog, tức là không bao giờ.
+
+    A checked catalog is trusted for CHECK_S; past that the event loop still gets it from memory while a helper
+    thread does the check (`_LOADED`, kept.py), so no caller on the loop waits for the disk."""
+    if _cache["sig"] is None:
+        _LOADED.drop()            # never loaded, or the cache was emptied by hand: look at the disk now
+    return _LOADED.get()
+
+
+def _load_now():
+    """The check itself: three signatures from the disk, and a re-read only when one of them changed."""
     try:
         st = CATALOG_PATH.stat()
         sig_file = (st.st_mtime_ns, st.st_size)
@@ -86,7 +116,7 @@ def load():
         return {}
     go = _da_go()
     sig = (sig_file, tuple(sorted(go)), _sig_goi())
-    if _cache["sig"] == sig:
+    if _cache["sig"] == sig and _cache["path"] == str(CATALOG_PATH):
         return _cache["by_id"]
     try:
         data = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
@@ -100,8 +130,12 @@ def load():
     # bẻ hướng được kết nối đang đăng nhập thật - xem `packs._kiem_connector`.
     for cid, con in (_lop_goi() or {}).items():
         by_id.setdefault(cid, con)
-    _cache.update(sig=sig, by_id=by_id)
+    _cache.update(sig=sig, by_id=by_id, path=str(CATALOG_PATH))
     return by_id
+
+
+_LOADED = kept.Value(lambda: _load_now(), fresh_s=lambda: CHECK_S, key=lambda: str(CATALOG_PATH),
+                     name="mcp_catalog.load")
 
 
 def tat_ca():
@@ -135,6 +169,27 @@ def _icon_goi(con, gia_tri):
     if v.startswith("assets/"):
         v = v[len("assets/"):]
     return f"/packs/{pid}/asset/{v}"
+
+
+def key_family(con):
+    """Which connectors may lend each other a sign-in key ("" = none).
+
+    Every Google service signs in with the same kind of key: an OAuth client (client_id + client_secret) or a
+    service account file, made once in one Google Cloud project. Google shows a client secret only once, when it
+    is created, so a key the owner has lost can only come back from a connection that already holds it. The display
+    `group` alone used to decide this, and Google Ads, Analytics, Merchant Center and Search Console sit outside the
+    Google card (they are marketing tools), so their keys could neither be lent nor borrowed.
+
+    Order: an explicit `key_family`, then the display group, then "google" for a Google OAuth provider. Other
+    providers (Meta, Slack) stay out on purpose: nothing says their app keys carry over between connectors."""
+    c = con or {}
+    explicit = str(c.get("key_family") or "").strip()
+    if explicit:
+        return explicit
+    group = str(c.get("group") or "").strip()
+    if group:
+        return group
+    return "google" if str((c.get("auth") or {}).get("provider") or "").strip() == "google" else ""
 
 
 def public_catalog():
@@ -175,6 +230,8 @@ def public_catalog():
             # copy="redirect" chèn ô sao chép Redirect URI ngay tại bước đó;
             # copy="domain" chèn ô sao chép tên miền trần (cho App Domains của Facebook).
             "group": c.get("group", ""), "group_line": c.get("group_line", ""),
+            # Connectors of one family may reuse each other's sign-in key (see `key_family`).
+            "key_family": key_family(c),
             "steps": [{"text": s.get("text", ""), "link": s.get("link", ""),
                        "link_label": s.get("link_label", ""), "copy": s.get("copy", "")}
                       for s in (auth.get("steps") or [])],

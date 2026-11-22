@@ -138,12 +138,24 @@
 .ib-v5 .ib-draft-h { font-size: 13px; margin-bottom: 4px; }
 .ib-v5 .ib-draft .ib-draft-t { font-size: 15px; min-height: 60px; border: 0; background: none; box-shadow: none; padding: 2px 0; resize: none; }
 .ib-v5 .ib-draft-a button { font-size: 13px; }
+/* "Bot học câu này" at the size of the buttons beside it (2026-11-19). */
+.ib-v5 .ib-dr-learn { font-size: 13px; min-height: 32px; }
+.ib-v5 .ib-dr-learn input { width: 16px; height: 16px; }
+/* The "A.I. is writing" box: its order line and its calm note at the draft header's size (2026-11-18). */
+.ib-v5 .ib-aiw-o, .ib-v5 .ib-aiw-slow { font-size: 13px; }
 .ib-v5 .ib-cin { padding: 6px; gap: 6px; }
 .ib-v5 .ib-cin textarea { border: 0; background: none; padding: 9px 10px; font-size: 15px; min-height: 40px; max-height: 200px; resize: none;
   outline: none; }
 .ib-v5 .ib-cin .s-btn, .ib-v5 .ib-cin .s-btn-ghost { min-height: 38px; font-size: 13px; padding: 0 12px; border-radius: 11px; }
 .ib-v5 .ib-cin .ib-ask { background: var(--ib-ai-wash); color: var(--ib-ai-ink); border: 1px solid color-mix(in srgb, var(--ib-ai) 35%, transparent); }
 .ib-v5 .ib-cin .ht-send { font-size: 14px; }
+/* The mic (speak, the words land in the box): an icon only, red and breathing while it listens. */
+.ib-v5 .ib-cin .ib-mic { width: 38px; padding: 0; justify-content: center; color: var(--text2); border: 1px solid transparent; background: none; }
+.ib-v5 .ib-cin .ib-mic:hover { color: var(--text); border-color: var(--border); }
+.ib-v5 .ib-cin .ib-mic.is-rec { background: var(--red, #d64545); color: #fff; border-color: transparent; animation: ib-mic-rec 1.4s ease-in-out infinite; }
+.ib-v5 .ib-cin .ib-mic:disabled { opacity: .7; cursor: default; }
+@keyframes ib-mic-rec { 0%, 100% { box-shadow: 0 0 0 0 rgba(214, 69, 69, .45); } 50% { box-shadow: 0 0 0 6px rgba(214, 69, 69, 0); } }
+@media (prefers-reduced-motion: reduce) { .ib-v5 .ib-cin .ib-mic.is-rec { animation: none; } }
 
 /* ---- Info panel ---- */
 .ib-v5 .ht-info { width: 300px; font-size: 14px; }
@@ -154,6 +166,11 @@
 .ib-v5 .ib-kh small, .ib-v5 .ib-hint { font-size: 12.5px; }
 .ib-v5 .ib-notebox, .ib-v5 .ib-fld select { font-size: 14px; }
 .ib-v5 .ht-info .ht-tag, .ib-v5 .ht-info .ht-tag-add { font-size: 13px; }
+/* Block / Leave group / Delete at the foot of Info: the row menu's rows at the panel's own type scale. */
+.ib-v5 .ib-sec.ib-acts { padding: 6px; gap: 2px; }      /* 6 + the row's 8 = the 14px left edge of every other section */
+.ib-v5 .ib-acts .ht-rm-it { font-size: 14px; padding: 6px 8px; }
+.ib-v5 .ib-acts .ht-rm-t small { font-size: 12.5px; }
+.ib-v5 .ib-acts .ht-rm-ic svg { width: 17px; height: 17px; }
 
 /* ---- the phone's "who replies" sheet, inside the chat column ---- */
 .ib-msheet { position: absolute; inset: 0; z-index: 40; }
@@ -187,6 +204,8 @@
   .ib-mchip { display: inline-flex; }
   .ht-head:has(.ib-mchip) .ib-info-btn { display: none; }
   .ib-htags { display: none; }
+  /* "Bot học câu này" on its own row, so Discard / Rewrite / Send stay one row (2026-11-19). */
+  .ib-dr-learn { flex-basis: 100%; margin-right: 0; }
 }
 
 /* ---- phones ---- */
@@ -351,3 +370,22 @@
 .st-split .st-fill.hu { background: var(--ib-owner); }
 .st-acc-n { font-size: 12.5px; color: var(--text3); }
 .st-accs .st-legend .st-lg.hu { background: var(--ib-owner); margin-left: 8px; }
+
+/* ---- comment thread: reply publicly or message the commenter privately (0.446.0) ---- */
+.ht-priv { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ht-priv-o { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg2); color: var(--text2); font-size: 14px; cursor: pointer; }
+.ht-priv-o.on { border-color: var(--accent-line); background: var(--accent-wash-2); color: var(--text); font-weight: 600; }
+.ht-priv-tag { color: var(--text2); font-weight: 600; }
+
+/* ---- row menu: Delete in the danger colour; the profile popup (0.447.0) ---- */
+.ht-rm-it.danger, .ht-rm-it.danger .ht-rm-ic { color: var(--danger-ink, #b3261e); }
+.ht-prof { max-width: 380px; }
+.ht-prof-body { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 8px 0 4px; text-align: center; font-size: 15px; }
+.ht-prof-pic { width: 88px; height: 88px; border-radius: 50%; object-fit: cover; background: var(--surface-2); }
+.ht-prof-none { display: inline-flex; align-items: center; justify-content: center; font-size: 34px; font-weight: 700; color: var(--text2); }
+.ht-prof-name { display: flex; flex-direction: column; gap: 2px; font-size: 18px; }
+.ht-prof-name small { color: var(--text2); font-size: 14px; }
+.ht-prof-row { display: inline-flex; align-items: center; gap: 6px; color: var(--text2); }
+.ht-prof-open { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.ht-prof-note { color: var(--text3); font-size: 13.5px; line-height: 1.5; }

@@ -27,13 +27,17 @@ import sqlite3
 import threading
 import time
 import uuid
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import hashlib
+import weakref
 
 import reaction_values as RV
 import team_migration
+import subscription_context_store
+import sqlite_tune
 
 # DB nằm cùng nơi settings.json/.sessions.json (JAVIS_STATE_DIR, mặc định server/).
 _STATE_DIR = Path(os.getenv("JAVIS_STATE_DIR", str(Path(__file__).parent)))
@@ -53,6 +57,36 @@ KENH_BOT = ("bot:",)
 # Nhóm chat team: phiên chung của nhóm (`team:<id>`) và mạch engine riêng của từng thành viên (`teammate:<id>:<mã>`).
 # Chúng thuộc trang Nhóm, không hiện ở lịch sử trang Trò chuyện.
 KENH_TEAM = ("team:", "teammate:")
+
+# Chats whose replies the owner reads on the dashboard (2026-11-06, red unread dot in every history list). A chat
+# from Telegram, Zalo or a customer bot was read where it happened, so it never shows as unread here.
+UNREAD_CHANNELS = ("web", "dashboard", "")
+UNREAD_PREFIXES = KENH_CONG_SU
+UNREAD_SQL = (
+    "(CASE WHEN (s.channel IN ({chs}) OR {pre}) AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id "
+    "AND m.role = 'assistant' AND m.ts > COALESCE((SELECT r.read_at FROM session_read r WHERE r.session_id = s.id), 0)) "
+    "THEN 1 ELSE 0 END)"
+).format(chs=", ".join("'%s'" % c for c in UNREAD_CHANNELS),
+         pre=" OR ".join("s.channel LIKE '%s%%'" % p for p in UNREAD_PREFIXES))
+
+
+# 2026-11-20 (owner): "a chat still working, already read, keeps the folder dot on; it should show only once the chat has
+# finished and is unread". The dashboard sends the chats it sees running and the one open on screen; the folder, the
+# "Chưa xếp nhóm" row and the rail dot leave them out. Bounded so a bad query string cannot build a huge SQL.
+SKIP_UNREAD_MAX = 50
+
+
+def _skip_sql(skip: Any) -> Tuple[str, List[str]]:
+    ids = []
+    for x in (skip or ()):
+        x = str(x or "").strip()
+        if x and x not in ids and len(x) <= 128:
+            ids.append(x)
+        if len(ids) >= SKIP_UNREAD_MAX:
+            break
+    if not ids:
+        return "", []
+    return " AND s.id NOT IN (%s)" % ", ".join("?" for _ in ids), ids
 
 # T2 (0.154.0, thiết kế 2026-10-15 mục 4.1): reaction trên câu trả lời của chat riêng. Kho có từ trước được chụp một bản
 # `conversations.db.pre-0.154.0` trước khi tạo bảng (khôi phục khi hạ phiên bản; bản cũ bỏ qua hai bảng mới).
@@ -93,6 +127,87 @@ CREATE TABLE IF NOT EXISTS message_pins (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     created_at REAL NOT NULL,
     PRIMARY KEY(session_id, message_id)
+);
+"""
+
+
+# 0.454.0: the owner's own order of pinned chats and of projects (drag to reorder, dashboard/reorder-dialog.js). Kept in
+# tables of their own on purpose: the `sessions` and `projects` columns are an exact list the qualified native trial
+# context reads (improvement_trial_sql_context._SESSION_COLUMNS, _PROJECT_COLUMNS), so a new column there would stop it.
+# A chat or project without a row has no place yet: it comes after the ordered ones.
+_ORDER_SQL = """
+CREATE TABLE IF NOT EXISTS pin_order (
+    session_id TEXT PRIMARY KEY,
+    pos        INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_order (
+    project_id TEXT PRIMARY KEY,
+    pos        INTEGER NOT NULL
+);
+"""
+
+# 2026-11-13: what Javis learnt about ONE project while working in it, and a one-line description of each attached
+# file and link ("which document holds what"). The owner asked for a project that fills in its own context instead of
+# a box they have to write by hand. Tables of their own for the same reason as pin_order above: the columns of
+# `projects`, `project_files` and `project_links` are exact lists the qualified native trial context reads.
+# `project_asset_notes` is keyed by the stored path or URL, so no asset table needed a new column.
+_PROJECT_LEARN_SQL = """
+CREATE TABLE IF NOT EXISTS project_notes (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    text_norm  TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    session_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pn_project ON project_notes(project_id, created_at DESC);
+-- The same one-line description for a document attached to a CHAT, which is where a team keeps its documents
+-- (`teams.session_id`). Unlike the project tables it can declare its foreign key: it is new, created whole, so deleting
+-- the chat takes its descriptions along.
+CREATE TABLE IF NOT EXISTS session_asset_notes (
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    ref         TEXT NOT NULL,
+    description TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (session_id, kind, ref)
+);
+CREATE TABLE IF NOT EXISTS project_asset_notes (
+    project_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    ref         TEXT NOT NULL,
+    description TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (project_id, kind, ref)
+);
+"""
+
+# 2026-11-15: GitHub repos of a project. Owner: "ở chức năng project cũng có khả năng thêm repo để dễ dàng tạo các dự án
+# code". Each chat of the project gets them attached on its next turn (github_repos.seed_session), on its own branch,
+# so a project becomes a code project with one pick. A table of its own for the same reason as project_notes above.
+# Only the repo's full name is stored: the clone and its registry live in github_repos (outside the brain tree).
+_PROJECT_REPOS_SQL = """
+CREATE TABLE IF NOT EXISTS project_repos (
+    project_id TEXT NOT NULL,
+    full_name  TEXT NOT NULL,
+    added_at   REAL NOT NULL,
+    PRIMARY KEY (project_id, full_name)
+);
+"""
+PROJECT_REPOS_MAX = 10           # repos per project: each chat of the project gets a worktree of every one
+
+# 2026-11-06: when the owner last had each chat on screen (red unread dot in every history list). Its own table for the
+# same reason as pin_order above: a `read_at` column on `sessions` would stop the qualified native trial context.
+# A chat without a row was never read: any reply in it is unread.
+_READ_SQL = """
+CREATE TABLE IF NOT EXISTS session_read (
+    session_id TEXT PRIMARY KEY,
+    read_at    REAL NOT NULL
 );
 """
 
@@ -318,6 +433,8 @@ _KHOI_NGU_CANH_UI = re.compile(r"^\s*\[NGỮ CẢNH GIAO DIỆN:[^\]]*\]\s*")
 # Hội thoại mở đầu bằng `/plan dọn kho` phải mang tên "dọn kho", không phải "[CHẾ ĐỘ KẾ HOẠCH: chỉ
 # đọc và đề xuất. Lượt này CHƯA được làm gì...". Neo đúng hai cụm này, đừng bóc mọi khối [..].
 _KHOI_LENH_HE_THONG = re.compile(r"^\s*\[(?:CHẾ ĐỘ KẾ HOẠCH|MỤC TIÊU):[^\]]*\]\s*")
+# Khối nguồn của tin do AI bên ngoài gửi qua Javis Gate (chat_bridge.py, 0.440.0): cùng loại.
+_KHOI_GATE = re.compile(r"^\s*\[GỬI QUA JAVIS GATE:[^\]]*\]\s*")
 # Câu dashboard tự điền khi user đính kèm file mà KHÔNG gõ gì - không mang thông tin gì.
 _CAU_TU_DIEN = "Hãy đọc (các) file trên và phản hồi / tóm tắt nội dung chính."
 # File đính kèm được app.js liệt kê mỗi dòng một cái, dạng "- <đường dẫn>". Neo vào ĐÚNG dạng
@@ -364,6 +481,7 @@ def title_from_message(msg: str, gioi_han: int = TITLE_MAX) -> str:
         con_lai = _KHOI_GHIM.sub("", con_lai, count=1)
         con_lai = _KHOI_NGU_CANH_UI.sub("", con_lai, count=1)
         con_lai = _KHOI_LENH_HE_THONG.sub("", con_lai, count=1)
+        con_lai = _KHOI_GATE.sub("", con_lai, count=1)
         m_dk = _KHOI_DINH_KEM.match(con_lai)
         if m_dk:
             khoi_dk = m_dk.group(0)
@@ -401,6 +519,26 @@ def title_from_message(msg: str, gioi_han: int = TITLE_MAX) -> str:
 # lần. 4000 ký tự đủ cho một bản brief tông giọng/màu sắc/luật riêng, và đủ hẹp để một project
 # không âm thầm nuốt ngân sách token của mọi câu hỏi trong đó.
 PROJECT_INSTRUCTIONS_MAX = 4000
+
+# What Javis learnt about a project (2026-11-13). A note is ONE short line, never a document: the block built from
+# these rows rides on every chat turn of the project, so the caps below are the price list of that block.
+PROJECT_NOTE_KINDS = ("fact", "decision", "term")
+PROJECT_NOTE_SOURCES = ("javis", "owner")
+PROJECT_NOTE_MAX = 300          # characters of one note
+PROJECT_NOTES_CAP = 60          # notes kept per project; past it the oldest note Javis wrote itself makes room
+PROJECT_ASSET_NOTE_MAX = 200    # characters of the description of one file or link
+
+
+def project_note_norm(text: str) -> str:
+    """Comparison form of a note: case, accents and punctuation do not make two notes different."""
+    import unicodedata
+    t = unicodedata.normalize("NFD", str(text or "").lower()).replace("đ", "d")
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", t)).strip()
+
+
+def _one_line(text: str, limit: int) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()[:limit].rstrip()
 
 # Trần số tài liệu/link người dùng gắn tay vào MỘT cuộc trò chuyện. Cùng loại chi phí như trên
 # (khối này cũng ghép vào system prompt mỗi lượt của cuộc đó), nhưng để rộng hơn vì đây là
@@ -455,12 +593,21 @@ class SessionStore:
         self._apply_wal()
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        # Reads get their own connection per thread once the file is in WAL mode (see _read).
+        self._wal = self._journal_is_wal()
+        self._rlocal = threading.local()
+        # Weak: a reader belongs to its thread and goes (closed by the GC) when the thread ends. A strong list here
+        # leaked one open file per short-lived thread.
+        self._rconns: "weakref.WeakSet[_ReaderConn]" = weakref.WeakSet()
+        self._rconns_lock = threading.Lock()
+        self._closed = False
 
     # ── connection setup ──
 
     def _apply_wal(self) -> None:
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            sqlite_tune.normal_if_wal(self._conn)   # 2026-11-10: no fsync per message, see sqlite_tune.py
         except sqlite3.OperationalError:
             try:
                 self._conn.execute("PRAGMA journal_mode=DELETE")
@@ -478,6 +625,7 @@ class SessionStore:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(_SCHEMA_SQL)
+            subscription_context_store.migrate(self._conn)
             # Migration cột mới cho DB cũ (CREATE IF NOT EXISTS không tự thêm cột)
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)").fetchall()}
             for name, ddl in (("codex_thread_id", "TEXT"),
@@ -560,6 +708,16 @@ class SessionStore:
                         f"ALTER TABLE projects ADD COLUMN {name} {ddl}")
             self._conn.executescript(_DM_REACTION_SQL)
             self._conn.executescript(_MSG_PIN_SQL)
+            self._conn.executescript(_ORDER_SQL)
+            self._conn.executescript(_PROJECT_LEARN_SQL)
+            self._conn.executescript(_PROJECT_REPOS_SQL)
+            had_read = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_read'").fetchone()
+            self._conn.executescript(_READ_SQL)
+            if not had_read:
+                # Chats from before the upgrade count as read, so the history does not light up all at once.
+                self._conn.execute("INSERT OR IGNORE INTO session_read(session_id, read_at) "
+                                   "SELECT id, COALESCE(updated_at, 0) FROM sessions")
             if self._probe_fts5():
                 try:
                     self._conn.executescript(_FTS_SQL)
@@ -594,7 +752,51 @@ class SessionStore:
                 raise
         raise last_err or sqlite3.OperationalError("database is locked after retries")
 
+    def _journal_is_wal(self) -> bool:
+        try:
+            row = self._conn.execute("PRAGMA journal_mode").fetchone()
+            return bool(row) and str(row[0]).lower() == "wal" and str(self.db_path) != ":memory:"
+        except sqlite3.Error:
+            return False
+
+    def _read_conn(self) -> Optional[sqlite3.Connection]:
+        """This thread's read-only connection, or None to fall back to the shared one.
+
+        Performance (2026-11-05): reads used to share the single write connection and its lock, so opening a chat
+        queued behind every in-flight write (a turn saving its answer, a bot logging a message) and behind
+        every other read (a search, the history list). Measured with two writers and one search running:
+        opening a 30-message chat went from about 3 ms to about 45 ms at the SQLite layer alone. In WAL mode
+        readers never block writers nor each other, so each thread keeps its own reader and only writes
+        take the lock. DELETE journal mode (some network disks) keeps the old shared path: there a reader
+        can collide with a writer's exclusive lock."""
+        if not self._wal or self._closed:
+            return None
+        c = getattr(self._rlocal, "conn", None)
+        if c is not None:
+            return c
+        try:
+            c = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=5.0, isolation_level=None,
+                                factory=_ReaderConn)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA query_only=ON")
+        except sqlite3.Error:
+            return None
+        self._rlocal.conn = c
+        with self._rconns_lock:
+            self._rconns.add(c)
+        return c
+
     def _read(self, sql: str, params: tuple = ()) -> List[sqlite3.Row]:
+        rc = self._read_conn()
+        if rc is not None:
+            try:
+                return rc.execute(sql, params).fetchall()
+            except sqlite3.OperationalError as exc:
+                # A schema change made by the writer (a migration adding a column) can leave this reader with a
+                # stale statement cache; the shared connection below always sees the current schema.
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower() \
+                        and "no such" not in str(exc).lower():
+                    raise
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
 
@@ -637,9 +839,13 @@ class SessionStore:
                                    session_id=session_id)
 
     def append_message(self, session_id: str, role: str, content: Optional[str],
-                       tool_calls: Any = None, report: Optional[Dict[str, str]] = None) -> int:
+                       tool_calls: Any = None, report: Optional[Dict[str, str]] = None,
+                       client_msg_id: Optional[str] = None) -> int:
         """`report` (Resonance M4): {"key", "goal_id"} của tin báo cáo do host gửi. Biên nhận ghi trong CÙNG giao dịch
-        với tin, nên không có trạng thái "tin đã lưu mà chưa có biên nhận" hay ngược lại."""
+        với tin, nên không có trạng thái "tin đã lưu mà chưa có biên nhận" hay ngược lại.
+
+        `client_msg_id`: the id the dashboard gave a typed message, so a resend after a dropped socket is recognised
+        (message_by_client_id) instead of running the turn twice. Unique per session (idx_messages_client)."""
         tc_json = json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
         stored = content if (content is None or isinstance(content, str)) \
             else json.dumps(content, ensure_ascii=False)
@@ -647,13 +853,16 @@ class SessionStore:
 
         def _do(conn):
             cur = conn.execute(
-                "INSERT INTO messages (session_id, role, content, ts, tool_calls_json) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, stored, now, tc_json),
+                "INSERT INTO messages (session_id, role, content, ts, tool_calls_json, client_msg_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, role, stored, now, tc_json, client_msg_id or None),
             )
+            # 2026-11-09: a new message from a person brings an archived chat back to the list (like a mail reply).
+            # Javis's own replies and background reports do not: a report into an archived chat stays out of sight.
             conn.execute(
-                "UPDATE sessions SET msg_count = msg_count + 1, updated_at = ? WHERE id = ?",
-                (now, session_id),
+                "UPDATE sessions SET msg_count = msg_count + 1, updated_at = ?, "
+                "archived = CASE WHEN ? THEN 0 ELSE archived END WHERE id = ?",
+                (now, 1 if role == "user" else 0, session_id),
             )
             if report and report.get("key") and report.get("goal_id"):
                 conn.execute(
@@ -867,7 +1076,10 @@ class SessionStore:
         return [dict(r) for r in rows]
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        rows = self._read("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        rows = self._read("SELECT s.*, COALESCE(c.input_tokens,0) AS last_context_input_tokens, "
+                          "COALESCE(c.provider,'') AS last_context_provider FROM sessions s "
+                          "LEFT JOIN subscription_request_context c ON c.session_id=s.id WHERE s.id = ?",
+                          (session_id,))
         return dict(rows[0]) if rows else None
 
     def pop_last_message(self, session_id: str, role: str, content: Optional[str] = None) -> bool:
@@ -1225,13 +1437,39 @@ class SessionStore:
         )
         return [self._tin(r) for r in rows]
 
+    def messages_fingerprint(self, session_id: str, upto_id: Optional[int] = None) -> Tuple[int, int, int, int]:
+        """(how many messages, the highest id, the id of the newest message, a checksum of its text) of a conversation,
+        or of its messages up to `upto_id`. Tells a reader whether the messages changed since it last looked without
+        loading them (session_assets_scan.py): it costs two index lookups and one message, however long the chat is.
+
+        It covers every way this store changes messages today: an append and a rewind move the count or the highest
+        id, a delete moves the count, and the one in-place edit (`replace_last_message`) changes the newest message.
+        A NEW method that rewrites the text of an older message must be reflected here, or those readers go stale."""
+        where, params = "session_id = ?", [session_id]
+        if upto_id is not None:
+            where += " AND id <= ?"
+            params.append(int(upto_id))
+        rows = self._read(f"SELECT COUNT(*), COALESCE(MAX(id), 0) FROM messages WHERE {where}", tuple(params))
+        n, top = (int(rows[0][0] or 0), int(rows[0][1] or 0)) if rows else (0, 0)
+        last = self._read(f"SELECT id, content FROM messages WHERE {where} ORDER BY ts DESC, id DESC LIMIT 1",
+                          tuple(params))
+        if not last:
+            return (n, top, 0, 0)
+        return (n, top, int(last[0][0]), zlib.crc32(str(last[0][1] or "").encode("utf-8", "replace")))
+
+    def messages_after(self, session_id: str, after_id: int = 0) -> List[sqlite3.Row]:
+        """Rows (id, role, content, ts) of the messages with an id above `after_id`, oldest first."""
+        return self._read("SELECT id, role, content, ts FROM messages WHERE session_id = ? AND id > ? ORDER BY ts, id",
+                          (session_id, int(after_id or 0)))
+
     def count_messages(self, session_id: str) -> int:
         rows = self._read("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
                           (session_id,))
         return int(rows[0]["n"]) if rows else 0
 
     def get_messages_page(self, session_id: str, limit: int = 30,
-                          before: Optional[Tuple[float, int]] = None) -> Dict[str, Any]:
+                          before: Optional[Tuple[float, int]] = None,
+                          with_tools: bool = True) -> Dict[str, Any]:
         """Một KHÚC tin nhắn tính từ CUỐI lên, cho khung chat tải dần.
 
         `before` là con trỏ (ts, id) của tin GIÀ NHẤT đang hiện trên màn: lượt sau lấy tiếp
@@ -1241,9 +1479,13 @@ class SessionStore:
 
         Trả về `messages` đã xếp XUÔI (cũ trước) để dựng bong bóng theo đúng thứ tự, kèm
         `has_more` cho biết phía trên còn tin nữa không.
+
+        `with_tools=False` (performance, 2026-11-05): the chat view never shows the stored tool calls, and on a chat
+        whose tools read files or web pages they were most of the payload (70% measured on a plain report chat). The
+        column is not even read then, and the messages carry no `tool_calls` key.
         """
         limit = max(1, int(limit))
-        sql = ("SELECT id, role, content, ts, tool_calls_json, "
+        sql = ("SELECT id, role, content, ts, " + ("tool_calls_json, " if with_tools else "") +
             "(SELECT json_object('utterance_id',utterance_id,'message_id',message_id,'response_policy',response_policy,'answer_requested',answer_requested,'state',state) FROM voice_receipts WHERE message_id=messages.id) AS voice_metadata FROM messages "
                "WHERE session_id = ?")
         params: List[Any] = [session_id]
@@ -1262,7 +1504,9 @@ class SessionStore:
                       include_archived: bool = False,
                       project: Optional[str] = None,
                       channel: Optional[str] = None,
-                      also_channels: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+                      also_channels: Optional[List[str]] = None,
+                      archived_only: bool = False,
+                      unread_first: bool = False) -> List[Dict[str, Any]]:
         """Danh sách hội thoại, MỤC GHIM luôn nằm trên đầu.
 
         `project`: bỏ trống = tất cả; "none" = các cuộc chưa xếp vào project nào;
@@ -1280,14 +1524,61 @@ class SessionStore:
         `also_channels` (0.65.0): kênh phụ được gộp vào khi đã chọn `channel`. Lịch sử của một Agent gồm cả
         hội thoại của các bot chuyên trách dùng Agent đó (`bot:<tên>`), nên trang Cộng sự truyền chúng vào đây.
         Mặc định (không chọn kênh) loại cả kênh cộng sự lẫn kênh bot khỏi lịch sử trang Trò chuyện.
+
+        `archived_only` (2026-11-09): only the archived chats (the "Archived" view of the history column).
+
+        `unread_first` (2026-11-19, owner: "những tin chấm đỏ mà chưa đọc em sắp xếp kéo lên trên đầu"): unread chats
+        right after the pinned ones, so the first page of the history column holds every red dot. Only the history
+        column asks for it: "the latest chat to continue" (limit=1) and every other caller keep plain newest first.
         """
+        where_sql, params = self._list_where(brain, include_archived, project, channel, also_channels, archived_only)
+        params.append(limit)
+        chua_doc_truoc = ("CASE WHEN s.pinned = 1 THEN 0 ELSE %s END DESC," % UNREAD_SQL) if unread_first else ""
+        rows = self._read(
+            f"""
+            SELECT s.id, s.title, s.brain, s.engine, s.model, s.channel, s.cli_session_id,
+                   s.created_at, s.updated_at, s.msg_count,
+                   s.pinned, s.project_id, s.pinned_provider, s.pinned_model, s.archived,
+                   (SELECT substr(content, 1, 80) FROM messages
+                    WHERE session_id = s.id AND role = 'user'
+                    ORDER BY ts, id LIMIT 1) AS preview,
+                   {UNREAD_SQL} AS unread
+            FROM sessions s
+            LEFT JOIN pin_order po ON po.session_id = s.id
+            {where_sql}
+            -- rowid breaks a tie on updated_at (two writes in one time.time() tick): the
+            -- row created later counts as newer, never left to SQLite's scan order.
+            -- 0.454.0: pinned chats keep the order the owner dragged them into (table pin_order),
+            -- unordered pinned ones after them; chats that are not pinned stay newest first.
+            ORDER BY s.pinned DESC,
+                     CASE WHEN s.pinned = 1 THEN (po.pos IS NULL) ELSE 0 END,
+                     CASE WHEN s.pinned = 1 THEN po.pos ELSE 0 END,
+                     {chua_doc_truoc}
+                     s.updated_at DESC, s.rowid DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        return [{**dict(r), "unread": bool(r["unread"]), "archived": bool(r["archived"])} for r in rows]
+
+    def count_archived(self, brain: Any = None, project: Optional[str] = None, channel: Optional[str] = None,
+                       also_channels: Optional[List[str]] = None) -> int:
+        """How many archived chats the same list would have (the count on the history column's "Archived" row)."""
+        where_sql, params = self._list_where(brain, True, project, channel, also_channels, True)
+        rows = self._read(f"SELECT COUNT(*) AS n FROM sessions s {where_sql}", tuple(params))
+        return int(rows[0]["n"]) if rows else 0
+
+    def _list_where(self, brain, include_archived, project, channel, also_channels, archived_only):
+        """The WHERE of list_sessions and count_archived, so the list and its count never disagree."""
         where = []
         params: list = []
         cond, bparams = loc_brain(brain)
         if cond:
             where.append(cond)
             params += bparams
-        if not include_archived:
+        if archived_only:
+            where.append("s.archived = 1")
+        elif not include_archived:
             where.append("s.archived = 0")
         if project == "none":
             where.append("(s.project_id IS NULL OR s.project_id = '')")
@@ -1308,25 +1599,53 @@ class SessionStore:
                 where.append("s.channel NOT LIKE ?")
                 params.append(tien_to + "%")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-        params.append(limit)
-        rows = self._read(
-            f"""
-            SELECT s.id, s.title, s.brain, s.engine, s.model, s.channel, s.cli_session_id,
-                   s.created_at, s.updated_at, s.msg_count,
-                   s.pinned, s.project_id, s.pinned_provider, s.pinned_model,
-                   (SELECT substr(content, 1, 80) FROM messages
-                    WHERE session_id = s.id AND role = 'user'
-                    ORDER BY ts, id LIMIT 1) AS preview
-            FROM sessions s
-            {where_sql}
-            -- rowid breaks a tie on updated_at (two writes in one time.time() tick): the
-            -- row created later counts as newer, never left to SQLite's scan order.
-            ORDER BY s.pinned DESC, s.updated_at DESC, s.rowid DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        )
-        return [dict(r) for r in rows]
+        return where_sql, params
+
+    def unread_summary(self, brain: Any = None, skip: Any = None) -> Dict[str, int]:
+        """Unread chats per rail entry (2026-11-19): `chat` (the Chat page's own list) and `workspace` (partner and
+        workflow chats), archived ones left out. Same unread rule as the dot on each history row (UNREAD_SQL).
+        `skip`: chat ids not counted, the ones still running or open on screen (_skip_sql)."""
+        skip_sql, skip_params = _skip_sql(skip)
+        # With no channel, _list_where keeps only the Chat page's chats (partner, bot and team chats left out).
+        where, params = self._list_where(brain, False, None, None, None, False)
+        rows = self._read(f"SELECT COUNT(*) FROM sessions s {where} AND {UNREAD_SQL} = 1{skip_sql}",
+                          list(params) + skip_params)
+        chat = int(rows[0][0] or 0) if rows else 0
+        cond, bparams = loc_brain(brain)
+        pre = " OR ".join("s.channel LIKE ?" for _ in KENH_CONG_SU)
+        q = (f"SELECT COUNT(*) FROM sessions s WHERE s.archived = 0 AND ({pre}) AND {UNREAD_SQL} = 1"
+             + (f" AND {cond}" if cond else "") + skip_sql)
+        ws = self._read(q, [p + "%" for p in KENH_CONG_SU] + list(bparams) + skip_params)
+        return {"chat": chat, "workspace": int(ws[0][0] or 0) if ws else 0}
+
+    def count_unread(self, brain: Any = None, project: Optional[str] = None, skip: Any = None) -> int:
+        """Unread chats of the Chat page's history (archived ones left out), optionally in one project or, with
+        `project="none"`, in no project. Feeds the dot on "Chưa xếp nhóm" in the project picker (2026-11-20).
+        `skip`: chat ids not counted, the ones still running or open on screen (_skip_sql)."""
+        skip_sql, skip_params = _skip_sql(skip)
+        where, params = self._list_where(brain, False, project, None, None, False)
+        rows = self._read(f"SELECT COUNT(*) FROM sessions s {where} AND {UNREAD_SQL} = 1{skip_sql}",
+                          list(params) + skip_params)
+        return int(rows[0][0] or 0) if rows else 0
+
+    def mark_read(self, session_id: str, at: Optional[float] = None) -> bool:
+        """The owner has this chat on screen: every message up to now is read. False when no such chat exists yet
+        (a brand-new chat whose id the dashboard minted before the server stored it)."""
+        when = float(at if at is not None else time.time())
+        return bool(self._write(lambda c: c.execute(
+            "INSERT INTO session_read(session_id, read_at) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?) "
+            "ON CONFLICT(session_id) DO UPDATE SET read_at = excluded.read_at WHERE session_read.read_at < excluded.read_at",
+            (session_id, when, session_id)).rowcount))
+
+    def mark_unread(self, session_id: str) -> bool:
+        """"Mark as unread" from the chat's menu (2026-11-09): forget when it was read, so its replies count as new
+        again and the dot comes back. Only chats whose channel shows a dot at all (UNREAD_SQL) get one."""
+        self._write(lambda c: c.execute("DELETE FROM session_read WHERE session_id = ?", (session_id,)))
+        return self.is_unread(session_id)
+
+    def is_unread(self, session_id: str) -> bool:
+        rows = self._read(f"SELECT {UNREAD_SQL} AS unread FROM sessions s WHERE s.id = ?", (session_id,))
+        return bool(rows and rows[0]["unread"])
 
     def brain_gan_nhat(self) -> str:
         """Brain của cuộc trò chuyện được cập nhật GẦN NHẤT, tức "brain đang mở".
@@ -1380,11 +1699,28 @@ class SessionStore:
 
     def set_pinned(self, session_id: str, pinned: bool = True) -> None:
         """Ghim hay bỏ ghim. KHÔNG đụng updated_at: ghim không phải là 'vừa nói chuyện',
-        đẩy mốc lên là xáo trộn thứ tự của mọi cuộc còn lại một cách vô cớ."""
-        self._write(lambda c: c.execute(
-            "UPDATE sessions SET pinned = ? WHERE id = ?",
-            (1 if pinned else 0, session_id),
-        ))
+        đẩy mốc lên là xáo trộn thứ tự của mọi cuộc còn lại một cách vô cớ.
+        0.454.0: unpinning drops the chat's place in the pinned order; pinning again puts it after the ordered ones."""
+        def go(c):
+            c.execute("UPDATE sessions SET pinned = ? WHERE id = ?", (1 if pinned else 0, session_id))
+            c.execute("DELETE FROM pin_order WHERE session_id = ?", (session_id,))
+        self._write(go)
+
+    def set_pin_order(self, ids: List[str]) -> int:
+        """The owner's order of the pinned chats (0.454.0), first to last. Only pinned chats take a place. Never touches
+        `updated_at`. Returns rows ordered."""
+        ids = list(dict.fromkeys(str(i) for i in (ids or []) if str(i or "").strip()))
+
+        def go(c):
+            # Only the listed chats move: the dialog shows the pinned chats of ONE brain, and the pinned chats of
+            # another brain keep their own order.
+            n = 0
+            for i, sid in enumerate(ids):
+                if c.execute("SELECT 1 FROM sessions WHERE id = ? AND pinned = 1", (sid,)).fetchone():
+                    c.execute("INSERT OR REPLACE INTO pin_order(session_id, pos) VALUES (?, ?)", (sid, i))
+                    n += 1
+            return n
+        return int(self._write(go) or 0)
 
     def set_project(self, session_id: str, project_id: Optional[str], *,
                     brain: Optional[str] = None) -> bool:
@@ -1439,26 +1775,52 @@ class SessionStore:
         ))
         return pid
 
-    def list_projects(self, brain: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Project kèm số hội thoại đang nằm trong đó (đếm cả cuộc đã cất vào kho lưu:
-        con số này để người dùng biết xoá project sẽ gỡ nhãn bao nhiêu cuộc)."""
+    def list_projects(self, brain: Optional[str] = None, skip: Any = None) -> List[Dict[str, Any]]:
+        """Projects with total chats and unread chats visible in the dashboard history.
+
+        Total chats include archived ones because deleting a project unlinks those too.
+        Unread counts use the history's channel/archive rules and cover every page, minus `skip` (chats still
+        running or open on screen, see _skip_sql).
+        """
         where_sql, params = ("WHERE p.brain = ?", (brain,)) if brain else ("", ())
+        unread_where, unread_params = self._list_where(None, False, None, None, None, False)
+        skip_sql, skip_params = _skip_sql(skip)
         rows = self._read(
             f"""
             SELECT p.id, p.name, p.icon, p.brain, p.pinned, p.created_at, p.updated_at,
                    (SELECT COUNT(*) FROM sessions s WHERE s.project_id = p.id) AS session_count,
+                   (SELECT COUNT(*) FROM sessions s {unread_where}
+                    AND s.project_id = p.id AND {UNREAD_SQL}{skip_sql}) AS unread_count,
                    (SELECT COUNT(*) FROM project_files f WHERE f.project_id = p.id) AS file_count,
                    (SELECT COUNT(*) FROM project_links l WHERE l.project_id = p.id) AS link_count,
                    -- Chỉ CÓ hay KHÔNG, không kéo cả 4000 ký tự về cho một danh sách bên trái.
                    (CASE WHEN COALESCE(TRIM(p.instructions), '') <> '' THEN 1 ELSE 0 END)
                        AS has_instructions
             FROM projects p
+            LEFT JOIN project_order po ON po.project_id = p.id
             {where_sql}
-            ORDER BY p.pinned DESC, p.updated_at DESC, p.rowid DESC
+            -- 0.454.0: the owner's own order wins (table project_order); projects never ordered come after,
+            -- pinned first, then the most recent.
+            ORDER BY (po.pos IS NULL), po.pos, p.pinned DESC, p.updated_at DESC, p.rowid DESC
             """,
-            params,
+            (*unread_params, *skip_params, *params),
         )
         return [dict(r) for r in rows]
+
+    def set_project_order(self, brain: str, ids: List[str]) -> int:
+        """The owner's order of the projects of `brain` (0.454.0). `ids` first to last; a project of the brain left out
+        of the list keeps no order (it goes after the ordered ones). Never touches `updated_at`. Returns rows ordered."""
+        ids = [str(i) for i in (ids or []) if str(i or "").strip()]
+
+        def go(c):
+            c.execute("DELETE FROM project_order WHERE project_id IN (SELECT id FROM projects WHERE brain = ?)", (brain,))
+            n = 0
+            for i, pid in enumerate(dict.fromkeys(ids)):
+                if c.execute("SELECT 1 FROM projects WHERE id = ? AND brain = ?", (pid, brain)).fetchone():
+                    c.execute("INSERT OR REPLACE INTO project_order(project_id, pos) VALUES (?, ?)", (pid, i))
+                    n += 1
+            return n
+        return int(self._write(go) or 0)
 
     def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
         rows = self._read("SELECT * FROM projects WHERE id = ?", (project_id,))
@@ -1494,6 +1856,13 @@ class SessionStore:
         p["links"] = [dict(r) for r in self._read(
             "SELECT id, url, label, pinned, added_at FROM project_links "
             "WHERE project_id = ? ORDER BY pinned DESC, added_at DESC, rowid DESC", (project_id,))]
+        # 2026-11-13: what Javis learnt about the project, and the one-line description of each file and link.
+        described = self.project_asset_notes(project_id)
+        for kind, rows, key in (("file", p["files"], "path"), ("link", p["links"], "url")):
+            for row in rows:
+                row["description"] = (described.get((kind, str(row.get(key) or ""))) or {}).get("description", "")
+        p["notes"] = self.list_project_notes(project_id)
+        p["repos"] = self.list_project_repos(project_id)
         return p
 
     def update_project(self, project_id: str, *, name: Optional[str] = None,
@@ -1538,6 +1907,11 @@ class SessionStore:
             # CÙNG transaction, chứ không phải một lượt dọn riêng có thể không bao giờ chạy.
             conn.execute("DELETE FROM project_files WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM project_links WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM project_order WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM project_notes WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM project_asset_notes WHERE project_id = ?", (project_id,))
+            # Only the project's list goes: the clones and each chat's branch stay (github_repos), never lost code.
+            conn.execute("DELETE FROM project_repos WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
             return n
         return self._write(_do)
@@ -1580,9 +1954,13 @@ class SessionStore:
     def remove_project_file(self, project_id: str, file_id: str) -> bool:
         # Kèm project_id trong WHERE: id là uuid nên khó đụng, nhưng một route nhận id từ
         # client thì không được phép xoá bản ghi của project khác chỉ vì đoán trúng id.
-        return bool(self._write(lambda c: c.execute(
-            "DELETE FROM project_files WHERE id = ? AND project_id = ?",
-            (file_id, project_id))).rowcount)
+        def _do(c):
+            # The description is keyed by the stored path, so it goes first, while the row still says which path.
+            c.execute("DELETE FROM project_asset_notes WHERE project_id = ? AND kind = 'file' AND ref IN "
+                      "(SELECT path FROM project_files WHERE id = ? AND project_id = ?)",
+                      (project_id, file_id, project_id))
+            return c.execute("DELETE FROM project_files WHERE id = ? AND project_id = ?", (file_id, project_id))
+        return bool(self._write(_do).rowcount)
 
     def set_project_file_pinned(self, project_id: str, file_id: str, pinned: bool) -> bool:
         return bool(self._write(lambda c: c.execute(
@@ -1605,14 +1983,159 @@ class SessionStore:
         return lid
 
     def remove_project_link(self, project_id: str, link_id: str) -> bool:
-        return bool(self._write(lambda c: c.execute(
-            "DELETE FROM project_links WHERE id = ? AND project_id = ?",
-            (link_id, project_id))).rowcount)
+        def _do(c):
+            c.execute("DELETE FROM project_asset_notes WHERE project_id = ? AND kind = 'link' AND ref IN "
+                      "(SELECT url FROM project_links WHERE id = ? AND project_id = ?)",
+                      (project_id, link_id, project_id))
+            return c.execute("DELETE FROM project_links WHERE id = ? AND project_id = ?", (link_id, project_id))
+        return bool(self._write(_do).rowcount)
 
     def set_project_link_pinned(self, project_id: str, link_id: str, pinned: bool) -> bool:
         return bool(self._write(lambda c: c.execute(
             "UPDATE project_links SET pinned = ? WHERE id = ? AND project_id = ?",
             (1 if pinned else 0, link_id, project_id))).rowcount)
+
+    # ── what Javis learnt about a project (2026-11-13) ──
+    #
+    # Two kinds of row. A NOTE is one durable line about the project (a fact, a settled decision, a term). An ASSET
+    # NOTE says in one line what an attached file or link holds, so the model picks the right document without
+    # opening each one. Both are written by Javis while it works (tool `javis_project`) or by the owner in the
+    # project drawer; the owner's rows are never dropped to make room.
+
+    def list_project_notes(self, project_id: str) -> List[Dict[str, Any]]:
+        return [dict(r) for r in self._read(
+            "SELECT id, kind, text, source, created_at, updated_at FROM project_notes "
+            "WHERE project_id = ? ORDER BY created_at DESC, rowid DESC", (project_id,))]
+
+    def add_project_note(self, project_id: str, text: str, *, kind: str = "fact", source: str = "javis",
+                         session_id: str = "") -> Dict[str, Any]:
+        """Save one note. Returns {"id", "created", "dropped"}; id is "" when nothing could be saved (empty text, or
+        the project is full of the owner's own notes). The same note in other words of case or accents is one note:
+        `created` is then False and the existing id comes back. `dropped` is the text of the note that made room."""
+        line = _one_line(text, PROJECT_NOTE_MAX)
+        norm = project_note_norm(line)
+        if not line or not norm:
+            return {"id": "", "created": False, "dropped": ""}
+        kind = kind if kind in PROJECT_NOTE_KINDS else "fact"
+        source = source if source in PROJECT_NOTE_SOURCES else "javis"
+
+        def _do(c):
+            old = c.execute("SELECT id FROM project_notes WHERE project_id = ? AND text_norm = ?",
+                            (project_id, norm)).fetchone()
+            if old:
+                return {"id": str(old[0]), "created": False, "dropped": ""}
+            dropped = ""
+            count = c.execute("SELECT COUNT(*) FROM project_notes WHERE project_id = ?", (project_id,)).fetchone()[0]
+            if count >= PROJECT_NOTES_CAP:
+                oldest = c.execute(
+                    "SELECT id, text FROM project_notes WHERE project_id = ? AND source = 'javis' "
+                    "ORDER BY created_at ASC, rowid ASC LIMIT 1", (project_id,)).fetchone()
+                if not oldest:
+                    return {"id": "", "created": False, "dropped": ""}
+                c.execute("DELETE FROM project_notes WHERE id = ?", (oldest[0],))
+                dropped = str(oldest[1])
+            nid, now = uuid.uuid4().hex[:8], time.time()
+            c.execute("INSERT INTO project_notes (id, project_id, kind, text, text_norm, source, session_id, "
+                      "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      (nid, project_id, kind, line, norm, source, (session_id or "")[:200] or None, now, now))
+            return {"id": nid, "created": True, "dropped": dropped}
+        return self._write(_do)
+
+    def update_project_note(self, project_id: str, note_id: str, *, text: Optional[str] = None,
+                            kind: Optional[str] = None, source: Optional[str] = None) -> bool:
+        """Rewrite a note. `source` is passed when the OWNER edits: the note is then theirs and is never dropped."""
+        sets, params = [], []
+        if text is not None:
+            line = _one_line(text, PROJECT_NOTE_MAX)
+            norm = project_note_norm(line)
+            if not line or not norm:
+                return False
+            sets += ["text = ?", "text_norm = ?"]
+            params += [line, norm]
+        if kind in PROJECT_NOTE_KINDS:
+            sets.append("kind = ?")
+            params.append(kind)
+        if source in PROJECT_NOTE_SOURCES:
+            sets.append("source = ?")
+            params.append(source)
+        if not sets:
+            return False
+        sets.append("updated_at = ?")
+        params += [time.time(), note_id, project_id]
+        return bool(self._write(lambda c: c.execute(
+            f"UPDATE project_notes SET {', '.join(sets)} WHERE id = ? AND project_id = ?", tuple(params))).rowcount)
+
+    def remove_project_note(self, project_id: str, note_id: str) -> bool:
+        return bool(self._write(lambda c: c.execute(
+            "DELETE FROM project_notes WHERE id = ? AND project_id = ?", (note_id, project_id))).rowcount)
+
+    def project_asset_notes(self, project_id: str) -> Dict[tuple, Dict[str, Any]]:
+        """{(kind, ref): {"description", "source"}} of a project; kind is "file" or "link", ref the path or URL."""
+        return {(str(r["kind"]), str(r["ref"])): {"description": str(r["description"]), "source": str(r["source"])}
+                for r in self._read("SELECT kind, ref, description, source FROM project_asset_notes "
+                                    "WHERE project_id = ?", (project_id,))}
+
+    def set_project_asset_note(self, project_id: str, kind: str, ref: str, description: str,
+                               source: str = "javis") -> bool:
+        """Describe one attached file or link in one line; an empty description removes it. False when the project
+        has no such file or link: a description of something that is not attached would never be shown."""
+        if kind not in ("file", "link"):
+            return False
+        ref = str(ref or "").strip()
+        table, column = ("project_files", "path") if kind == "file" else ("project_links", "url")
+        if not ref or not self._read(f"SELECT 1 FROM {table} WHERE project_id = ? AND {column} = ?",
+                                     (project_id, ref)):
+            return False
+        line = _one_line(description, PROJECT_ASSET_NOTE_MAX)
+        source = source if source in PROJECT_NOTE_SOURCES else "javis"
+        if not line:
+            self._write(lambda c: c.execute(
+                "DELETE FROM project_asset_notes WHERE project_id = ? AND kind = ? AND ref = ?",
+                (project_id, kind, ref)))
+            return True
+        self._write(lambda c: c.execute(
+            "INSERT INTO project_asset_notes (project_id, kind, ref, description, source, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, kind, ref) DO UPDATE SET "
+            "description = excluded.description, source = excluded.source, updated_at = excluded.updated_at",
+            (project_id, kind, ref, line, source, time.time())))
+        return True
+
+    # ── GitHub repos of a project (2026-11-15) ──
+    #
+    # The list only. Cloning, the chat's worktree and the push all stay in github_repos; this store keeps which repos
+    # the project's chats should work on. Removing one here never touches a clone or a chat that already has it.
+
+    def list_project_repos(self, project_id: str) -> List[Dict[str, Any]]:
+        return [dict(r) for r in self._read(
+            "SELECT full_name, added_at FROM project_repos WHERE project_id = ? ORDER BY added_at, rowid",
+            (project_id,))]
+
+    def project_repo_names(self, project_id: str) -> List[str]:
+        return [str(r["full_name"]) for r in self.list_project_repos(project_id) if r.get("full_name")]
+
+    def set_project_repos(self, project_id: str, full_names: List[str]) -> Dict[str, List[str]]:
+        """Make the project's repo list exactly `full_names` (already checked by the caller), case-insensitively.
+        A repo kept keeps its place and its `added_at`. Returns {"added": [...], "removed": [...]}."""
+        wanted: List[str] = []
+        for n in full_names or []:
+            n = str(n or "").strip()
+            if n and n.lower() not in {w.lower() for w in wanted}:
+                wanted.append(n)
+        wanted = wanted[:PROJECT_REPOS_MAX]
+        have = self.project_repo_names(project_id)
+        added = [n for n in wanted if n.lower() not in {h.lower() for h in have}]
+        removed = [h for h in have if h.lower() not in {n.lower() for n in wanted}]
+
+        def go(c):
+            for h in removed:
+                c.execute("DELETE FROM project_repos WHERE project_id = ? AND full_name = ?", (project_id, h))
+            now = time.time()
+            for i, n in enumerate(added):
+                c.execute("INSERT OR IGNORE INTO project_repos (project_id, full_name, added_at) VALUES (?, ?, ?)",
+                          (project_id, n, now + i * 1e-6))
+        if added or removed:
+            self._write(go)
+        return {"added": added, "removed": removed}
 
     # ── tài liệu & link người dùng TỰ GẮN vào một cuộc trò chuyện ──
     #
@@ -1655,9 +2178,12 @@ class SessionStore:
     def remove_session_file(self, session_id: str, file_id: str) -> bool:
         # Kèm session_id trong WHERE vì id đến từ client: đoán trúng một uuid không được phép
         # thành quyền xoá bản ghi của cuộc khác.
-        return bool(self._write(lambda c: c.execute(
-            "DELETE FROM session_files WHERE id = ? AND session_id = ?",
-            (file_id, session_id))).rowcount)
+        def _do(c):
+            c.execute("DELETE FROM session_asset_notes WHERE session_id = ? AND kind = 'file' AND ref IN "
+                      "(SELECT path FROM session_files WHERE id = ? AND session_id = ?)",
+                      (session_id, file_id, session_id))
+            return c.execute("DELETE FROM session_files WHERE id = ? AND session_id = ?", (file_id, session_id))
+        return bool(self._write(_do).rowcount)
 
     def set_session_file_pinned(self, session_id: str, file_id: str, pinned: bool) -> bool:
         return bool(self._write(lambda c: c.execute(
@@ -1682,9 +2208,42 @@ class SessionStore:
         return lid
 
     def remove_session_link(self, session_id: str, link_id: str) -> bool:
-        return bool(self._write(lambda c: c.execute(
-            "DELETE FROM session_links WHERE id = ? AND session_id = ?",
-            (link_id, session_id))).rowcount)
+        def _do(c):
+            c.execute("DELETE FROM session_asset_notes WHERE session_id = ? AND kind = 'link' AND ref IN "
+                      "(SELECT url FROM session_links WHERE id = ? AND session_id = ?)",
+                      (session_id, link_id, session_id))
+            return c.execute("DELETE FROM session_links WHERE id = ? AND session_id = ?", (link_id, session_id))
+        return bool(self._write(_do).rowcount)
+
+    def session_asset_notes(self, session_id: str) -> Dict[tuple, Dict[str, Any]]:
+        """{(kind, ref): {"description", "source"}} of the documents attached to a chat (2026-11-13)."""
+        return {(str(r["kind"]), str(r["ref"])): {"description": str(r["description"]), "source": str(r["source"])}
+                for r in self._read("SELECT kind, ref, description, source FROM session_asset_notes "
+                                    "WHERE session_id = ?", (session_id,))}
+
+    def set_session_asset_note(self, session_id: str, kind: str, ref: str, description: str,
+                               source: str = "javis") -> bool:
+        """Twin of `set_project_asset_note` for a chat's attached documents (a team's documents live there)."""
+        if kind not in ("file", "link"):
+            return False
+        ref = str(ref or "").strip()
+        table, column = ("session_files", "path") if kind == "file" else ("session_links", "url")
+        if not ref or not self._read(f"SELECT 1 FROM {table} WHERE session_id = ? AND {column} = ?",
+                                     (session_id, ref)):
+            return False
+        line = _one_line(description, PROJECT_ASSET_NOTE_MAX)
+        source = source if source in PROJECT_NOTE_SOURCES else "javis"
+        if not line:
+            self._write(lambda c: c.execute(
+                "DELETE FROM session_asset_notes WHERE session_id = ? AND kind = ? AND ref = ?",
+                (session_id, kind, ref)))
+            return True
+        self._write(lambda c: c.execute(
+            "INSERT INTO session_asset_notes (session_id, kind, ref, description, source, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, kind, ref) DO UPDATE SET "
+            "description = excluded.description, source = excluded.source, updated_at = excluded.updated_at",
+            (session_id, kind, ref, line, source, time.time())))
+        return True
 
     def set_session_link_pinned(self, session_id: str, link_id: str, pinned: bool) -> bool:
         return bool(self._write(lambda c: c.execute(
@@ -1708,12 +2267,18 @@ class SessionStore:
 
     def delete(self, session_id: str) -> None:
         # ON DELETE CASCADE xoá messages; trigger dọn messages_fts.
-        self._write(lambda c: c.execute("DELETE FROM sessions WHERE id = ?", (session_id,)))
+        def _del(c):
+            c.execute("DELETE FROM pin_order WHERE session_id = ?", (session_id,))   # 0.454.0
+            c.execute("DELETE FROM session_read WHERE session_id = ?", (session_id,))
+            c.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        self._write(_del)
 
     def archive(self, session_id: str, archived: bool = True) -> None:
+        # updated_at stays (2026-11-09): archiving is not activity, so a chat brought back sits at its own date in the
+        # list instead of jumping to the top as if someone had just written in it.
         self._write(lambda c: c.execute(
-            "UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?",
-            (1 if archived else 0, time.time(), session_id),
+            "UPDATE sessions SET archived = ? WHERE id = ?",
+            (1 if archived else 0, session_id),
         ))
 
     def archive_stale(self, channel: str, before_ts: float) -> int:
@@ -1732,6 +2297,15 @@ class SessionStore:
             return cur.rowcount or 0
         return self._write(_do)
 
+    def relabel_channel(self, session_id: str, old: str, new: str) -> bool:
+        """Move one conversation from channel `old` to `new`, only while it is still on `old` (2026-11-08: an admin
+        channel's agent chat made before it carried its agent, so it shows in that agent's history). True if moved."""
+        def _do(conn):
+            cur = conn.execute("UPDATE sessions SET channel = ? WHERE id = ? AND channel = ?",
+                               (str(new), str(session_id), str(old)))
+            return bool(cur.rowcount)
+        return self._write(_do)
+
     def set_compact(self, session_id: str, summary: str, count: int) -> None:
         """Lưu tóm tắt nén hội thoại: summary phủ `count` message user/assistant đầu phiên."""
         self._write(lambda c: c.execute(
@@ -1745,6 +2319,22 @@ class SessionStore:
             "UPDATE sessions SET last_input_tokens = ? WHERE id = ?",
             (max(0, int(tokens or 0)), session_id),
         ))
+
+    def set_last_context_input_tokens(self, session_id: str, tokens: int, provider: str = "codex") -> None:
+        """Input of the LAST model request, measured by the engine. Never a turn total.
+
+        Written only from a real per-request measurement (see subscription_usage). Rotation
+        reads it in place of last_input_tokens, which sums every request of a tool loop.
+        """
+        self._write(lambda c: c.execute(
+            "INSERT INTO subscription_request_context(session_id,provider,input_tokens) "
+            "SELECT id,?,? FROM sessions WHERE id=? ON CONFLICT(session_id) DO UPDATE "
+            "SET provider=excluded.provider,input_tokens=excluded.input_tokens",
+            (provider, max(0, int(tokens or 0)), session_id),
+        ))
+
+    def clear_last_context_input_tokens(self, session_id: str, provider: str = "codex") -> None:
+        self._write(lambda c: subscription_context_store.clear(c, session_id, provider))
 
     def mark_thread_rotated(self, session_id: str) -> None:
         """Ghi mốc msg_count lúc vừa xoay mạch. Xem cột thread_rotated_msg ở migration."""
@@ -1781,17 +2371,22 @@ class SessionStore:
         """Gắn thread native của Codex vào hội thoại dashboard để lượt sau resume đúng mạch."""
         if not thread_id:
             return
-        self._write(lambda c: c.execute(
-            "UPDATE sessions SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
-            (thread_id, time.time(), session_id),
-        ))
+        def _ghi(c):
+            row = c.execute("SELECT codex_thread_id FROM sessions WHERE id=?", (session_id,)).fetchone()
+            if row and row[0] != thread_id:
+                # The measurement described the previous thread, not this one.
+                subscription_context_store.clear(c, session_id, "codex")
+            c.execute("UPDATE sessions SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
+                      (thread_id, time.time(), session_id))
+        self._write(_ghi)
 
     def clear_codex_thread_id(self, session_id: str) -> None:
         """Thread Codex thành stale khi provider khác chen lượt vào cùng hội thoại."""
-        self._write(lambda c: c.execute(
-            "UPDATE sessions SET codex_thread_id = NULL WHERE id = ? AND codex_thread_id IS NOT NULL",
-            (session_id,),
-        ))
+        def _xoa(c):
+            c.execute("UPDATE sessions SET codex_thread_id = NULL "
+                      "WHERE id = ? AND codex_thread_id IS NOT NULL", (session_id,))
+            subscription_context_store.clear(c, session_id, "codex")
+        self._write(_xoa)
 
     def clear_cli_session_id(self, session_id: str) -> None:
         """Mạch Claude Code thành stale khi engine khác chen một lượt vào cùng hội thoại."""
@@ -1859,10 +2454,13 @@ class SessionStore:
         for nhan, cot in self._MACH_NATIVE.items():
             if cot == cot_giu or not (row.get(cot) or ""):
                 continue
-            self._write(lambda c, _cot=cot: c.execute(
-                f"UPDATE sessions SET {_cot} = NULL WHERE id = ? AND {_cot} IS NOT NULL",
-                (session_id,),
-            ))
+            if cot == "codex_thread_id":
+                self.clear_codex_thread_id(session_id)    # also drops its request measurement
+            else:
+                self._write(lambda c, _cot=cot: c.execute(
+                    f"UPDATE sessions SET {_cot} = NULL WHERE id = ? AND {_cot} IS NOT NULL",
+                    (session_id,),
+                ))
             da_don.append(nhan)
         return da_don
 
@@ -1942,7 +2540,8 @@ class SessionStore:
                 sql = f"""
                     SELECT m.session_id, m.role, m.ts,
                            snippet(messages_fts, 0, '>>>', '<<<', '…', 12) AS snippet,
-                           s.title, s.brain, s.engine, s.updated_at, COALESCE(s.pinned, 0) AS pinned
+                           s.title, s.brain, s.engine, s.updated_at, COALESCE(s.pinned, 0) AS pinned,
+                           COALESCE(s.archived, 0) AS archived, s.project_id, s.channel
                     FROM messages_fts
                     JOIN messages m ON m.id = messages_fts.rowid
                     JOIN sessions s ON s.id = m.session_id
@@ -1961,7 +2560,8 @@ class SessionStore:
         sql = f"""
             SELECT m.session_id, m.role, m.ts,
                    substr(m.content, max(1, instr(m.content, ?) - 30), 120) AS snippet,
-                   s.title, s.brain, s.engine, s.updated_at, COALESCE(s.pinned, 0) AS pinned
+                   s.title, s.brain, s.engine, s.updated_at, COALESCE(s.pinned, 0) AS pinned,
+                   COALESCE(s.archived, 0) AS archived, s.project_id, s.channel
             FROM messages m
             JOIN sessions s ON s.id = m.session_id
             WHERE m.content LIKE ? ESCAPE '\\'{brain_clause}
@@ -1972,12 +2572,24 @@ class SessionStore:
         return [dict(r) for r in self._read(sql, tuple(params))]
 
     def close(self) -> None:
+        self._closed = True
+        with self._rconns_lock:
+            for c in list(self._rconns):
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            self._rconns = weakref.WeakSet()
         with self._lock:
             try:
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except Exception:
                 pass
             self._conn.close()
+
+
+class _ReaderConn(sqlite3.Connection):
+    """A per-thread read connection (SessionStore._read_conn). A subclass only so it can be weakly referenced."""
 
 
 # Singleton toàn process (1 connection + app-lock).

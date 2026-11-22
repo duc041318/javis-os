@@ -262,11 +262,115 @@ class _WarmStartFailed(Exception):
     """The warm process refused the message before the turn started: rerun the turn cold."""
 
 
+def mark_background(cli, mark) -> None:
+    """Start this engine's `claude` with tien_trinh_nen's environment mark, and note the mark for this turn's tag, so
+    a command it leaves running (`nohup ffmpeg ... &`, a background task still running when the turn ends) is adopted
+    and reported back to the chat when it finishes. Wraps the instance's `_options` (claude_sdk_engine.py is pinned).
+    Idempotent: a Telegram engine is kept across turns."""
+    try:
+        import tien_trinh_nen
+        env = tien_trinh_nen.env_mark(mark)
+        if not env:
+            return
+        tien_trinh_nen.note_mark(getattr(cli, "tag", ""), mark)
+        if getattr(cli, "_javis_bg_env", None) == env:
+            return
+        base = getattr(cli, "_javis_bg_base", None) or cli._options
+
+        def _options():
+            opts = base()
+            try:
+                opts.env = {**(getattr(opts, "env", None) or {}), **cli._javis_bg_env}
+            except Exception:  # noqa: BLE001 - an options object without env: nothing to mark
+                pass
+            return opts
+        cli._javis_bg_base = base
+        cli._javis_bg_env = env
+        cli._options = _options
+    except Exception as e:  # noqa: BLE001 - the mark is a bonus, never a reason to fail a turn
+        print(f"[claude warm] background mark: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+# A turn that ends while Claude Code still runs background tasks (the wait hit its cap, or the follow-up started more):
+# closing the process would kill those tasks, so the render the owner is waiting for dies with the turn. The process
+# is kept, out of the pool, until its tasks finish (tien_trinh_nen adopts them and reports back), then closed.
+LINGER_MAX_S = 6 * 3600
+_LINGERING: set = set()
+
+
+def _linger(handle: "ClaudeHandle", completion, cap: float = LINGER_MAX_S) -> None:
+    async def _run():
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + cap
+        try:
+            agen = handle.client.receive_messages().__aiter__()
+            while completion.tasks:
+                left = deadline - loop.time()
+                if left <= 0:
+                    print("[claude warm] background tasks still running at the linger cap, closing", file=sys.stderr)
+                    break
+                try:
+                    msg = await asyncio.wait_for(agen.__anext__(), timeout=left)
+                except (StopAsyncIteration, asyncio.TimeoutError):
+                    break
+                completion.observe(msg, 0, loop.time())
+        except Exception as e:  # noqa: BLE001
+            print(f"[claude warm] linger: {type(e).__name__}: {e}", file=sys.stderr)
+        finally:
+            await handle.close()
+    try:
+        t = asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        return
+    _LINGERING.add(t)
+    t.add_done_callback(_LINGERING.discard)
+
+
+# A lost thread reported as an EXCEPTION instead of a ResultMessage (owner's report, 07/11/2026). Claude Code 2.1.31x
+# prints "No conversation found with session ID" and exits 1 at once, so the SDK raises (ProcessError "exit code 1 ...
+# Check stderr output for details" on 0.2.116, ResultError on 0.2.17x) before any ResultMessage reaches
+# claude_sdk_engine.map_message, and the chat showed that raw error instead of priming a new thread. Seen every time a
+# chat moved to another Claude account: the thread lives in the first account's config folder. Measured on 2.1.319.
+# Recognised here and not in claude_sdk_engine.py, which must stay byte for byte the qualified source.
+_LOST_THREAD = "no conversation found with session id"
+
+
+def resume_lost(text: str, stderr_lines=()) -> bool:
+    try:
+        return _LOST_THREAD in (str(text or "") + " " + " ".join(str(x) for x in (stderr_lines or ()))).lower()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resume_lost_event() -> dict:
+    """The event map_message gives a lost thread, so callers prime a new thread from the saved history."""
+    import localefmt
+    return {"type": "error", "resume_failed": True,
+            "content": localefmt.chu(
+                "Phiên Claude cũ không còn trên máy (mạch hội thoại phía Claude Code đã mất). Javis mở mạch mới và "
+                "mồi lại từ lịch sử đã lưu.",
+                "The old Claude session is no longer on this machine (Claude Code lost the conversation thread). "
+                "Javis opens a new thread and primes it from the saved history.")}
+
+
+async def cold_query(cli, prompt) -> AsyncIterator[dict]:
+    """`cli.query`, with a lost thread reported by an exit code turned into the `resume_failed` event."""
+    had = bool(getattr(cli, "session_id", None))
+    async for ev in cli.query(prompt):
+        if (had and ev.get("type") == "error" and not ev.get("resume_failed")
+                and resume_lost(ev.get("content"), getattr(cli, "_stderr_tail", ()))):
+            cli.session_id = None
+            ev = resume_lost_event()
+        yield ev
+
+
 async def query(cli, prompt, key: str) -> AsyncIterator[dict]:
     """One chat turn, on the conversation's warm `claude` when it has one that fits, else cold, keeping the process
     afterwards when the pool has room. Same events as `ClaudeSDK.query`."""
+    import tien_trinh_nen
+    mark_background(cli, tien_trinh_nen.mark_for(getattr(cli, "tag", "")) or key)
     if not key or not eligible(cli) or not cli.is_available():
-        async for ev in cli.query(prompt):
+        async for ev in cold_query(cli, prompt):
             yield ev
         return
     try:
@@ -285,13 +389,14 @@ def _options_and_fingerprint(cli):
 
 
 async def _query(cli, prompt, key: str, allow_warm: bool) -> AsyncIterator[dict]:
+    import claude_bg_wait
     import claude_sdk_engine as eng
     import localefmt
     import turn_context
     from claude_agent_sdk import ResultMessage
 
     IDLE = eng.tran_watchdog("JAVIS_CLAUDE_IDLE_TIMEOUT", "0")
-    TOOL_IDLE = eng.tran_watchdog("JAVIS_CLAUDE_TOOL_TIMEOUT", "3600")
+    TOOL_IDLE = eng.tran_watchdog("JAVIS_CLAUDE_TOOL_TIMEOUT", "0")
     FIRST_IDLE = eng.tran_watchdog("JAVIS_CLAUDE_FIRST_TIMEOUT", "0")
     RESULT_IDLE = eng.tran_watchdog("JAVIS_CLAUDE_RESULT_TIMEOUT", "30")
     cli._sweep_stale_tmp()
@@ -319,6 +424,7 @@ async def _query(cli, prompt, key: str, allow_warm: bool) -> AsyncIterator[dict]
     got_any = False
     auth_race = False
     clean = False              # the turn reached its ResultMessage: the client is in a known state
+    linger = False             # the turn ended while Claude Code's background tasks still run: keep them alive
     sysprompt_text = cli.system_prompt if not cli.system_prompt_raw else None
     try:
         try:
@@ -354,6 +460,7 @@ async def _query(cli, prompt, key: str, allow_warm: bool) -> AsyncIterator[dict]
             raise
         yield {"type": "warm", "warm": slot is not None}
         agen = client.receive_response().__aiter__()
+        bg = claude_bg_wait.BackgroundWait(claude_bg_wait.bg_wait_cap())   # 0.453.0, issue #898 item 1
         while True:
             waiting_tool = tools_running > 0
             if waiting_tool:
@@ -366,11 +473,23 @@ async def _query(cli, prompt, key: str, allow_warm: bool) -> AsyncIterator[dict]
                 con_lai = max(0.0, completion.deadline - loop.time())
                 if tran is None or con_lai < tran:
                     tran, ly_do = con_lai, "ket"
+            cho_nen = bg.due(completion, loop.time())
+            if cho_nen is not None and (tran is None or cho_nen[0] < tran):
+                tran, ly_do = cho_nen
             try:
                 msg = await asyncio.wait_for(agen.__anext__(), timeout=tran)
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
+                if ly_do == "bg_nudge":
+                    bg.nudge()
+                    await client.query(claude_bg_wait.BG_NUDGE)
+                    agen = client.receive_response().__aiter__()
+                    continue
+                if ly_do == "bg":
+                    yield {"type": "text", "content": bg.gave_up_text()}
+                    linger = bool(completion.tasks)
+                    break
                 if ly_do == "ket":
                     print(f"[claude completion] tag={cli.tag} session={cli.session_id} "
                           f"end_turn without result after {RESULT_IDLE}s", file=sys.stderr)
@@ -405,6 +524,8 @@ async def _query(cli, prompt, key: str, allow_warm: bool) -> AsyncIterator[dict]
                 yield {"type": "error", "content": err}
                 break
             got_any = True
+            if bg.observe(msg):
+                yield {"type": "text", "content": "\n\n"}
             events, sid = eng.map_message(msg)
             if sid:
                 if sid != cli.session_id and cli.javis_vault:
@@ -423,24 +544,36 @@ async def _query(cli, prompt, key: str, allow_warm: bool) -> AsyncIterator[dict]
                     tools_running = max(0, tools_running - 1)
                 elif ev.get("resume_failed"):
                     cli.session_id = None
-                yield ev
+                yield bg.merge(ev)
             completion.observe(msg, tools_running, loop.time())
+            if isinstance(msg, ResultMessage) and bg.keep_going(msg, completion, loop.time()):
+                agen = client.receive_response().__aiter__()
+                continue
             if isinstance(msg, ResultMessage):
                 # Reusable only in a known state: a good result, nothing still running in the background.
                 clean = (not getattr(msg, "is_error", False) and bool(cli.session_id) and not auth_race
                          and not completion.tasks and not completion.untracked_work)
+                linger = bool(completion.tasks) and not getattr(msg, "is_error", False)
                 break
     except _WarmStartFailed:
-        clean = False
+        clean = linger = False
         raise
     except Exception as e:
+        linger = False
+        clean = False
+        if cli.session_id and resume_lost(str(e), cli._stderr_tail):
+            cli.session_id = None   # 07/11/2026: the thread is not in this account's folder, prime a new one
+            yield resume_lost_event()
+            return
         chan_doan = None
         if "Control request timeout: initialize" in str(e):
             chan_doan = cli._startup_diagnosis(started)
             print(f"[claude init timeout] tag={cli.tag} sau={time.time() - started:.0f}s chan_doan={chan_doan}",
                   file=sys.stderr)
         clean = False
-        yield {"type": "error", "content": eng.loi_de_hieu(e, tran_init, chan_doan)}
+        import claude_exit_reason   # 12/11/2026: an exit code names the reason `claude` printed
+        yield claude_exit_reason.rewrite({"type": "error", "content": eng.loi_de_hieu(e, tran_init, chan_doan)},
+                                         cli._stderr_tail)
     finally:
         if handle is not None and handle.client is not None:
             with eng._LOCK:
@@ -464,6 +597,10 @@ async def _query(cli, prompt, key: str, allow_warm: bool) -> AsyncIterator[dict]
                         warm_pool.POOL.release(new)
                     else:
                         await handle.close()
+            elif linger and handle.alive():
+                if slot is not None:
+                    warm_pool.POOL.detach(slot)
+                _linger(handle, completion)
             elif slot is not None:
                 warm_pool.POOL.release(slot, keep=False)
             else:
